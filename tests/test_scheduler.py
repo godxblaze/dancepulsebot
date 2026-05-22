@@ -19,7 +19,7 @@ class FakeBot:
         self.sent: list[SimpleNamespace] = []
         self._mid = 1000
 
-    async def send_message(self, chat_id, text, reply_markup=None):
+    async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
         self._mid += 1
         msg = SimpleNamespace(
             chat_id=chat_id, text=text, reply_markup=reply_markup, message_id=self._mid

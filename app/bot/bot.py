@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.handlers import recruit, student, survey, teacher
@@ -12,10 +10,7 @@ from app.core.config import settings
 def build_bot() -> Bot:
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is empty — set it in .env")
-    return Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    return Bot(token=settings.bot_token)
 
 
 def build_dispatcher() -> Dispatcher:

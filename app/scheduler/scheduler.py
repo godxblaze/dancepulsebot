@@ -6,6 +6,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.keyboards import attendance_keyboard, support_confirm_keyboard
@@ -47,7 +48,10 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
     for p in members:
         try:
             msg = await bot.send_message(
-                p.tg_user_id, text, reply_markup=attendance_keyboard(survey_id)
+                p.tg_user_id,
+                text,
+                reply_markup=attendance_keyboard(survey_id),
+                parse_mode=ParseMode.HTML,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to send survey to tg_user_id=%s: %s", p.tg_user_id, e)
@@ -91,7 +95,11 @@ async def _maybe_send_summary(
     if teacher_tg is None:
         return
     try:
-        await bot.send_message(teacher_tg, _format_summary(group, lesson_at, summary))
+        await bot.send_message(
+            teacher_tg,
+            _format_summary(group, lesson_at, summary),
+            parse_mode=ParseMode.HTML,
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("Failed to send auto-summary to teacher %s: %s", teacher_tg, e)
         return  # not marked — next tick retries
@@ -145,7 +153,10 @@ async def _maybe_recruit(
     )
     try:
         await bot.send_message(
-            teacher_tg, text, reply_markup=support_confirm_keyboard(call_id)
+            teacher_tg,
+            text,
+            reply_markup=support_confirm_keyboard(call_id),
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)

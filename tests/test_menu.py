@@ -13,9 +13,11 @@ class FakeMessage:
             id=user_id, full_name=full_name, username="user"
         )
         self.replies: list[str] = []
+        self.markups: list = []
 
     async def answer(self, text: str, **kwargs) -> None:
         self.replies.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
 
 
 async def test_start_new_user_becomes_teacher(db) -> None:
@@ -24,6 +26,7 @@ async def test_start_new_user_becomes_teacher(db) -> None:
     async with session_scope() as s:
         assert await teachers.get_by_tg_id(s, 10) is not None
     assert any("Dance Pulse" in r for r in msg.replies)
+    assert msg.markups[-1] is not None  # teacher menu keyboard attached
 
 
 async def test_start_known_teacher_shows_menu(db) -> None:
@@ -32,6 +35,7 @@ async def test_start_known_teacher_shows_menu(db) -> None:
     msg = FakeMessage(user_id=10)
     await cmd_start(msg)
     assert any("Dance Pulse" in r for r in msg.replies)
+    assert msg.markups[-1] is not None  # teacher menu keyboard attached
 
 
 async def test_start_student_sees_home_not_teacher(db) -> None:

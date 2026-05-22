@@ -6,6 +6,7 @@ from datetime import timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -135,7 +136,7 @@ async def cmd_today(message: Message) -> None:
     if not blocks:
         await message.answer("На сегодня и завтра занятий нет.")
     else:
-        await message.answer("\n\n".join(blocks))
+        await message.answer("\n\n".join(blocks), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("stats"))
@@ -176,7 +177,7 @@ async def cmd_stats(message: Message) -> None:
                 lines.append(f"средний отклик: <b>{pct}%</b>")
             blocks.append("\n".join(lines))
 
-    await message.answer("\n\n".join(blocks))
+    await message.answer("\n\n".join(blocks), parse_mode=ParseMode.HTML)
 
 
 # ── new group wizard ─────────────────────────────────────────────────

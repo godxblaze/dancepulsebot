@@ -9,11 +9,19 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
+from app.bot.handlers.student import show_student_home
 from app.bot.keyboards import (
+    MENU_GROUPS,
+    MENU_NEWGROUP,
+    MENU_POOL,
+    MENU_STATS,
+    MENU_TEXTS,
+    MENU_TODAY,
     confirm_delete_keyboard,
     group_actions_keyboard,
     groups_keyboard,
     pool_keyboard,
+    teacher_menu_keyboard,
     weekdays_keyboard,
 )
 from app.bot.states import NewGroup
@@ -59,10 +67,25 @@ async def cmd_start(message: Message) -> None:
     tg = message.from_user
     if not tg:
         return
-    full_name = tg.full_name or tg.username or f"id{tg.id}"
     async with session_scope() as s:
-        await teachers_svc.get_or_create(s, tg.id, tg.username, full_name)
-    await message.answer(f"Привет, {full_name}!\n\n{_HELP}")
+        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        is_student = teacher is None and (
+            await persons_svc.find_by_tg(s, tg.id) is not None
+        )
+        if teacher is None and not is_student:
+            await teachers_svc.get_or_create(
+                s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
+            )
+    if is_student:
+        await show_student_home(message)
+        return
+    await message.answer(
+        "💓 Dance Pulse\n\n"
+        "Я опрашиваю учеников перед каждым занятием и сам собираю саппортов, "
+        "когда в паре перекос.\n\n"
+        "Всё — кнопками меню снизу 👇",
+        reply_markup=teacher_menu_keyboard(),
+    )
 
 
 @router.message(Command("help"))
@@ -71,6 +94,7 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("today"))
+@router.message(F.text == MENU_TODAY)
 async def cmd_today(message: Message) -> None:
     tg = message.from_user
     if not tg:
@@ -113,6 +137,7 @@ async def cmd_today(message: Message) -> None:
 
 
 @router.message(Command("stats"))
+@router.message(F.text == MENU_STATS)
 async def cmd_stats(message: Message) -> None:
     tg = message.from_user
     if not tg:
@@ -149,12 +174,13 @@ async def cmd_stats(message: Message) -> None:
 
 
 @router.message(Command("newgroup"))
+@router.message(F.text == MENU_NEWGROUP)
 async def newgroup_start(message: Message, state: FSMContext) -> None:
     await state.set_state(NewGroup.name)
     await message.answer("Название новой группы? (например: Hip-Hop начинающие)")
 
 
-@router.message(NewGroup.name, F.text)
+@router.message(NewGroup.name, F.text, ~F.text.in_(MENU_TEXTS))
 async def newgroup_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if not name:
@@ -194,7 +220,7 @@ async def newgroup_weekdays(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
-@router.message(NewGroup.lesson_time, F.text)
+@router.message(NewGroup.lesson_time, F.text, ~F.text.in_(MENU_TEXTS))
 async def newgroup_time(message: Message, state: FSMContext, bot: Bot) -> None:
     raw = (message.text or "").strip()
     m = _TIME_RE.match(raw)
@@ -252,6 +278,7 @@ async def _send_groups_list(target: Message) -> None:
 
 
 @router.message(Command("groups"))
+@router.message(F.text == MENU_GROUPS)
 async def cmd_groups(message: Message) -> None:
     await _send_groups_list(message)
 
@@ -378,6 +405,7 @@ async def cb_group_delete(call: CallbackQuery) -> None:
 
 
 @router.message(Command("pool"))
+@router.message(F.text == MENU_POOL)
 async def cmd_pool(message: Message) -> None:
     tg = message.from_user
     if not tg:

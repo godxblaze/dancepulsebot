@@ -15,6 +15,23 @@ async def get_person(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def find_by_tg(session: AsyncSession, tg_user_id: int) -> Person | None:
+    """Any person with this telegram id, regardless of teacher."""
+    stmt = select(Person).where(Person.tg_user_id == tg_user_id).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def person_groups(session: AsyncSession, person_id: int) -> list[Group]:
+    """Groups a person is a member of."""
+    stmt = (
+        select(Group)
+        .join(Membership, Membership.group_id == Group.id)
+        .where(Membership.person_id == person_id)
+        .order_by(Group.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def _get_or_create_person(
     session: AsyncSession,
     teacher_id: int,

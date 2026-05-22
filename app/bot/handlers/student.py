@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject, CommandStart
@@ -13,6 +14,7 @@ from app.db.models import Gender, Group, Person, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services.schedule import format_weekdays, local_now, next_lesson_at
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -158,4 +160,52 @@ async def cb_optin_toggle(call: CallbackQuery) -> None:
         )
     await call.answer(
         "🆘 Спасибо! Ты в пуле саппортов." if new_value else "Ок, вышел из пула."
+    )
+
+
+def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:
+    """The soonest upcoming lesson across the given groups."""
+    now = local_now()
+    best: tuple[Group, datetime] | None = None
+    for g in groups:
+        dt = next_lesson_at(g.weekdays, g.lesson_time, now)
+        if dt is not None and (best is None or dt < best[1]):
+            best = (g, dt)
+    return best
+
+
+async def show_student_home(message: Message) -> None:
+    """Personal screen for a student: their groups, next lesson, support toggle."""
+    tg = message.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        person = await persons_svc.find_by_tg(s, tg.id)
+        if person is None:
+            await message.answer(
+                "Ты ещё не записан ни в одну группу. "
+                "Попроси у преподавателя ссылку-приглашение или QR-код."
+            )
+            return
+        groups = await persons_svc.person_groups(s, person.id)
+        name = person.full_name
+        person_id = person.id
+        in_pool = person.in_open_pool
+
+    lines = [f"👋 Привет, {name}!"]
+    if groups:
+        lines.append("\nТвои группы:")
+        for g in groups:
+            lines.append(
+                f"• «{g.name}» — {format_weekdays(g.weekdays)} в {g.lesson_time}"
+            )
+        nearest = _nearest_lesson(groups)
+        if nearest is not None:
+            g, dt = nearest
+            lines.append(f"\n📅 Ближайшее: «{g.name}» — {dt:%d.%m} в {dt:%H:%M}")
+    else:
+        lines.append("\nТы пока не записан ни в одну группу.")
+    lines.append("\nПеред каждым занятием я спрошу, придёшь ли ты.")
+    await message.answer(
+        "\n".join(lines), reply_markup=optin_keyboard(person_id, in_pool)
     )

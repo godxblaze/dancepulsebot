@@ -119,3 +119,26 @@ async def test_delete_group_cascades(db) -> None:
         assert await surveys.get_survey(s, sid) is None
         # the person is teacher-scoped — survives the group deletion
         assert await s.get(Person, pid) is not None
+
+
+async def test_find_by_tg(db) -> None:
+    async with session_scope() as s:
+        t = await teachers.get_or_create(s, 1, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        await persons.add_to_group(s, g, 777, "u", "Person")
+    async with session_scope() as s:
+        assert await persons.find_by_tg(s, 777) is not None
+        assert await persons.find_by_tg(s, 888) is None
+
+
+async def test_person_groups(db) -> None:
+    async with session_scope() as s:
+        t = await teachers.get_or_create(s, 1, "t", "T")
+        g1 = await groups.create_group(s, t.id, "G1", "0", "19:00", 18)
+        g2 = await groups.create_group(s, t.id, "G2", "2", "20:00", 18)
+        p, _ = await persons.add_to_group(s, g1, 10, "u", "P")
+        await persons.add_to_group(s, g2, 10, "u", "P")
+        pid = p.id
+    async with session_scope() as s:
+        names = {g.name for g in await persons.person_groups(s, pid)}
+    assert names == {"G1", "G2"}

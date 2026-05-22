@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db.models import Group, Person, SupportScope
@@ -139,4 +144,25 @@ def support_ask_keyboard(call_id: int) -> InlineKeyboardMarkup:
                 ),
             ]
         ]
+    )
+
+
+MENU_GROUPS = "📋 Мои группы"
+MENU_TODAY = "📅 Сегодня"
+MENU_STATS = "📊 Статистика"
+MENU_POOL = "🆘 Саппорты"
+MENU_NEWGROUP = "➕ Новая группа"
+MENU_TEXTS = frozenset({MENU_GROUPS, MENU_TODAY, MENU_STATS, MENU_POOL, MENU_NEWGROUP})
+
+
+def teacher_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent bottom menu for the teacher — instead of typing slash-commands."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
+            [KeyboardButton(text=MENU_STATS), KeyboardButton(text=MENU_POOL)],
+            [KeyboardButton(text=MENU_NEWGROUP)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
     )

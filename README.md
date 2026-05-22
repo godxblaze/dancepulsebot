@@ -93,7 +93,14 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 pytest tests/
 ```
 
-`test_schedule.py` — unit на расчёт следующего занятия (граничные случаи). `test_smoke.py` — без БД. `test_surveys.py` — интеграционные на ядро опросов (временная БД через [conftest.py](tests/conftest.py)).
+- `test_schedule.py` — расчёт следующего занятия (граничные случаи).
+- `test_smoke.py` — без БД (генерация join-кодов).
+- `test_surveys.py` — ядро опросов: создание, ответы, сводка, закрытие.
+- `test_services.py` — CRUD преподавателей / групп / учеников, каскадное удаление группы.
+- `test_scheduler.py` — `tick`: рассылка опросов и авто-сводок, окно `lead_hours`, идемпотентность.
+- `test_handlers.py` / `test_teacher_handlers.py` — хэндлеры бота: ответ на опрос, вступление по ссылке, `/today`, `/stats`, мастер создания группы.
+
+Тесты с БД используют временную базу через [conftest.py](tests/conftest.py).
 
 ## Контроль качества
 

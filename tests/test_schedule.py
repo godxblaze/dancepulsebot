@@ -35,3 +35,9 @@ def test_next_lesson_wraps_week() -> None:
 
 def test_next_lesson_no_weekdays() -> None:
     assert next_lesson_at("", "19:00", datetime(2026, 5, 21, 10, 0)) is None
+
+
+def test_next_lesson_skips_exact_now() -> None:
+    # A lesson exactly at `now` is not strictly after it -> next week.
+    now = datetime(2026, 5, 25, 19, 0)  # Monday 19:00
+    assert next_lesson_at("0", "19:00", now) == datetime(2026, 6, 1, 19, 0)

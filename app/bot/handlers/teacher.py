@@ -7,7 +7,7 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
@@ -71,14 +71,12 @@ async def cmd_start(message: Message) -> None:
         return
     async with session_scope() as s:
         teacher = await teachers_svc.get_by_tg_id(s, tg.id)
-        is_student = teacher is None and (
-            await persons_svc.find_by_tg(s, tg.id) is not None
-        )
-        if teacher is None and not is_student:
-            await teachers_svc.get_or_create(
+        if teacher is None and tg.id == settings.developer_id:
+            teacher = await teachers_svc.get_or_create(
                 s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
             )
-    if is_student:
+    if teacher is None:
+        # everyone is a student by default — teacher status is granted via /grant
         await show_student_home(message)
         return
     await message.answer(
@@ -93,6 +91,37 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(_HELP)
+
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    if message.from_user:
+        await message.answer(f"Твой Telegram ID: {message.from_user.id}")
+
+
+@router.message(Command("grant"))
+async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
+    """Developer-only — grant teacher status to a telegram id."""
+    tg = message.from_user
+    if not tg or tg.id != settings.developer_id:
+        return  # only the developer; silent for everyone else
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Использование: /grant <id> — число (узнать: /myid).")
+        return
+    target_id = int(arg)
+    async with session_scope() as s:
+        if await teachers_svc.get_by_tg_id(s, target_id) is not None:
+            await message.answer(f"id {target_id} — уже преподаватель.")
+            return
+        await teachers_svc.get_or_create(s, target_id, None, f"id{target_id}")
+    await message.answer(f"✅ id {target_id} теперь преподаватель.")
+    try:
+        await bot.send_message(
+            target_id, "✅ Тебе выдан статус преподавателя! Нажми /start."
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not notify new teacher %s: %s", target_id, e)
 
 
 @router.message(Command("today"))

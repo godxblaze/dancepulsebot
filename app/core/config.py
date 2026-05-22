@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Moscow"
     default_lead_hours: int = 18
     log_level: str = "INFO"
+    developer_id: int = 0  # Telegram id allowed to grant teacher status via /grant
 
     @property
     def database_url(self) -> str:

@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -183,8 +184,12 @@ async def show_student_home(message: Message) -> None:
         person = await persons_svc.find_by_tg(s, tg.id)
         if person is None:
             await message.answer(
-                "Ты ещё не записан ни в одну группу. "
-                "Попроси у преподавателя ссылку-приглашение или QR-код."
+                "👋 Это бот для танцевальных школ.\n\n"
+                "Ученики подключаются по ссылке или QR-коду от преподавателя — "
+                "попроси у своего.\n\n"
+                f"Если ты преподаватель — передай разработчику свой ID: "
+                f"<code>{tg.id}</code>",
+                parse_mode=ParseMode.HTML,
             )
             return
         groups = await persons_svc.person_groups(s, person.id)

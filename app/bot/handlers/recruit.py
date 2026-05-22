@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery
 
 from app.bot.keyboards import support_ask_keyboard
-from app.db.models import SupportCallStatus, SupportScope, Teacher
+from app.db.models import SupportCall, SupportCallStatus, SupportScope, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -15,6 +15,16 @@ from app.services import surveys as surveys_svc
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+async def _owner_tg(session, sc: SupportCall) -> int | None:
+    """Telegram id of the teacher who owns the lesson this call belongs to."""
+    survey = await surveys_svc.get_survey(session, sc.survey_id)
+    group = await groups_svc.get_group(session, survey.group_id) if survey else None
+    if group is None:
+        return None
+    teacher = await session.get(Teacher, group.teacher_id)
+    return teacher.tg_user_id if teacher else None
 
 
 async def broadcast_support_call(bot: Bot, call_id: int) -> None:
@@ -73,6 +83,9 @@ async def cb_support_confirm_yes(call: CallbackQuery, bot: Bot) -> None:
         if sc is None or sc.status != SupportCallStatus.pending:
             await call.answer("Уже обработано", show_alert=True)
             return
+        if await _owner_tg(s, sc) != call.from_user.id:
+            await call.answer()
+            return
         await supports_svc.set_status(s, call_id, SupportCallStatus.open)
     if call.message:
         await call.message.edit_text(
@@ -88,6 +101,9 @@ async def cb_support_confirm_no(call: CallbackQuery) -> None:
     async with session_scope() as s:
         sc = await supports_svc.get_call(s, call_id)
         if sc is None or sc.status != SupportCallStatus.pending:
+            await call.answer()
+            return
+        if await _owner_tg(s, sc) != call.from_user.id:
             await call.answer()
             return
         await supports_svc.set_status(s, call_id, SupportCallStatus.closed)

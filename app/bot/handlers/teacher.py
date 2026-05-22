@@ -19,7 +19,7 @@ from app.bot.keyboards import (
 from app.bot.states import NewGroup
 from app.bot.utils import get_bot_username, qr_png
 from app.core.config import settings
-from app.db.models import Group, Person
+from app.db.models import Group, Person, SupportScope
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -385,7 +385,7 @@ async def cmd_pool(message: Message) -> None:
     async with session_scope() as s:
         teacher = await teachers_svc.get_by_tg_id(s, tg.id)
         people = await persons_svc.list_persons(s, teacher.id) if teacher else []
-        scope = teacher.support_scope if teacher else None
+        scope = teacher.support_scope if teacher else SupportScope.own_and_open
     if not people:
         await message.answer(
             "Пул саппортов пуст — сюда попадут ученики, когда запишутся. "

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app.bot.handlers.recruit import (
+    broadcast_support_call,
     cb_support_confirm_no,
     cb_support_confirm_yes,
     cb_support_join,
@@ -254,6 +255,33 @@ async def test_confirm_no_closes(db) -> None:
     async with session_scope() as s:
         call = await supports.get_call(s, cid)
         assert call is not None and call.status == SupportCallStatus.closed
+
+
+async def test_confirm_rejects_non_teacher(db) -> None:
+    cid = await _pending_call_with_support()
+    bot = FakeBot()
+    # someone who is not the teacher must not be able to confirm the call
+    await cb_support_confirm_yes(FakeCallback(f"sup:yes:{cid}", user_id=999), bot)
+    async with session_scope() as s:
+        call = await supports.get_call(s, cid)
+        assert call is not None and call.status == SupportCallStatus.pending
+    assert bot.sent == []
+
+
+async def test_broadcast_empty_pool_notifies_teacher(db) -> None:
+    async with session_scope() as s:
+        t = await teachers.get_or_create(s, 100, "t", "Препод")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.open
+        )
+        cid = call.id
+    bot = FakeBot()
+    await broadcast_support_call(bot, cid)
+    assert any(chat == 100 and "вручную" in text for chat, text in bot.sent)
 
 
 async def test_support_join_records_claim_and_notifies_teacher(db) -> None:

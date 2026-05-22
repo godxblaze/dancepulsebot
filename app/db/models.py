@@ -84,6 +84,8 @@ class Person(Base):
     gender: Mapped[Gender | None] = mapped_column(
         Enum(Gender, name="gender"), nullable=True
     )
+    in_open_pool: Mapped[bool] = mapped_column(Boolean, default=False)
+    in_teacher_pool: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

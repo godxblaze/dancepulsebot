@@ -13,12 +13,13 @@ from app.bot.keyboards import (
     confirm_delete_keyboard,
     group_actions_keyboard,
     groups_keyboard,
+    pool_keyboard,
     weekdays_keyboard,
 )
 from app.bot.states import NewGroup
 from app.bot.utils import get_bot_username, qr_png
 from app.core.config import settings
-from app.db.models import Group
+from app.db.models import Group, Person
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -40,6 +41,7 @@ _HELP = (
     "/groups — мои группы\n"
     "/today — сводка по ближайшим занятиям\n"
     "/stats — посещаемость за последние занятия\n"
+    "/pool — пул саппортов на подмену\n"
     "/help — эта справка"
 )
 
@@ -369,4 +371,43 @@ async def cb_group_delete(call: CallbackQuery) -> None:
         name = group.name
         await groups_svc.delete_group(s, group)
     await call.message.edit_text(f"🗑 Группа «{name}» удалена.")
+    await call.answer()
+
+
+# ── support pool ─────────────────────────────────────────────────────
+
+
+@router.message(Command("pool"))
+async def cmd_pool(message: Message) -> None:
+    tg = message.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        people = await persons_svc.list_persons(s, teacher.id) if teacher else []
+    if not people:
+        await message.answer(
+            "Пул саппортов пуст — сюда попадут ученики, когда запишутся. "
+            "Потом отметишь, кого можно звать на подмену."
+        )
+        return
+    await message.answer(
+        "🆘 Личный пул саппортов — отметь, кого можно звать выручать другие группы:",
+        reply_markup=pool_keyboard(people),
+    )
+
+
+@router.callback_query(F.data.startswith("tpool:"))
+async def cb_pool_toggle(call: CallbackQuery) -> None:
+    person_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
+        person = await s.get(Person, person_id)
+        if teacher is None or person is None or person.teacher_id != teacher.id:
+            await call.answer("Не найдено", show_alert=True)
+            return
+        await persons_svc.set_teacher_pool(s, person_id, not person.in_teacher_pool)
+        people = await persons_svc.list_persons(s, teacher.id)
+    if call.message:
+        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people))
     await call.answer()

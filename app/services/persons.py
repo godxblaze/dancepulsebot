@@ -47,6 +47,40 @@ async def set_gender(session: AsyncSession, person_id: int, gender: Gender) -> N
         await session.flush()
 
 
+async def set_open_pool(session: AsyncSession, person_id: int, value: bool) -> None:
+    person = await session.get(Person, person_id)
+    if person is not None:
+        person.in_open_pool = value
+        await session.flush()
+
+
+async def set_teacher_pool(session: AsyncSession, person_id: int, value: bool) -> None:
+    person = await session.get(Person, person_id)
+    if person is not None:
+        person.in_teacher_pool = value
+        await session.flush()
+
+
+async def list_persons(session: AsyncSession, teacher_id: int) -> list[Person]:
+    """Everyone in a teacher's audience, ordered by name."""
+    stmt = (
+        select(Person)
+        .where(Person.teacher_id == teacher_id)
+        .order_by(Person.full_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def teacher_pool(session: AsyncSession, teacher_id: int) -> list[Person]:
+    """Persons the teacher added to their personal support pool."""
+    stmt = (
+        select(Person)
+        .where(Person.teacher_id == teacher_id, Person.in_teacher_pool.is_(True))
+        .order_by(Person.full_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def add_to_group(
     session: AsyncSession,
     group: Group,

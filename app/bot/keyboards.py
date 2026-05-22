@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Group
+from app.db.models import Group, Person
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -85,3 +85,25 @@ def gender_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def optin_keyboard(person_id: int, in_pool: bool) -> InlineKeyboardMarkup:
+    text = (
+        "✅ Ты в пуле саппортов — выйти"
+        if in_pool
+        else "🆘 Иногда выручать другие группы"
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=f"optin:{person_id}")]
+        ]
+    )
+
+
+def pool_keyboard(persons: list[Person]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for p in persons:
+        mark = "✅" if p.in_teacher_pool else "☐"
+        kb.button(text=f"{mark} {p.full_name}", callback_data=f"tpool:{p.id}")
+    kb.adjust(1)
+    return kb.as_markup()

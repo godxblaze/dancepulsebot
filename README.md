@@ -93,7 +93,16 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 pytest tests/
 ```
 
-`test_schedule.py` — unit на расчёт следующего занятия (граничные случаи). `test_smoke.py` — без БД.
+`test_schedule.py` — unit на расчёт следующего занятия (граничные случаи). `test_smoke.py` — без БД. `test_surveys.py` — интеграционные на ядро опросов (временная БД через [conftest.py](tests/conftest.py)).
+
+## Контроль качества
+
+Проект настроен на автоматическую проверку при разработке через Claude Code:
+
+- **Stop-hook** ([.claude/settings.json](.claude/settings.json)) — перед завершением каждого ответа гоняется `ruff` + `pytest` ([scripts/check.ps1](scripts/check.ps1)); красные проверки блокируют завершение.
+- **Субагент-ревьюер** ([.claude/agents/reviewer.md](.claude/agents/reviewer.md)) — независимо проверяет крупные куски кода против требований и принципов проекта.
+
+Прогнать проверку вручную: `powershell -File scripts/check.ps1`.
 
 ## Roadmap
 

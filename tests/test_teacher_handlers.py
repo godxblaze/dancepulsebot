@@ -21,7 +21,7 @@ from app.bot.handlers.teacher import (
 from app.bot.states import NewGroup
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, students, surveys, teachers
+from app.services import groups, persons, surveys, teachers
 
 # ── fakes ────────────────────────────────────────────────────────────
 
@@ -117,12 +117,12 @@ async def test_today_lesson_today_with_survey(db, freeze_today) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 10, "t", "T")
         g = await groups.create_group(s, t.id, "Хип-хоп", "0", "19:00", 18)
-        st, _ = await students.add_student(s, g.id, 50, "u", "Ученик")
+        p, _ = await persons.add_to_group(s, g, 50, "u", "Ученик")
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, datetime(2026, 5, 25, 19, 0)
         )
-        await surveys.ensure_responses(s, survey.id, [st.id])
-        await surveys.record_answer(s, survey.id, st.id, Answer.yes)
+        await surveys.ensure_responses(s, survey.id, [p.id])
+        await surveys.record_answer(s, survey.id, p.id, Answer.yes)
     freeze_today(datetime(2026, 5, 25, 9, 0))  # Monday, lesson today
     msg = FakeMessage(user_id=10)
     await cmd_today(msg)
@@ -152,13 +152,13 @@ async def test_stats_with_closed_surveys(db) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 10, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
-        st, _ = await students.add_student(s, g.id, 50, "u", "Ученик")
+        p, _ = await persons.add_to_group(s, g, 50, "u", "Ученик")
         for day in (11, 18):
             survey, _ = await surveys.get_or_create_survey(
                 s, g.id, SurveyKind.attendance, datetime(2026, 5, day, 19, 0)
             )
-            await surveys.ensure_responses(s, survey.id, [st.id])
-            await surveys.record_answer(s, survey.id, st.id, Answer.yes)
+            await surveys.ensure_responses(s, survey.id, [p.id])
+            await surveys.record_answer(s, survey.id, p.id, Answer.yes)
         await surveys.close_past_surveys(s, datetime(2026, 5, 20, 0, 0))
     msg = FakeMessage(user_id=10)
     await cmd_stats(msg)
@@ -264,17 +264,17 @@ async def test_wizard_done_with_no_weekdays_blocked(db) -> None:
 # ── group-card callbacks ─────────────────────────────────────────────
 
 
-async def _make_group_with_students(owner_tg: int = 10, n: int = 2) -> int:
+async def _make_group_with_members(owner_tg: int = 10, n: int = 2) -> int:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, owner_tg, "t", "Owner")
         g = await groups.create_group(s, t.id, "Сальса", "0,2", "19:00", 18)
         for i in range(n):
-            await students.add_student(s, g.id, 600 + i, f"u{i}", f"Ученик {i}")
+            await persons.add_to_group(s, g, 600 + i, f"u{i}", f"Ученик {i}")
         return g.id
 
 
 async def test_cb_group_card_shows_student_count(db) -> None:
-    gid = await _make_group_with_students(n=2)
+    gid = await _make_group_with_members(n=2)
     call = FakeCallback(f"grp:{gid}", 10)
     await cb_group_card(call)
     assert call.message.text is not None
@@ -282,7 +282,7 @@ async def test_cb_group_card_shows_student_count(db) -> None:
 
 
 async def test_cb_group_card_rejects_non_owner(db) -> None:
-    gid = await _make_group_with_students(owner_tg=10)
+    gid = await _make_group_with_members(owner_tg=10)
     call = FakeCallback(f"grp:{gid}", 999)  # not the owner
     await cb_group_card(call)
     assert call.message.text is None  # card not rendered
@@ -290,14 +290,14 @@ async def test_cb_group_card_rejects_non_owner(db) -> None:
 
 
 async def test_cb_group_students_lists_names(db) -> None:
-    gid = await _make_group_with_students(n=2)
+    gid = await _make_group_with_members(n=2)
     call = FakeCallback(f"grpstu:{gid}", 10)
     await cb_group_students(call)
     assert "Ученик 0" in call.message.text and "Ученик 1" in call.message.text
 
 
 async def test_cb_group_students_empty(db) -> None:
-    gid = await _make_group_with_students(n=0)
+    gid = await _make_group_with_members(n=0)
     call = FakeCallback(f"grpstu:{gid}", 10)
     await cb_group_students(call)
     assert "пока нет учеников" in call.message.text
@@ -320,17 +320,17 @@ async def test_cb_group_link_contains_join_code(db, monkeypatch) -> None:
 
 
 async def test_cb_group_delete_removes_group_and_students(db) -> None:
-    gid = await _make_group_with_students(n=2)
+    gid = await _make_group_with_members(n=2)
     call = FakeCallback(f"grpdelok:{gid}", 10)
     await cb_group_delete(call)
     assert "удалена" in call.message.text
     async with session_scope() as s:
         assert await groups.get_group(s, gid) is None
-        assert await students.count_students(s, gid) == 0  # FK cascade
+        assert await persons.count_members(s, gid) == 0  # FK cascade
 
 
 async def test_cb_group_delete_rejects_non_owner(db) -> None:
-    gid = await _make_group_with_students(owner_tg=10)
+    gid = await _make_group_with_members(owner_tg=10)
     call = FakeCallback(f"grpdelok:{gid}", 999)
     await cb_group_delete(call)
     assert any("не найдена" in a for a in call.answers)

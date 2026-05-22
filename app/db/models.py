@@ -60,15 +60,36 @@ class Group(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class Student(Base):
-    __tablename__ = "students"
-    __table_args__ = (UniqueConstraint("group_id", "tg_user_id", name="uq_students_group_tg"),)
+class Person(Base):
+    """A human in a teacher's audience — a student of groups and/or a support.
+
+    One row per (teacher, telegram account); group membership lives in Membership.
+    """
+
+    __tablename__ = "persons"
+    __table_args__ = (
+        UniqueConstraint("teacher_id", "tg_user_id", name="uq_persons_teacher_tg"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
     tg_user_id: Mapped[int] = mapped_column(BigInteger)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Membership(Base):
+    """Links a person to a group they regularly attend (many-to-many)."""
+
+    __tablename__ = "memberships"
+    __table_args__ = (
+        UniqueConstraint("person_id", "group_id", name="uq_memberships_person_group"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -92,12 +113,12 @@ class Survey(Base):
 class Response(Base):
     __tablename__ = "responses"
     __table_args__ = (
-        UniqueConstraint("survey_id", "student_id", name="uq_responses_survey_student"),
+        UniqueConstraint("survey_id", "person_id", name="uq_responses_survey_person"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     survey_id: Mapped[int] = mapped_column(ForeignKey("surveys.id", ondelete="CASCADE"))
-    student_id: Mapped[int] = mapped_column(ForeignKey("students.id", ondelete="CASCADE"))
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
     answer: Mapped[Answer | None] = mapped_column(Enum(Answer, name="answer"), nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

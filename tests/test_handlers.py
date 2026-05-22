@@ -6,7 +6,7 @@ from app.bot.handlers.student import join_group
 from app.bot.handlers.survey import on_attendance
 from app.db.models import SurveyKind
 from app.db.session import session_scope
-from app.services import groups, students, surveys, teachers
+from app.services import groups, persons, surveys, teachers
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -41,23 +41,23 @@ class FakeMessage:
         self.replies.append(text)
 
 
-async def _survey_with_student() -> tuple[int, int]:
+async def _survey_with_member() -> tuple[int, int]:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 1, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
-        st, _ = await students.add_student(s, g.id, 700, "u", "Ученик")
+        p, _ = await persons.add_to_group(s, g, 700, "u", "Ученик")
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
         )
-        await surveys.ensure_responses(s, survey.id, [st.id])
-        return survey.id, st.id
+        await surveys.ensure_responses(s, survey.id, [p.id])
+        return survey.id, p.id
 
 
 # ── on_attendance ────────────────────────────────────────────────────
 
 
 async def test_attendance_answer_recorded(db) -> None:
-    survey_id, _ = await _survey_with_student()
+    survey_id, _ = await _survey_with_member()
     call = FakeCallback(f"att:{survey_id}:yes", user_id=700)
     await on_attendance(call)
     assert call.message.text is not None and "придёшь" in call.message.text
@@ -67,7 +67,7 @@ async def test_attendance_answer_recorded(db) -> None:
 
 
 async def test_attendance_rejects_non_member(db) -> None:
-    survey_id, _ = await _survey_with_student()
+    survey_id, _ = await _survey_with_member()
     call = FakeCallback(f"att:{survey_id}:yes", user_id=999)
     await on_attendance(call)
     assert call.answers and "Тебя нет" in call.answers[0][0]
@@ -77,7 +77,7 @@ async def test_attendance_rejects_non_member(db) -> None:
 
 
 async def test_attendance_rejects_closed_survey(db) -> None:
-    survey_id, _ = await _survey_with_student()
+    survey_id, _ = await _survey_with_member()
     async with session_scope() as s:
         await surveys.close_past_surveys(s, datetime(2030, 1, 1))
     call = FakeCallback(f"att:{survey_id}:yes", user_id=700)
@@ -86,7 +86,7 @@ async def test_attendance_rejects_closed_survey(db) -> None:
 
 
 async def test_attendance_unknown_survey(db) -> None:
-    await _survey_with_student()
+    await _survey_with_member()
     call = FakeCallback("att:99999:yes", user_id=700)
     await on_attendance(call)
     assert call.answers and "не найден" in call.answers[0][0]
@@ -104,7 +104,7 @@ async def test_join_group_success(db) -> None:
     await join_group(msg, SimpleNamespace(args=f"join_{code}"))
     assert any("записан" in r for r in msg.replies)
     async with session_scope() as s:
-        assert await students.count_students(s, gid) == 1
+        assert await persons.count_members(s, gid) == 1
 
 
 async def test_join_group_unknown_code(db) -> None:
@@ -122,5 +122,5 @@ async def test_join_group_idempotent(db) -> None:
     await join_group(msg, SimpleNamespace(args=f"join_{code}"))
     await join_group(msg, SimpleNamespace(args=f"join_{code}"))
     async with session_scope() as s:
-        assert await students.count_students(s, gid) == 1
+        assert await persons.count_members(s, gid) == 1
     assert any("уже в группе" in r for r in msg.replies)

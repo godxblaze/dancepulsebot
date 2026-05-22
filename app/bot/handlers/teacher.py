@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.db.models import Group
 from app.db.session import session_scope
 from app.services import groups as groups_svc
-from app.services import students as students_svc
+from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
 from app.services import teachers as teachers_svc
 from app.services.schedule import format_weekdays, local_now, next_lesson_at
@@ -274,7 +274,7 @@ async def cb_group_card(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        count = await students_svc.count_students(s, group_id)
+        count = await persons_svc.count_members(s, group_id)
         text = (
             f"📋 «{group.name}»\n"
             f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}\n"
@@ -293,10 +293,10 @@ async def cb_group_students(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        students = await students_svc.group_students(s, group_id)
-    if students:
-        lines = "\n".join(f"  • {st.full_name}" for st in students)
-        text = f"👥 Ученики «{group.name}» ({len(students)}):\n{lines}"
+        members = await persons_svc.group_members(s, group_id)
+    if members:
+        lines = "\n".join(f"  • {p.full_name}" for p in members)
+        text = f"👥 Ученики «{group.name}» ({len(members)}):\n{lines}"
     else:
         text = f"👥 В группе «{group.name}» пока нет учеников. Перешли им ссылку-приглашение."
     await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id))

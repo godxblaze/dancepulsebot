@@ -8,7 +8,7 @@ from aiogram.types import Message
 
 from app.db.session import session_scope
 from app.services import groups as groups_svc
-from app.services import students as students_svc
+from app.services import persons as persons_svc
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -36,12 +36,12 @@ async def join_group(message: Message, command: CommandObject) -> None:
         if group is None:
             await message.answer("Группа не найдена — возможно, ссылка устарела.")
             return
-        _, created = await students_svc.add_student(
-            s, group.id, tg.id, tg.username, full_name
+        _, joined = await persons_svc.add_to_group(
+            s, group, tg.id, tg.username, full_name
         )
         group_name = group.name
 
-    if created:
+    if joined:
         await message.answer(
             f"✅ Ты записан в группу «{group_name}».\n"
             f"Перед каждым занятием бот спросит, придёшь ли ты. Просто жми кнопку."

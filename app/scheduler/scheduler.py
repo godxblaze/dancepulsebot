@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.db.models import Group, SurveyKind, SurveyStatus, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
-from app.services import students as students_svc
+from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import local_now, next_lesson_at
 
@@ -27,12 +27,12 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
         )
         if not created:
             return  # already polled this lesson
-        students = await students_svc.group_students(s, group.id)
-        await surveys_svc.ensure_responses(s, survey.id, [st.id for st in students])
+        members = await persons_svc.group_members(s, group.id)
+        await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
         survey_id = survey.id
 
-    if not students:
-        log.info("Group «%s» has no students — survey %s is empty", group.name, survey_id)
+    if not members:
+        log.info("Group «%s» has no members — survey %s is empty", group.name, survey_id)
         return
 
     text = (
@@ -41,18 +41,18 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
         f"Придёшь?"
     )
     sent = 0
-    for st in students:
+    for p in members:
         try:
             msg = await bot.send_message(
-                st.tg_user_id, text, reply_markup=attendance_keyboard(survey_id)
+                p.tg_user_id, text, reply_markup=attendance_keyboard(survey_id)
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("Failed to send survey to tg_user_id=%s: %s", st.tg_user_id, e)
+            log.warning("Failed to send survey to tg_user_id=%s: %s", p.tg_user_id, e)
             continue
         async with session_scope() as s:
-            await surveys_svc.set_message_id(s, survey_id, st.id, msg.message_id)
+            await surveys_svc.set_message_id(s, survey_id, p.id, msg.message_id)
         sent += 1
-    log.info("Survey %s sent to %d/%d students of «%s»", survey_id, sent, len(students), group.name)
+    log.info("Survey %s sent to %d/%d members of «%s»", survey_id, sent, len(members), group.name)
 
 
 def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.SurveySummary) -> str:

@@ -1,9 +1,9 @@
-"""Unit tests for teacher / group / student CRUD services."""
+"""Unit tests for teacher / group / person CRUD services."""
 from datetime import datetime
 
-from app.db.models import SurveyKind
+from app.db.models import Person, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, students, surveys, teachers
+from app.services import groups, persons, surveys, teachers
 
 
 async def test_teacher_get_or_create_idempotent(db) -> None:
@@ -52,51 +52,70 @@ async def test_active_groups_excludes_inactive(db) -> None:
     assert [g.name for g in active] == ["On"]
 
 
-async def test_add_student_idempotent_and_updates(db) -> None:
+async def test_add_to_group_idempotent_and_updates(db) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 1, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
         gid = g.id
     async with session_scope() as s:
-        _, created1 = await students.add_student(s, gid, 10, "old", "Старое Имя")
-        assert created1
+        g = await groups.get_group(s, gid)
+        _, joined1 = await persons.add_to_group(s, g, 10, "old", "Старое Имя")
+        assert joined1
     async with session_scope() as s:
-        st2, created2 = await students.add_student(s, gid, 10, "new", "Новое Имя")
-        assert not created2
-        assert st2.full_name == "Новое Имя" and st2.tg_username == "new"
+        g = await groups.get_group(s, gid)
+        p2, joined2 = await persons.add_to_group(s, g, 10, "new", "Новое Имя")
+        assert not joined2  # already a member
+        assert p2.full_name == "Новое Имя" and p2.tg_username == "new"
     async with session_scope() as s:
-        assert await students.count_students(s, gid) == 1
+        assert await persons.count_members(s, gid) == 1
 
 
-async def test_group_students_ordered_by_name(db) -> None:
+async def test_person_joins_two_groups(db) -> None:
+    """One human in two groups = one Person, two memberships."""
+    async with session_scope() as s:
+        t = await teachers.get_or_create(s, 1, "t", "T")
+        g1 = await groups.create_group(s, t.id, "G1", "0", "19:00", 18)
+        g2 = await groups.create_group(s, t.id, "G2", "2", "20:00", 18)
+        p1, _ = await persons.add_to_group(s, g1, 10, "u", "Универсал")
+        p2, _ = await persons.add_to_group(s, g2, 10, "u", "Универсал")
+        assert p1.id == p2.id  # same Person, not duplicated
+        g1id, g2id = g1.id, g2.id
+    async with session_scope() as s:
+        assert await persons.count_members(s, g1id) == 1
+        assert await persons.count_members(s, g2id) == 1
+
+
+async def test_group_members_ordered_by_name(db) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 1, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
-        await students.add_student(s, g.id, 1, "a", "Яна")
-        await students.add_student(s, g.id, 2, "b", "Аня")
-        await students.add_student(s, g.id, 3, "c", "Маша")
+        await persons.add_to_group(s, g, 1, "a", "Яна")
+        await persons.add_to_group(s, g, 2, "b", "Аня")
+        await persons.add_to_group(s, g, 3, "c", "Маша")
         gid = g.id
     async with session_scope() as s:
-        names = [st.full_name for st in await students.group_students(s, gid)]
+        names = [p.full_name for p in await persons.group_members(s, gid)]
     assert names == ["Аня", "Маша", "Яна"]
 
 
 async def test_delete_group_cascades(db) -> None:
-    """Deleting a group must not leave orphaned students / surveys / responses."""
+    """Deleting a group removes memberships/surveys/responses but keeps the person."""
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 1, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
-        st, _ = await students.add_student(s, g.id, 10, "a", "A")
+        p, _ = await persons.add_to_group(s, g, 10, "a", "A")
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, datetime(2026, 5, 25, 19, 0)
         )
-        await surveys.ensure_responses(s, survey.id, [st.id])
-        gid, sid = g.id, survey.id
+        await surveys.ensure_responses(s, survey.id, [p.id])
+        gid, sid, pid = g.id, survey.id, p.id
     async with session_scope() as s:
         g = await groups.get_group(s, gid)
         assert g is not None
         await groups.delete_group(s, g)
     async with session_scope() as s:
         assert await groups.get_group(s, gid) is None
-        assert await students.count_students(s, gid) == 0
+        assert await persons.count_members(s, gid) == 0
         assert await surveys.get_survey(s, sid) is None
+        # the person is teacher-scoped — survives the group deletion
+        assert await s.get(Person, pid) is not None

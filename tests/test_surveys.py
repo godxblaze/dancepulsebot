@@ -3,7 +3,7 @@ from datetime import datetime
 
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, students, surveys, teachers
+from app.services import groups, persons, surveys, teachers
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -12,14 +12,14 @@ async def _setup_group() -> tuple[int, list[int]]:
     async with session_scope() as s:
         teacher = await teachers.get_or_create(s, 111, "t", "Препод")
         group = await groups.create_group(s, teacher.id, "Группа A", "0,2", "19:00", 18)
-        st1, _ = await students.add_student(s, group.id, 201, "a", "Аня")
-        st2, _ = await students.add_student(s, group.id, 202, "b", "Боря")
-        st3, _ = await students.add_student(s, group.id, 203, "c", "Вика")
-        return group.id, [st1.id, st2.id, st3.id]
+        p1, _ = await persons.add_to_group(s, group, 201, "a", "Аня")
+        p2, _ = await persons.add_to_group(s, group, 202, "b", "Боря")
+        p3, _ = await persons.add_to_group(s, group, 203, "c", "Вика")
+        return group.id, [p1.id, p2.id, p3.id]
 
 
 async def test_survey_flow(db) -> None:
-    group_id, student_ids = await _setup_group()
+    group_id, person_ids = await _setup_group()
 
     # create survey + empty responses
     async with session_scope() as s:
@@ -27,7 +27,7 @@ async def test_survey_flow(db) -> None:
             s, group_id, SurveyKind.attendance, LESSON
         )
         assert created
-        await surveys.ensure_responses(s, survey.id, student_ids)
+        await surveys.ensure_responses(s, survey.id, person_ids)
         survey_id = survey.id
 
     # idempotency — second call must not re-create
@@ -37,10 +37,10 @@ async def test_survey_flow(db) -> None:
         )
         assert not created_again
 
-    # two students answer, one stays silent
+    # two persons answer, one stays silent
     async with session_scope() as s:
-        await surveys.record_answer(s, survey_id, student_ids[0], Answer.yes)
-        await surveys.record_answer(s, survey_id, student_ids[1], Answer.no)
+        await surveys.record_answer(s, survey_id, person_ids[0], Answer.yes)
+        await surveys.record_answer(s, survey_id, person_ids[1], Answer.no)
 
     async with session_scope() as s:
         summary = await surveys.summarize(s, survey_id)
@@ -50,18 +50,18 @@ async def test_survey_flow(db) -> None:
 
 
 async def test_answer_can_be_changed(db) -> None:
-    group_id, student_ids = await _setup_group()
+    group_id, person_ids = await _setup_group()
     async with session_scope() as s:
         survey, _ = await surveys.get_or_create_survey(
             s, group_id, SurveyKind.attendance, LESSON
         )
-        await surveys.ensure_responses(s, survey.id, student_ids)
+        await surveys.ensure_responses(s, survey.id, person_ids)
         survey_id = survey.id
 
     async with session_scope() as s:
-        await surveys.record_answer(s, survey_id, student_ids[0], Answer.yes)
+        await surveys.record_answer(s, survey_id, person_ids[0], Answer.yes)
     async with session_scope() as s:
-        await surveys.record_answer(s, survey_id, student_ids[0], Answer.no)
+        await surveys.record_answer(s, survey_id, person_ids[0], Answer.no)
 
     async with session_scope() as s:
         summary = await surveys.summarize(s, survey_id)

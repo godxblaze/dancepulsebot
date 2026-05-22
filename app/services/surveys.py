@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Answer, Response, Student, Survey, SurveyKind, SurveyStatus
+from app.db.models import Answer, Person, Response, Survey, SurveyKind, SurveyStatus
 
 
 @dataclass
@@ -50,36 +50,36 @@ async def get_or_create_survey(
 
 
 async def ensure_responses(
-    session: AsyncSession, survey_id: int, student_ids: list[int]
+    session: AsyncSession, survey_id: int, person_ids: list[int]
 ) -> None:
-    """Create empty (unanswered) Response rows for students that don't have one."""
-    stmt = select(Response.student_id).where(Response.survey_id == survey_id)
+    """Create empty (unanswered) Response rows for persons that don't have one."""
+    stmt = select(Response.person_id).where(Response.survey_id == survey_id)
     existing = set((await session.execute(stmt)).scalars().all())
-    for sid in student_ids:
-        if sid not in existing:
-            session.add(Response(survey_id=survey_id, student_id=sid))
+    for pid in person_ids:
+        if pid not in existing:
+            session.add(Response(survey_id=survey_id, person_id=pid))
     await session.flush()
 
 
 async def set_message_id(
-    session: AsyncSession, survey_id: int, student_id: int, message_id: int
+    session: AsyncSession, survey_id: int, person_id: int, message_id: int
 ) -> None:
     await session.execute(
         update(Response)
-        .where(Response.survey_id == survey_id, Response.student_id == student_id)
+        .where(Response.survey_id == survey_id, Response.person_id == person_id)
         .values(tg_message_id=message_id)
     )
 
 
 async def record_answer(
-    session: AsyncSession, survey_id: int, student_id: int, answer: Answer
+    session: AsyncSession, survey_id: int, person_id: int, answer: Answer
 ) -> None:
     stmt = select(Response).where(
-        Response.survey_id == survey_id, Response.student_id == student_id
+        Response.survey_id == survey_id, Response.person_id == person_id
     )
     resp = (await session.execute(stmt)).scalar_one_or_none()
     if resp is None:
-        resp = Response(survey_id=survey_id, student_id=student_id)
+        resp = Response(survey_id=survey_id, person_id=person_id)
         session.add(resp)
     resp.answer = answer
     resp.answered_at = datetime.now()
@@ -88,24 +88,24 @@ async def record_answer(
 
 async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
     stmt = (
-        select(Response, Student)
-        .join(Student, Response.student_id == Student.id)
+        select(Response, Person)
+        .join(Person, Response.person_id == Person.id)
         .where(Response.survey_id == survey_id)
-        .order_by(Student.full_name)
+        .order_by(Person.full_name)
     )
     rows = (await session.execute(stmt)).all()
     yes = no = pending = 0
     no_names: list[str] = []
     pending_names: list[str] = []
-    for resp, student in rows:
+    for resp, person in rows:
         if resp.answer == Answer.yes:
             yes += 1
         elif resp.answer == Answer.no:
             no += 1
-            no_names.append(student.full_name)
+            no_names.append(person.full_name)
         else:
             pending += 1
-            pending_names.append(student.full_name)
+            pending_names.append(person.full_name)
     return SurveySummary(len(rows), yes, no, pending, no_names, pending_names)
 
 

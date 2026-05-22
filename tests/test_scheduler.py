@@ -7,7 +7,7 @@ import pytest
 from app.db.models import SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import groups, students, surveys, teachers
+from app.services import groups, persons, surveys, teachers
 
 MONDAY_LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -45,7 +45,7 @@ async def _make_group(lead_hours: int = 18, n_students: int = 2) -> int:
             s, teacher.id, "Группа A", "0", "19:00", lead_hours
         )
         for i in range(n_students):
-            await students.add_student(s, group.id, 200 + i, f"u{i}", f"Ученик {i}")
+            await persons.add_to_group(s, group, 200 + i, f"u{i}", f"Ученик {i}")
         return group.id
 
 

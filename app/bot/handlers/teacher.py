@@ -7,7 +7,7 @@ from datetime import timedelta
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.bot.keyboards import (
     confirm_delete_keyboard,
@@ -16,7 +16,7 @@ from app.bot.keyboards import (
     weekdays_keyboard,
 )
 from app.bot.states import NewGroup
-from app.bot.utils import get_bot_username
+from app.bot.utils import get_bot_username, qr_png
 from app.core.config import settings
 from app.db.models import Group
 from app.db.session import session_scope
@@ -317,6 +317,27 @@ async def cb_group_link(call: CallbackQuery, bot: Bot) -> None:
     await call.message.edit_text(
         f"🔗 Ссылка-приглашение в «{name}»:\n{link}\n\nПерешли её ученикам.",
         reply_markup=group_actions_keyboard(group_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpqr:"))
+async def cb_group_qr(call: CallbackQuery, bot: Bot) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        group = await _owned_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        code = group.join_code
+        name = group.name
+    link = await _join_link(bot, code)
+    await call.message.answer_photo(
+        BufferedInputFile(qr_png(link), filename="qr.png"),
+        caption=(
+            f"📷 QR-код группы «{name}».\n"
+            f"Покажи новому ученику или распечатай — он наведёт камеру и сразу запишется."
+        ),
     )
     await call.answer()
 

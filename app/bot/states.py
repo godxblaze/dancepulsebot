@@ -5,3 +5,8 @@ class NewGroup(StatesGroup):
     name = State()
     weekdays = State()
     lesson_time = State()
+
+
+class JoinFlow(StatesGroup):
+    name = State()
+    gender = State()

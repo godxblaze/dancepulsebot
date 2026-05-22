@@ -36,6 +36,11 @@ class Answer(enum.StrEnum):
     no = "no"
 
 
+class Gender(enum.StrEnum):
+    male = "male"
+    female = "female"
+
+
 class Teacher(Base):
     __tablename__ = "teachers"
 
@@ -76,6 +81,9 @@ class Person(Base):
     tg_user_id: Mapped[int] = mapped_column(BigInteger)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
+    gender: Mapped[Gender | None] = mapped_column(
+        Enum(Gender, name="gender"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

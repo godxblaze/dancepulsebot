@@ -35,6 +35,7 @@ def group_actions_keyboard(group_id: int) -> InlineKeyboardMarkup:
                     text="🔗 Ссылка-приглашение", callback_data=f"grplink:{group_id}"
                 )
             ],
+            [InlineKeyboardButton(text="📷 QR-код", callback_data=f"grpqr:{group_id}")],
             [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"grpdel:{group_id}")],
             [InlineKeyboardButton(text="◀ К списку", callback_data="grplist")],
         ]
@@ -58,6 +59,29 @@ def confirm_delete_keyboard(group_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="✗ Отмена", callback_data=f"grp:{group_id}"),
                 InlineKeyboardButton(text="✓ Удалить", callback_data=f"grpdelok:{group_id}"),
+            ]
+        ]
+    )
+
+
+def join_name_keyboard(suggested: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Записать как «{suggested}»", callback_data="join:name_ok"
+                )
+            ]
+        ]
+    )
+
+
+def gender_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Парень", callback_data="join:gender:male"),
+                InlineKeyboardButton(text="Девушка", callback_data="join:gender:female"),
             ]
         ]
     )

@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
     "tzdata>=2024.1",
+    "segno>=1.6,<2",
 ]
 
 [project.optional-dependencies]

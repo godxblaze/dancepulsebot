@@ -9,7 +9,7 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.bot.keyboards import attendance_keyboard, support_confirm_keyboard
+from app.bot.keyboards import attendance_keyboard, support_pick_keyboard
 from app.bot.utils import bar
 from app.core.config import settings
 from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus, Teacher
@@ -141,23 +141,32 @@ async def _maybe_recruit(
         )
         call_id = call.id
         teacher_tg = teacher.tg_user_id
+        candidates = await persons_svc.support_candidates(
+            s, group.teacher_id, gender_needed, group.id
+        )
 
     total_pairs = male + female
-    text = (
+    head = (
         f"🆘 <b>{escape(group.name)}</b> · {lesson_at:%d.%m} {group.lesson_time}\n"
         f"баланс пар:\n"
         f"👦 {bar(male, total_pairs)} {male}\n"
         f"👧 {bar(female, total_pairs)} {female}\n"
-        f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.\n\n"
-        f"Добрать саппортов?"
+        f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}."
     )
     try:
-        await bot.send_message(
-            teacher_tg,
-            text,
-            reply_markup=support_confirm_keyboard(call_id),
-            parse_mode=ParseMode.HTML,
-        )
+        if candidates:
+            await bot.send_message(
+                teacher_tg,
+                head + "\n\nОтметь, кого позвать:",
+                reply_markup=support_pick_keyboard(call_id, candidates, set()),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await bot.send_message(
+                teacher_tg,
+                head + "\n\nВ пуле нет подходящих саппортов — добавь через /pool.",
+                parse_mode=ParseMode.HTML,
+            )
     except Exception as e:  # noqa: BLE001
         log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)
 

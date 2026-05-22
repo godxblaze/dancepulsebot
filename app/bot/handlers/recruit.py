@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
-from app.bot.keyboards import support_ask_keyboard
-from app.db.models import SupportCall, SupportCallStatus, SupportScope, Teacher
+from app.bot.keyboards import support_ask_keyboard, support_pick_keyboard
+from app.db.models import Person, SupportCallStatus, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -17,98 +17,105 @@ log = logging.getLogger(__name__)
 router = Router()
 
 
-async def _owner_tg(session, sc: SupportCall) -> int | None:
-    """Telegram id of the teacher who owns the lesson this call belongs to."""
-    survey = await surveys_svc.get_survey(session, sc.survey_id)
+def _selected_ids(markup: InlineKeyboardMarkup | None) -> set[int]:
+    """Person ids currently ticked (✅) in a support-pick keyboard."""
+    selected: set[int] = set()
+    if markup is None:
+        return selected
+    for row in markup.inline_keyboard:
+        for btn in row:
+            data = btn.callback_data or ""
+            if data.startswith("pick:") and btn.text.startswith("✅"):
+                selected.add(int(data.split(":")[2]))
+    return selected
+
+
+async def _call_context(session, call_id: int):
+    """Returns (call, survey, group) for a SupportCall — any may be None."""
+    call = await supports_svc.get_call(session, call_id)
+    if call is None:
+        return None, None, None
+    survey = await surveys_svc.get_survey(session, call.survey_id)
     group = await groups_svc.get_group(session, survey.group_id) if survey else None
-    if group is None:
-        return None
-    teacher = await session.get(Teacher, group.teacher_id)
-    return teacher.tg_user_id if teacher else None
+    return call, survey, group
 
 
-async def broadcast_support_call(bot: Bot, call_id: int) -> None:
-    """Message the support pools asking them to cover a lesson."""
+@router.callback_query(F.data.startswith("pick:"))
+async def cb_support_pick(call: CallbackQuery) -> None:
+    """Teacher ticks/unticks a pool member in the recruit picker."""
+    parts = (call.data or "").split(":")
+    call_id, person_id = int(parts[1]), int(parts[2])
+    selected = _selected_ids(call.message.reply_markup if call.message else None)
+    selected ^= {person_id}  # toggle
     async with session_scope() as s:
-        call = await supports_svc.get_call(s, call_id)
-        if call is None or call.status != SupportCallStatus.open:
-            return
-        survey = await surveys_svc.get_survey(s, call.survey_id)
-        group = await groups_svc.get_group(s, survey.group_id) if survey else None
-        if survey is None or group is None:
+        sc, _survey, group = await _call_context(s, call_id)
+        if sc is None or group is None:
+            await call.answer()
             return
         teacher = await s.get(Teacher, group.teacher_id)
-        include_open = (
-            teacher is not None and teacher.support_scope == SupportScope.own_and_open
-        )
+        if teacher is None or teacher.tg_user_id != call.from_user.id:
+            await call.answer()
+            return
         candidates = await persons_svc.support_candidates(
-            s, group.teacher_id, call.gender, group.id, include_open
+            s, group.teacher_id, sc.gender, group.id
         )
-        recipients = [p.tg_user_id for p in candidates]
+    if call.message:
+        await call.message.edit_reply_markup(
+            reply_markup=support_pick_keyboard(call_id, candidates, selected)
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("picksend:"))
+async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
+    """Teacher sends the recruit invites to the ticked pool members."""
+    call_id = int((call.data or "").split(":")[1])
+    selected = _selected_ids(call.message.reply_markup if call.message else None)
+    if not selected:
+        await call.answer("Сначала отметь, кого позвать", show_alert=True)
+        return
+    async with session_scope() as s:
+        sc, survey, group = await _call_context(s, call_id)
+        if sc is None or survey is None or group is None:
+            await call.answer("Уже обработано", show_alert=True)
+            return
+        teacher = await s.get(Teacher, group.teacher_id)
+        if teacher is None or teacher.tg_user_id != call.from_user.id:
+            await call.answer()
+            return
+        if sc.status == SupportCallStatus.closed:
+            await call.answer("Набор уже закрыт", show_alert=True)
+            return
+        invited: list[tuple[int, str]] = []
+        for pid in selected:
+            p = await s.get(Person, pid)
+            if p is not None:
+                invited.append((p.tg_user_id, p.full_name))
+        if not invited:
+            await call.answer("Никого не нашлось", show_alert=True)
+            return
+        await supports_svc.set_status(s, call_id, SupportCallStatus.open)
         group_name = group.name
         lesson_time = group.lesson_time
         lesson_at = survey.lesson_at
-        teacher_tg = teacher.tg_user_id if teacher else None
-
-    if not recipients:
-        if teacher_tg is not None:
-            try:
-                await bot.send_message(
-                    teacher_tg,
-                    "В пуле нет подходящих саппортов на это занятие — позови вручную.",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        return
 
     text = (
         f"🆘 Нужна помощь!\n"
         f"Группа «{group_name}», занятие {lesson_at:%d.%m} в {lesson_time}.\n"
         f"Не хватает пары — сможешь подойти выручить?"
     )
-    for tg_id in recipients:
+    for tg_id, _name in invited:
         try:
             await bot.send_message(
                 tg_id, text, reply_markup=support_ask_keyboard(call_id)
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("Could not ask support %s: %s", tg_id, e)
-
-
-@router.callback_query(F.data.startswith("sup:yes:"))
-async def cb_support_confirm_yes(call: CallbackQuery, bot: Bot) -> None:
-    call_id = int((call.data or "").split(":")[2])
-    async with session_scope() as s:
-        sc = await supports_svc.get_call(s, call_id)
-        if sc is None or sc.status != SupportCallStatus.pending:
-            await call.answer("Уже обработано", show_alert=True)
-            return
-        if await _owner_tg(s, sc) != call.from_user.id:
-            await call.answer()
-            return
-        await supports_svc.set_status(s, call_id, SupportCallStatus.open)
+            log.warning("Could not invite support %s: %s", tg_id, e)
     if call.message:
+        names = ", ".join(n for _, n in invited)
         await call.message.edit_text(
-            "✅ Запускаю сбор саппортов — напишу, как будут отклики."
+            f"✅ Позвал: {names}.\nНапишу, как откликнутся."
         )
-    await call.answer()
-    await broadcast_support_call(bot, call_id)
-
-
-@router.callback_query(F.data.startswith("sup:no:"))
-async def cb_support_confirm_no(call: CallbackQuery) -> None:
-    call_id = int((call.data or "").split(":")[2])
-    async with session_scope() as s:
-        sc = await supports_svc.get_call(s, call_id)
-        if sc is None or sc.status != SupportCallStatus.pending:
-            await call.answer()
-            return
-        if await _owner_tg(s, sc) != call.from_user.id:
-            await call.answer()
-            return
-        await supports_svc.set_status(s, call_id, SupportCallStatus.closed)
-    if call.message:
-        await call.message.edit_text("Ок, саппортов не зовём.")
     await call.answer()
 
 

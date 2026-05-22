@@ -29,7 +29,7 @@ from app.bot.keyboards import (
 from app.bot.states import NewGroup
 from app.bot.utils import bar, get_bot_username, qr_png
 from app.core.config import settings
-from app.db.models import Group, Person, SupportScope
+from app.db.models import Group, Person
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -442,6 +442,8 @@ async def cb_group_delete(call: CallbackQuery) -> None:
 
 # ── support pool ─────────────────────────────────────────────────────
 
+_MAX_LEVEL = 3
+
 
 @router.message(Command("pool"))
 @router.message(F.text == MENU_POOL)
@@ -452,16 +454,16 @@ async def cmd_pool(message: Message) -> None:
     async with session_scope() as s:
         teacher = await teachers_svc.get_by_tg_id(s, tg.id)
         people = await persons_svc.list_persons(s, teacher.id) if teacher else []
-        scope = teacher.support_scope if teacher else SupportScope.own_and_open
     if not people:
         await message.answer(
             "Пул саппортов пуст — сюда попадут ученики, когда запишутся. "
-            "Потом отметишь, кого можно звать на подмену."
+            "Потом тапом задашь, кого и с каким уровнем можно звать на подмену."
         )
         return
     await message.answer(
-        "🆘 Личный пул саппортов — отметь, кого можно звать выручать другие группы:",
-        reply_markup=pool_keyboard(people, scope),
+        "🆘 Личный пул саппортов. Тап по человеку задаёт уровень "
+        "(1 → 2 → 3 → убрать из пула):",
+        reply_markup=pool_keyboard(people),
     )
 
 
@@ -474,23 +476,10 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
         if teacher is None or person is None or person.teacher_id != teacher.id:
             await call.answer("Не найдено", show_alert=True)
             return
-        await persons_svc.set_teacher_pool(s, person_id, not person.in_teacher_pool)
-        people = await persons_svc.list_persons(s, teacher.id)
-        scope = teacher.support_scope
-    if call.message:
-        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people, scope))
-    await call.answer()
-
-
-@router.callback_query(F.data == "sscope:toggle")
-async def cb_scope_toggle(call: CallbackQuery) -> None:
-    async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
-        if teacher is None:
-            await call.answer()
-            return
-        scope = await teachers_svc.toggle_support_scope(s, teacher.id)
+        current = person.support_level
+        new_level = None if current == _MAX_LEVEL else (current or 0) + 1
+        await persons_svc.set_support_level(s, person_id, new_level)
         people = await persons_svc.list_persons(s, teacher.id)
     if call.message:
-        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people, scope))
+        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people))
     await call.answer()

@@ -9,9 +9,9 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.keyboards import gender_keyboard, join_name_keyboard, optin_keyboard
+from app.bot.keyboards import gender_keyboard, join_name_keyboard
 from app.bot.states import JoinFlow
-from app.db.models import Gender, Group, Person, Teacher
+from app.db.models import Gender, Group, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -136,32 +136,10 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if call.message:
         await call.message.edit_text(
             f"✅ Готово, {name}! Перед каждым занятием я спрошу, придёшь ли ты — "
-            f"просто жми кнопку.\n\n"
-            f"Иногда другим группам не хватает пары. Будешь иногда выручать?",
-            reply_markup=optin_keyboard(person.id, False),
+            f"просто жми кнопку."
         )
     await call.answer()
     await _notify_teacher(bot, group, name)
-
-
-@router.callback_query(F.data.startswith("optin:"))
-async def cb_optin_toggle(call: CallbackQuery) -> None:
-    """Student joins or leaves the open support pool."""
-    person_id = int((call.data or "").split(":", 1)[1])
-    async with session_scope() as s:
-        person = await s.get(Person, person_id)
-        if person is None or person.tg_user_id != call.from_user.id:
-            await call.answer()
-            return
-        new_value = not person.in_open_pool
-        await persons_svc.set_open_pool(s, person_id, new_value)
-    if call.message:
-        await call.message.edit_reply_markup(
-            reply_markup=optin_keyboard(person_id, new_value)
-        )
-    await call.answer(
-        "🆘 Спасибо! Ты в пуле саппортов." if new_value else "Ок, вышел из пула."
-    )
 
 
 def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:
@@ -176,7 +154,7 @@ def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:
 
 
 async def show_student_home(message: Message) -> None:
-    """Personal screen for a student: their groups, next lesson, support toggle."""
+    """Personal screen for a student: their groups and next lesson."""
     tg = message.from_user
     if not tg:
         return
@@ -194,8 +172,6 @@ async def show_student_home(message: Message) -> None:
             return
         groups = await persons_svc.person_groups(s, person.id)
         name = person.full_name
-        person_id = person.id
-        in_pool = person.in_open_pool
 
     lines = [f"👋 Привет, {name}!"]
     if groups:
@@ -211,6 +187,4 @@ async def show_student_home(message: Message) -> None:
     else:
         lines.append("\nТы пока не записан ни в одну группу.")
     lines.append("\nПеред каждым занятием я спрошу, придёшь ли ты.")
-    await message.answer(
-        "\n".join(lines), reply_markup=optin_keyboard(person_id, in_pool)
-    )
+    await message.answer("\n".join(lines))

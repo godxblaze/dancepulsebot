@@ -64,38 +64,14 @@ async def set_gender(session: AsyncSession, person_id: int, gender: Gender) -> N
         await session.flush()
 
 
-async def set_open_pool(session: AsyncSession, person_id: int, value: bool) -> None:
+async def set_support_level(
+    session: AsyncSession, person_id: int, level: int | None
+) -> None:
+    """Set a person's support skill level. None removes them from the pool."""
     person = await session.get(Person, person_id)
     if person is not None:
-        person.in_open_pool = value
+        person.support_level = level
         await session.flush()
-
-
-async def set_teacher_pool(session: AsyncSession, person_id: int, value: bool) -> None:
-    person = await session.get(Person, person_id)
-    if person is not None:
-        person.in_teacher_pool = value
-        await session.flush()
-
-
-async def list_persons(session: AsyncSession, teacher_id: int) -> list[Person]:
-    """Everyone in a teacher's audience, ordered by name."""
-    stmt = (
-        select(Person)
-        .where(Person.teacher_id == teacher_id)
-        .order_by(Person.full_name)
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def teacher_pool(session: AsyncSession, teacher_id: int) -> list[Person]:
-    """Persons the teacher added to their personal support pool."""
-    stmt = (
-        select(Person)
-        .where(Person.teacher_id == teacher_id, Person.in_teacher_pool.is_(True))
-        .order_by(Person.full_name)
-    )
-    return list((await session.execute(stmt)).scalars().all())
 
 
 async def add_to_group(
@@ -152,40 +128,34 @@ async def count_members(session: AsyncSession, group_id: int) -> int:
     return (await session.execute(stmt)).scalar_one()
 
 
+async def list_persons(session: AsyncSession, teacher_id: int) -> list[Person]:
+    """Everyone in a teacher's audience, ordered by name."""
+    stmt = (
+        select(Person)
+        .where(Person.teacher_id == teacher_id)
+        .order_by(Person.full_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def support_candidates(
-    session: AsyncSession,
-    teacher_id: int,
-    gender: Gender,
-    exclude_group_id: int,
-    include_open: bool,
+    session: AsyncSession, teacher_id: int, gender: Gender, exclude_group_id: int
 ) -> list[Person]:
-    """People who can be asked to support a lesson — teacher pool first, then the
-    open pool (if include_open). Regular members of that group are excluded.
+    """Pool members of the given gender who can be asked to support a lesson — the
+    teacher's support pool (support_level set), excluding regular members of that
+    group. Highest skill level first, then name.
     """
     members = select(Membership.person_id).where(
         Membership.group_id == exclude_group_id
     )
-    base = (
+    stmt = (
         select(Person)
         .where(
             Person.teacher_id == teacher_id,
             Person.gender == gender,
+            Person.support_level.is_not(None),
             Person.id.not_in(members),
         )
-        .order_by(Person.full_name)
+        .order_by(Person.support_level.desc(), Person.full_name)
     )
-    pool = list(
-        (await session.execute(base.where(Person.in_teacher_pool.is_(True))))
-        .scalars()
-        .all()
-    )
-    if not include_open:
-        return pool
-    seen = {p.id for p in pool}
-    extra = (
-        (await session.execute(base.where(Person.in_open_pool.is_(True))))
-        .scalars()
-        .all()
-    )
-    pool.extend(p for p in extra if p.id not in seen)
-    return pool
+    return list((await session.execute(stmt)).scalars().all())

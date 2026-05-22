@@ -41,11 +41,6 @@ class Gender(enum.StrEnum):
     female = "female"
 
 
-class SupportScope(enum.StrEnum):
-    own = "own"
-    own_and_open = "own_and_open"
-
-
 class SupportCallStatus(enum.StrEnum):
     pending = "pending"  # awaiting the teacher's confirmation
     open = "open"  # broadcasting / collecting claims
@@ -59,9 +54,6 @@ class Teacher(Base):
     tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
-    support_scope: Mapped[SupportScope] = mapped_column(
-        Enum(SupportScope, name="support_scope"), default=SupportScope.own_and_open
-    )
     support_threshold: Mapped[int] = mapped_column(Integer, default=2)
     support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=6)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -100,8 +92,7 @@ class Person(Base):
     gender: Mapped[Gender | None] = mapped_column(
         Enum(Gender, name="gender"), nullable=True
     )
-    in_open_pool: Mapped[bool] = mapped_column(Boolean, default=False)
-    in_teacher_pool: Mapped[bool] = mapped_column(Boolean, default=False)
+    support_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     helped_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Group, Person, SupportScope
+from app.db.models import Group, Person
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -92,44 +92,32 @@ def gender_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def optin_keyboard(person_id: int, in_pool: bool) -> InlineKeyboardMarkup:
-    text = (
-        "✅ Ты в пуле саппортов — выйти"
-        if in_pool
-        else "🆘 Иногда выручать другие группы"
-    )
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=text, callback_data=f"optin:{person_id}")]
-        ]
-    )
-
-
-def pool_keyboard(persons: list[Person], scope: SupportScope) -> InlineKeyboardMarkup:
+def pool_keyboard(persons: list[Person]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for p in persons:
-        mark = "✅" if p.in_teacher_pool else "☐"
-        helped = f" · помог {p.helped_count}" if p.helped_count else ""
-        kb.button(text=f"{mark} {p.full_name}{helped}", callback_data=f"tpool:{p.id}")
-    scope_text = (
-        "🔁 Зову: мой пул + общий"
-        if scope == SupportScope.own_and_open
-        else "🔁 Зову: только мой пул"
-    )
-    kb.button(text=scope_text, callback_data="sscope:toggle")
+        if p.support_level is None:
+            label = f"☐ {p.full_name}"
+        else:
+            helped = f" · помог {p.helped_count}" if p.helped_count else ""
+            label = f"✅ {p.full_name} · ур.{p.support_level}{helped}"
+        kb.button(text=label, callback_data=f"tpool:{p.id}")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def support_confirm_keyboard(call_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Добрать", callback_data=f"sup:yes:{call_id}"),
-                InlineKeyboardButton(text="✗ Не надо", callback_data=f"sup:no:{call_id}"),
-            ]
-        ]
-    )
+def support_pick_keyboard(
+    call_id: int, candidates: list[Person], selected: set[int]
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for p in candidates:
+        mark = "✅" if p.id in selected else "☐"
+        lvl = f" · ур.{p.support_level}" if p.support_level else ""
+        kb.button(
+            text=f"{mark} {p.full_name}{lvl}", callback_data=f"pick:{call_id}:{p.id}"
+        )
+    kb.button(text=f"📨 Позвать ({len(selected)})", callback_data=f"picksend:{call_id}")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def support_ask_keyboard(call_id: int) -> InlineKeyboardMarkup:

@@ -1,23 +1,14 @@
-"""Tests for support recruitment — deficit detection, confirm, broadcast, claims."""
+"""Tests for support recruitment — deficit detection, the picker, claims."""
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app.bot.handlers.recruit import (
-    broadcast_support_call,
-    cb_support_confirm_no,
-    cb_support_confirm_yes,
     cb_support_join,
+    cb_support_pick,
+    cb_support_pick_send,
 )
-from app.bot.handlers.teacher import cb_scope_toggle
-from app.db.models import (
-    Answer,
-    Gender,
-    Person,
-    SupportCallStatus,
-    SupportScope,
-    SurveyKind,
-    Teacher,
-)
+from app.bot.keyboards import support_pick_keyboard
+from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import groups, persons, supports, surveys, teachers
@@ -26,21 +17,22 @@ LESSON = datetime(2026, 5, 25, 19, 0)
 
 
 class FakeCbMessage:
-    def __init__(self) -> None:
+    def __init__(self, reply_markup=None) -> None:
         self.text: str | None = None
+        self.reply_markup = reply_markup
 
     async def edit_text(self, text, **kwargs) -> None:
         self.text = text
 
-    async def edit_reply_markup(self, **kwargs) -> None:
-        pass
+    async def edit_reply_markup(self, reply_markup=None, **kwargs) -> None:
+        self.reply_markup = reply_markup
 
 
 class FakeCallback:
-    def __init__(self, data: str, user_id: int) -> None:
+    def __init__(self, data: str, user_id: int, reply_markup=None) -> None:
         self.data = data
         self.from_user = SimpleNamespace(id=user_id)
-        self.message = FakeCbMessage()
+        self.message = FakeCbMessage(reply_markup)
         self.answers: list[str] = []
 
     async def answer(self, text: str = "", show_alert: bool = False) -> None:
@@ -56,8 +48,7 @@ class FakeBot:
 
 
 async def _imbalanced_lesson(males_yes: int = 1, females_yes: int = 4):
-    """Group with a survey where the given numbers of each gender said 'yes'.
-    Returns the Group object and the survey id."""
+    """Group + survey where the given numbers of each gender said 'yes'."""
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 100, "teach", "Препод")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
@@ -101,33 +92,34 @@ async def test_gender_yes_counts(db) -> None:
 # ── support_candidates ───────────────────────────────────────────────
 
 
-async def test_support_candidates_pool_order_and_exclusions(db) -> None:
+async def test_support_candidates_pool_gender_level(db) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 100, "t", "T")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
         other = await groups.create_group(s, t.id, "Другая", "2", "20:00", 18)
-        # male member of the target group, even in the pool — must be excluded
+        # male member of the target group, even in the pool — excluded
         member, _ = await persons.add_to_group(s, g, 1, "u", "Участник")
         await persons.set_gender(s, member.id, Gender.male)
-        await persons.set_teacher_pool(s, member.id, True)
-        # male in the teacher pool
-        tp, _ = await persons.add_to_group(s, other, 2, "u", "Тренерский")
-        await persons.set_gender(s, tp.id, Gender.male)
-        await persons.set_teacher_pool(s, tp.id, True)
-        # male in the open pool
-        op, _ = await persons.add_to_group(s, other, 3, "u", "Открытый")
-        await persons.set_gender(s, op.id, Gender.male)
-        await persons.set_open_pool(s, op.id, True)
-        # female in the teacher pool — wrong gender
-        fp, _ = await persons.add_to_group(s, other, 4, "u", "Девушка")
+        await persons.set_support_level(s, member.id, 3)
+        # male pool members, not in the target group
+        lo, _ = await persons.add_to_group(s, other, 2, "u", "Слабый")
+        await persons.set_gender(s, lo.id, Gender.male)
+        await persons.set_support_level(s, lo.id, 1)
+        hi, _ = await persons.add_to_group(s, other, 3, "u", "Сильный")
+        await persons.set_gender(s, hi.id, Gender.male)
+        await persons.set_support_level(s, hi.id, 3)
+        # male not in the pool — excluded
+        out, _ = await persons.add_to_group(s, other, 4, "u", "Вне пула")
+        await persons.set_gender(s, out.id, Gender.male)
+        # female in the pool — wrong gender
+        fp, _ = await persons.add_to_group(s, other, 5, "u", "Девушка")
         await persons.set_gender(s, fp.id, Gender.female)
-        await persons.set_teacher_pool(s, fp.id, True)
-        tid, gid, tp_id, op_id = t.id, g.id, tp.id, op.id
+        await persons.set_support_level(s, fp.id, 2)
+        tid, gid, lo_id, hi_id = t.id, g.id, lo.id, hi.id
     async with session_scope() as s:
-        both = await persons.support_candidates(s, tid, Gender.male, gid, True)
-        assert [p.id for p in both] == [tp_id, op_id]  # teacher pool first
-        own = await persons.support_candidates(s, tid, Gender.male, gid, False)
-        assert [p.id for p in own] == [tp_id]  # open pool excluded
+        cands = await persons.support_candidates(s, tid, Gender.male, gid)
+    # only the two male pool members not in the group, highest level first
+    assert [p.id for p in cands] == [hi_id, lo_id]
 
 
 # ── supports.claim ───────────────────────────────────────────────────
@@ -199,7 +191,7 @@ async def test_maybe_recruit_below_threshold_closes(db) -> None:
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.closed
-    assert bot.sent == []  # teacher not bothered
+    assert bot.sent == []
 
 
 async def test_maybe_recruit_before_cutoff_does_nothing(db) -> None:
@@ -219,12 +211,12 @@ async def test_maybe_recruit_idempotent(db) -> None:
     assert len(bot.sent) == 1  # asked only once
 
 
-# ── recruit handlers ─────────────────────────────────────────────────
+# ── recruit picker ───────────────────────────────────────────────────
 
 
-async def _pending_call_with_support() -> int:
+async def _call_with_pool_candidate():
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "Препод")
+        t = await teachers.get_or_create(s, 100, "teach", "Препод")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
@@ -235,77 +227,72 @@ async def _pending_call_with_support() -> int:
         other = await groups.create_group(s, t.id, "Другая", "2", "20:00", 18)
         sup, _ = await persons.add_to_group(s, other, 700, "u", "Саппорт")
         await persons.set_gender(s, sup.id, Gender.male)
-        await persons.set_teacher_pool(s, sup.id, True)
-        return call.id
+        await persons.set_support_level(s, sup.id, 2)
+        return SimpleNamespace(
+            call_id=call.id, sup_pid=sup.id, teacher_id=t.id, group_id=g.id
+        )
 
 
-async def test_confirm_yes_opens_and_broadcasts(db) -> None:
-    cid = await _pending_call_with_support()
-    bot = FakeBot()
-    await cb_support_confirm_yes(FakeCallback(f"sup:yes:{cid}", user_id=100), bot)
+async def test_pick_and_send_invites(db) -> None:
+    ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
-        call = await supports.get_call(s, cid)
+        candidates = await persons.support_candidates(
+            s, ctx.teacher_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, candidates, set())
+    pick = FakeCallback(
+        f"pick:{ctx.call_id}:{ctx.sup_pid}", user_id=100, reply_markup=kb
+    )
+    await cb_support_pick(pick)  # tick the support
+
+    bot = FakeBot()
+    send = FakeCallback(
+        f"picksend:{ctx.call_id}", user_id=100, reply_markup=pick.message.reply_markup
+    )
+    await cb_support_pick_send(send, bot)
+    assert any(chat == 700 for chat, _ in bot.sent)  # support invited
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
         assert call is not None and call.status == SupportCallStatus.open
-    assert any(chat == 700 for chat, _ in bot.sent)  # support got the broadcast
 
 
-async def test_confirm_no_closes(db) -> None:
-    cid = await _pending_call_with_support()
-    await cb_support_confirm_no(FakeCallback(f"sup:no:{cid}", user_id=100))
+async def test_pick_send_nothing_selected(db) -> None:
+    ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
-        call = await supports.get_call(s, cid)
-        assert call is not None and call.status == SupportCallStatus.closed
-
-
-async def test_confirm_rejects_non_teacher(db) -> None:
-    cid = await _pending_call_with_support()
+        candidates = await persons.support_candidates(
+            s, ctx.teacher_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, candidates, set())  # nobody ticked
     bot = FakeBot()
-    # someone who is not the teacher must not be able to confirm the call
-    await cb_support_confirm_yes(FakeCallback(f"sup:yes:{cid}", user_id=999), bot)
+    send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
+    await cb_support_pick_send(send, bot)
+    assert bot.sent == []  # no invites
+    assert send.answers and "отметь" in send.answers[0].lower()
+
+
+async def test_pick_send_rejects_foreign_teacher(db) -> None:
+    ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
-        call = await supports.get_call(s, cid)
+        await teachers.get_or_create(s, 999, "x", "Чужой Препод")
+        candidates = await persons.support_candidates(
+            s, ctx.teacher_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, candidates, {ctx.sup_pid})
+    bot = FakeBot()
+    send = FakeCallback(f"picksend:{ctx.call_id}", user_id=999, reply_markup=kb)
+    await cb_support_pick_send(send, bot)
+    assert bot.sent == []  # foreign teacher cannot invite
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
         assert call is not None and call.status == SupportCallStatus.pending
-    assert bot.sent == []
 
 
-async def test_broadcast_empty_pool_notifies_teacher(db) -> None:
+async def test_support_join_records_claim(db) -> None:
+    ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "Препод")
-        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
-        survey, _ = await surveys.get_or_create_survey(
-            s, g.id, SurveyKind.attendance, LESSON
-        )
-        call = await supports.create_call(
-            s, survey.id, Gender.male, 2, SupportCallStatus.open
-        )
-        cid = call.id
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
     bot = FakeBot()
-    await broadcast_support_call(bot, cid)
-    assert any(chat == 100 and "вручную" in text for chat, text in bot.sent)
-
-
-async def test_support_join_records_claim_and_notifies_teacher(db) -> None:
-    cid = await _pending_call_with_support()
+    await cb_support_join(FakeCallback(f"sup:join:{ctx.call_id}", user_id=700), bot)
     async with session_scope() as s:
-        await supports.set_status(s, cid, SupportCallStatus.open)
-    bot = FakeBot()
-    await cb_support_join(FakeCallback(f"sup:join:{cid}", user_id=700), bot)
-    async with session_scope() as s:
-        assert await supports.count_claims(s, cid) == 1
+        assert await supports.count_claims(s, ctx.call_id) == 1
     assert any(chat == 100 for chat, _ in bot.sent)  # teacher notified
-
-
-# ── scope toggle ─────────────────────────────────────────────────────
-
-
-async def test_scope_toggle(db) -> None:
-    async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "T")
-        tid = t.id
-        assert t.support_scope == SupportScope.own_and_open  # default
-    await cb_scope_toggle(FakeCallback("sscope:toggle", user_id=100))
-    async with session_scope() as s:
-        assert (await s.get(Teacher, tid)).support_scope == SupportScope.own
-    await cb_scope_toggle(FakeCallback("sscope:toggle", user_id=100))
-    async with session_scope() as s:
-        assert (await s.get(Teacher, tid)).support_scope == SupportScope.own_and_open

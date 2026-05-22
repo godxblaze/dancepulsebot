@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.keyboards import attendance_keyboard, support_confirm_keyboard
+from app.bot.utils import bar
 from app.core.config import settings
 from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus, Teacher
 from app.db.session import session_scope
@@ -37,8 +39,8 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
         return
 
     text = (
-        f"💓 Dance Pulse\n"
-        f"Группа «{group.name}», занятие {lesson_at:%d.%m} в {group.lesson_time}.\n"
+        f"💓 <b>{escape(group.name)}</b>\n"
+        f"Занятие {lesson_at:%d.%m} в {group.lesson_time}.\n\n"
         f"Придёшь?"
     )
     sent = 0
@@ -58,14 +60,16 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
 
 def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.SurveySummary) -> str:
     lines = [
-        "💓 Dance Pulse — итоги опроса",
-        f"Группа «{group.name}», занятие {lesson_at:%d.%m} в {group.lesson_time}",
-        f"придут: {summary.yes} из {summary.total}",
+        f"💓 <b>{escape(group.name)}</b> — итоги опроса",
+        f"занятие {lesson_at:%d.%m} в {group.lesson_time}",
+        "",
+        f"придут <b>{summary.yes}/{summary.total}</b>  "
+        f"{bar(summary.yes, summary.total)}",
     ]
     if summary.no_names:
-        lines.append(f"не придут: {', '.join(summary.no_names)}")
+        lines.append(f"❌ не придут: {escape(', '.join(summary.no_names))}")
     if summary.pending_names:
-        lines.append(f"не ответили: {', '.join(summary.pending_names)}")
+        lines.append(f"⏳ молчат: {escape(', '.join(summary.pending_names))}")
     return "\n".join(lines)
 
 
@@ -130,9 +134,13 @@ async def _maybe_recruit(
         call_id = call.id
         teacher_tg = teacher.tg_user_id
 
+    total_pairs = male + female
     text = (
-        f"🆘 Группа «{group.name}», занятие {lesson_at:%d.%m} в {group.lesson_time}.\n"
-        f"Перекос по парам — не хватает {deficit}, нужны {_gender_plural(gender_needed)}.\n"
+        f"🆘 <b>{escape(group.name)}</b> · {lesson_at:%d.%m} {group.lesson_time}\n"
+        f"баланс пар:\n"
+        f"👦 {bar(male, total_pairs)} {male}\n"
+        f"👧 {bar(female, total_pairs)} {female}\n"
+        f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.\n\n"
         f"Добрать саппортов?"
     )
     try:

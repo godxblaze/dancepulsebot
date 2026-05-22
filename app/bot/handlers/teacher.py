@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import timedelta
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
@@ -25,7 +26,7 @@ from app.bot.keyboards import (
     weekdays_keyboard,
 )
 from app.bot.states import NewGroup
-from app.bot.utils import get_bot_username, qr_png
+from app.bot.utils import bar, get_bot_username, qr_png
 from app.core.config import settings
 from app.db.models import Group, Person, SupportScope
 from app.db.session import session_scope
@@ -115,19 +116,20 @@ async def cmd_today(message: Message) -> None:
             survey = await surveys_svc.find_attendance_survey(s, g.id, lesson_at)
             if survey is None:
                 blocks.append(
-                    f"📋 «{g.name}» — {when} в {g.lesson_time}\n"
-                    f"   опрос ещё не разослан (придёт ближе к занятию)"
+                    f"👯 <b>{escape(g.name)}</b> · {when} {g.lesson_time}\n"
+                    f"опрос ещё не разослан"
                 )
                 continue
             summary = await surveys_svc.summarize(s, survey.id)
             lines = [
-                f"📋 «{g.name}» — {when} в {g.lesson_time}",
-                f"   придут: {summary.yes} из {summary.total}",
+                f"👯 <b>{escape(g.name)}</b> · {when} {g.lesson_time}",
+                f"придут <b>{summary.yes}/{summary.total}</b>  "
+                f"{bar(summary.yes, summary.total)}",
             ]
             if summary.no_names:
-                lines.append(f"   не придут: {', '.join(summary.no_names)}")
+                lines.append(f"❌ {escape(', '.join(summary.no_names))}")
             if summary.pending_names:
-                lines.append(f"   не ответили: {', '.join(summary.pending_names)}")
+                lines.append(f"⏳ {escape(', '.join(summary.pending_names))}")
             blocks.append("\n".join(lines))
 
     if not blocks:
@@ -153,18 +155,25 @@ async def cmd_stats(message: Message) -> None:
         for g in groups:
             closed = await surveys_svc.recent_closed_surveys(s, g.id, limit=5)
             if not closed:
-                blocks.append(f"📊 «{g.name}» — пока нет завершённых опросов")
+                blocks.append(
+                    f"📊 <b>{escape(g.name)}</b> — пока нет завершённых опросов"
+                )
                 continue
-            lines = [f"📊 «{g.name}» — последние {len(closed)} занятий (по ответам на опрос):"]
+            lines = [
+                f"📊 <b>{escape(g.name)}</b> — последние {len(closed)} занятий:"
+            ]
             total_yes = total_all = 0
             for survey in reversed(closed):  # oldest first
                 summary = await surveys_svc.summarize(s, survey.id)
                 total_yes += summary.yes
                 total_all += summary.total
-                lines.append(f"   {survey.lesson_at:%d.%m}: {summary.yes} из {summary.total}")
+                lines.append(
+                    f"{bar(summary.yes, summary.total)}  "
+                    f"{survey.lesson_at:%d.%m} · {summary.yes}/{summary.total}"
+                )
             if total_all:
                 pct = round(100 * total_yes / total_all)
-                lines.append(f"   средний отклик «приду»: {pct}%")
+                lines.append(f"средний отклик: <b>{pct}%</b>")
             blocks.append("\n".join(lines))
 
     await message.answer("\n\n".join(blocks))

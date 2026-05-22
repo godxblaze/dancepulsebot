@@ -20,3 +20,11 @@ def qr_png(data: str) -> bytes:
     buf = io.BytesIO()
     segno.make(data).save(buf, kind="png", scale=10)
     return buf.getvalue()
+
+
+def bar(filled: int, total: int, width: int = 10) -> str:
+    """Text progress bar from block characters, e.g. ███████░░░."""
+    if total <= 0:
+        return "░" * width
+    n = max(0, min(width, round(width * filled / total)))
+    return "█" * n + "░" * (width - n)

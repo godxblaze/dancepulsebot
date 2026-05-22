@@ -127,7 +127,7 @@ async def test_today_lesson_today_with_survey(db, freeze_today) -> None:
     msg = FakeMessage(user_id=10)
     await cmd_today(msg)
     assert "сегодня" in msg.replies[0]
-    assert "придут: 1 из 1" in msg.replies[0]
+    assert "придут <b>1/1</b>" in msg.replies[0]
 
 
 # ── /stats ───────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ async def test_stats_with_closed_surveys(db) -> None:
     await cmd_stats(msg)
     text = msg.replies[0]
     assert "последние 2 занятий" in text
-    assert "средний отклик «приду»: 100%" in text
+    assert "средний отклик: <b>100%</b>" in text
 
 
 # ── _owned_group authorization ───────────────────────────────────────

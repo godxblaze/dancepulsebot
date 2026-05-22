@@ -1,0 +1,109 @@
+"""Integration test of the core attendance-survey flow."""
+from datetime import datetime
+
+from app.db.models import Answer, SurveyKind
+from app.db.session import session_scope
+from app.services import groups, students, surveys, teachers
+
+LESSON = datetime(2026, 5, 25, 19, 0)
+
+
+async def _setup_group() -> tuple[int, list[int]]:
+    async with session_scope() as s:
+        teacher = await teachers.get_or_create(s, 111, "t", "Препод")
+        group = await groups.create_group(s, teacher.id, "Группа A", "0,2", "19:00", 18)
+        st1, _ = await students.add_student(s, group.id, 201, "a", "Аня")
+        st2, _ = await students.add_student(s, group.id, 202, "b", "Боря")
+        st3, _ = await students.add_student(s, group.id, 203, "c", "Вика")
+        return group.id, [st1.id, st2.id, st3.id]
+
+
+async def test_survey_flow(db) -> None:
+    group_id, student_ids = await _setup_group()
+
+    # create survey + empty responses
+    async with session_scope() as s:
+        survey, created = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        assert created
+        await surveys.ensure_responses(s, survey.id, student_ids)
+        survey_id = survey.id
+
+    # idempotency — second call must not re-create
+    async with session_scope() as s:
+        _, created_again = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        assert not created_again
+
+    # two students answer, one stays silent
+    async with session_scope() as s:
+        await surveys.record_answer(s, survey_id, student_ids[0], Answer.yes)
+        await surveys.record_answer(s, survey_id, student_ids[1], Answer.no)
+
+    async with session_scope() as s:
+        summary = await surveys.summarize(s, survey_id)
+    assert (summary.total, summary.yes, summary.no, summary.pending) == (3, 1, 1, 1)
+    assert summary.no_names == ["Боря"]
+    assert summary.pending_names == ["Вика"]
+
+
+async def test_answer_can_be_changed(db) -> None:
+    group_id, student_ids = await _setup_group()
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        await surveys.ensure_responses(s, survey.id, student_ids)
+        survey_id = survey.id
+
+    async with session_scope() as s:
+        await surveys.record_answer(s, survey_id, student_ids[0], Answer.yes)
+    async with session_scope() as s:
+        await surveys.record_answer(s, survey_id, student_ids[0], Answer.no)
+
+    async with session_scope() as s:
+        summary = await surveys.summarize(s, survey_id)
+    assert (summary.yes, summary.no) == (0, 1)
+
+
+async def test_close_past_surveys(db) -> None:
+    group_id, _ = await _setup_group()
+    async with session_scope() as s:
+        await surveys.get_or_create_survey(s, group_id, SurveyKind.attendance, LESSON)
+
+    async with session_scope() as s:
+        closed = await surveys.close_past_surveys(s, datetime(2026, 5, 26, 0, 0))
+    assert closed == 1
+
+
+async def test_recent_closed_surveys(db) -> None:
+    group_id, _ = await _setup_group()
+    dates = [datetime(2026, 5, d, 19, 0) for d in (11, 13, 18, 20, 25, 27)]
+    async with session_scope() as s:
+        for d in dates:
+            await surveys.get_or_create_survey(s, group_id, SurveyKind.attendance, d)
+    async with session_scope() as s:
+        await surveys.close_past_surveys(s, datetime(2026, 5, 26, 0, 0))
+
+    async with session_scope() as s:
+        recent = await surveys.recent_closed_surveys(s, group_id, limit=3)
+    # 5 closed (11..25), newest first, capped at 3
+    assert [r.lesson_at.day for r in recent] == [25, 20, 18]
+
+
+async def test_mark_summary_sent(db) -> None:
+    group_id, _ = await _setup_group()
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        assert survey.summary_sent is False
+        survey_id = survey.id
+
+    async with session_scope() as s:
+        await surveys.mark_summary_sent(s, survey_id)
+    async with session_scope() as s:
+        survey = await surveys.get_survey(s, survey_id)
+        assert survey is not None and survey.summary_sent is True

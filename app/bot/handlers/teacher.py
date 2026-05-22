@@ -385,6 +385,7 @@ async def cmd_pool(message: Message) -> None:
     async with session_scope() as s:
         teacher = await teachers_svc.get_by_tg_id(s, tg.id)
         people = await persons_svc.list_persons(s, teacher.id) if teacher else []
+        scope = teacher.support_scope if teacher else None
     if not people:
         await message.answer(
             "Пул саппортов пуст — сюда попадут ученики, когда запишутся. "
@@ -393,7 +394,7 @@ async def cmd_pool(message: Message) -> None:
         return
     await message.answer(
         "🆘 Личный пул саппортов — отметь, кого можно звать выручать другие группы:",
-        reply_markup=pool_keyboard(people),
+        reply_markup=pool_keyboard(people, scope),
     )
 
 
@@ -408,6 +409,21 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
             return
         await persons_svc.set_teacher_pool(s, person_id, not person.in_teacher_pool)
         people = await persons_svc.list_persons(s, teacher.id)
+        scope = teacher.support_scope
     if call.message:
-        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people))
+        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people, scope))
+    await call.answer()
+
+
+@router.callback_query(F.data == "sscope:toggle")
+async def cb_scope_toggle(call: CallbackQuery) -> None:
+    async with session_scope() as s:
+        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
+        if teacher is None:
+            await call.answer()
+            return
+        scope = await teachers_svc.toggle_support_scope(s, teacher.id)
+        people = await persons_svc.list_persons(s, teacher.id)
+    if call.message:
+        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people, scope))
     await call.answer()

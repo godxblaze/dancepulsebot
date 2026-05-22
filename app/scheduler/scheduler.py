@@ -7,12 +7,13 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.bot.keyboards import attendance_keyboard
+from app.bot.keyboards import attendance_keyboard, support_confirm_keyboard
 from app.core.config import settings
-from app.db.models import Group, SurveyKind, SurveyStatus, Teacher
+from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import local_now, next_lesson_at
 
@@ -95,8 +96,55 @@ async def _maybe_send_summary(
     log.info("Auto-summary for survey %s sent to teacher %s", survey_id, teacher_tg)
 
 
+def _gender_plural(gender: Gender) -> str:
+    return "парни" if gender == Gender.male else "девушки"
+
+
+async def _maybe_recruit(
+    bot: Bot, group: Group, lesson_at: datetime, now: datetime
+) -> None:
+    """At the cutoff, measure the gender imbalance; if it crosses the threshold,
+    ask the teacher whether to recruit supports. One decision per lesson."""
+    async with session_scope() as s:
+        teacher = await s.get(Teacher, group.teacher_id)
+        if teacher is None:
+            return
+        if now < lesson_at - timedelta(hours=teacher.support_cutoff_hours):
+            return
+        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
+        if survey is None:
+            return
+        if await supports_svc.get_call_for_survey(s, survey.id) is not None:
+            return  # decision already taken for this lesson
+        male, female = await surveys_svc.gender_yes_counts(s, survey.id)
+        deficit = abs(male - female)
+        if deficit < teacher.support_threshold:
+            await supports_svc.create_call(
+                s, survey.id, Gender.male, 0, SupportCallStatus.closed
+            )
+            return
+        gender_needed = Gender.male if male < female else Gender.female
+        call = await supports_svc.create_call(
+            s, survey.id, gender_needed, deficit, SupportCallStatus.pending
+        )
+        call_id = call.id
+        teacher_tg = teacher.tg_user_id
+
+    text = (
+        f"🆘 Группа «{group.name}», занятие {lesson_at:%d.%m} в {group.lesson_time}.\n"
+        f"Перекос по парам — не хватает {deficit}, нужны {_gender_plural(gender_needed)}.\n"
+        f"Добрать саппортов?"
+    )
+    try:
+        await bot.send_message(
+            teacher_tg, text, reply_markup=support_confirm_keyboard(call_id)
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)
+
+
 async def tick(bot: Bot) -> None:
-    """Runs every 15 min: close past surveys, send polls and auto-summaries within window."""
+    """Runs every 15 min: close past surveys, send polls, auto-summaries and recruit."""
     now = local_now()
     async with session_scope() as s:
         closed = await surveys_svc.close_past_surveys(s, now)
@@ -114,6 +162,7 @@ async def tick(bot: Bot) -> None:
         if 0 < hours_until <= group.lead_hours:
             await _poll_group(bot, group, lesson_at)
             await _maybe_send_summary(bot, group, lesson_at, now)
+            await _maybe_recruit(bot, group, lesson_at, now)
 
 
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:

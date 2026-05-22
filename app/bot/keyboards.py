@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Group, Person
+from app.db.models import Group, Person, SupportScope
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -100,10 +100,43 @@ def optin_keyboard(person_id: int, in_pool: bool) -> InlineKeyboardMarkup:
     )
 
 
-def pool_keyboard(persons: list[Person]) -> InlineKeyboardMarkup:
+def pool_keyboard(persons: list[Person], scope: SupportScope) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for p in persons:
         mark = "✅" if p.in_teacher_pool else "☐"
-        kb.button(text=f"{mark} {p.full_name}", callback_data=f"tpool:{p.id}")
+        helped = f" · помог {p.helped_count}" if p.helped_count else ""
+        kb.button(text=f"{mark} {p.full_name}{helped}", callback_data=f"tpool:{p.id}")
+    scope_text = (
+        "🔁 Зову: мой пул + общий"
+        if scope == SupportScope.own_and_open
+        else "🔁 Зову: только мой пул"
+    )
+    kb.button(text=scope_text, callback_data="sscope:toggle")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def support_confirm_keyboard(call_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Добрать", callback_data=f"sup:yes:{call_id}"),
+                InlineKeyboardButton(text="✗ Не надо", callback_data=f"sup:no:{call_id}"),
+            ]
+        ]
+    )
+
+
+def support_ask_keyboard(call_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Приду помочь", callback_data=f"sup:join:{call_id}"
+                ),
+                InlineKeyboardButton(
+                    text="✗ Не смогу", callback_data=f"sup:skip:{call_id}"
+                ),
+            ]
+        ]
+    )

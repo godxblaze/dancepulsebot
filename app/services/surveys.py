@@ -3,10 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Answer, Person, Response, Survey, SurveyKind, SurveyStatus
+from app.db.models import (
+    Answer,
+    Gender,
+    Person,
+    Response,
+    Survey,
+    SurveyKind,
+    SurveyStatus,
+)
 
 
 @dataclass
@@ -139,3 +147,15 @@ async def recent_closed_surveys(
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def gender_yes_counts(session: AsyncSession, survey_id: int) -> tuple[int, int]:
+    """(male, female) — how many of each gender answered 'yes' to the survey."""
+    stmt = (
+        select(Person.gender, func.count())
+        .join(Response, Response.person_id == Person.id)
+        .where(Response.survey_id == survey_id, Response.answer == Answer.yes)
+        .group_by(Person.gender)
+    )
+    counts = {g: c for g, c in (await session.execute(stmt)).all()}
+    return counts.get(Gender.male, 0), counts.get(Gender.female, 0)

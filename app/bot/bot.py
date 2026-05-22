@@ -5,7 +5,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.bot.handlers import student, survey, teacher
+from app.bot.handlers import recruit, student, survey, teacher
 from app.core.config import settings
 
 
@@ -23,5 +23,6 @@ def build_dispatcher() -> Dispatcher:
     # student first: it claims /start with a deep-link payload
     dp.include_router(student.router)
     dp.include_router(survey.router)
+    dp.include_router(recruit.router)
     dp.include_router(teacher.router)
     return dp

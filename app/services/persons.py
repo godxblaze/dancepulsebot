@@ -133,3 +133,42 @@ async def count_members(session: AsyncSession, group_id: int) -> int:
         .where(Membership.group_id == group_id)
     )
     return (await session.execute(stmt)).scalar_one()
+
+
+async def support_candidates(
+    session: AsyncSession,
+    teacher_id: int,
+    gender: Gender,
+    exclude_group_id: int,
+    include_open: bool,
+) -> list[Person]:
+    """People who can be asked to support a lesson — teacher pool first, then the
+    open pool (if include_open). Regular members of that group are excluded.
+    """
+    members = select(Membership.person_id).where(
+        Membership.group_id == exclude_group_id
+    )
+    base = (
+        select(Person)
+        .where(
+            Person.teacher_id == teacher_id,
+            Person.gender == gender,
+            Person.id.not_in(members),
+        )
+        .order_by(Person.full_name)
+    )
+    pool = list(
+        (await session.execute(base.where(Person.in_teacher_pool.is_(True))))
+        .scalars()
+        .all()
+    )
+    if not include_open:
+        return pool
+    seen = {p.id for p in pool}
+    extra = (
+        (await session.execute(base.where(Person.in_open_pool.is_(True))))
+        .scalars()
+        .all()
+    )
+    pool.extend(p for p in extra if p.id not in seen)
+    return pool

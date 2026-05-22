@@ -41,6 +41,17 @@ class Gender(enum.StrEnum):
     female = "female"
 
 
+class SupportScope(enum.StrEnum):
+    own = "own"
+    own_and_open = "own_and_open"
+
+
+class SupportCallStatus(enum.StrEnum):
+    pending = "pending"  # awaiting the teacher's confirmation
+    open = "open"  # broadcasting / collecting claims
+    closed = "closed"  # filled, declined, or nothing was needed
+
+
 class Teacher(Base):
     __tablename__ = "teachers"
 
@@ -48,6 +59,11 @@ class Teacher(Base):
     tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
+    support_scope: Mapped[SupportScope] = mapped_column(
+        Enum(SupportScope, name="support_scope"), default=SupportScope.own_and_open
+    )
+    support_threshold: Mapped[int] = mapped_column(Integer, default=2)
+    support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=6)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -86,6 +102,7 @@ class Person(Base):
     )
     in_open_pool: Mapped[bool] = mapped_column(Boolean, default=False)
     in_teacher_pool: Mapped[bool] = mapped_column(Boolean, default=False)
+    helped_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -133,3 +150,36 @@ class Response(Base):
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SupportCall(Base):
+    """A drive to recruit supports for one lesson's gender imbalance."""
+
+    __tablename__ = "support_calls"
+    __table_args__ = (UniqueConstraint("survey_id", name="uq_support_calls_survey"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    survey_id: Mapped[int] = mapped_column(ForeignKey("surveys.id", ondelete="CASCADE"))
+    gender: Mapped[Gender] = mapped_column(Enum(Gender, name="support_call_gender"))
+    needed: Mapped[int] = mapped_column(Integer)
+    status: Mapped[SupportCallStatus] = mapped_column(
+        Enum(SupportCallStatus, name="support_call_status"),
+        default=SupportCallStatus.pending,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupportClaim(Base):
+    """One person agreeing to support a lesson via a SupportCall."""
+
+    __tablename__ = "support_claims"
+    __table_args__ = (
+        UniqueConstraint("support_call_id", "person_id", name="uq_support_claims"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    support_call_id: Mapped[int] = mapped_column(
+        ForeignKey("support_calls.id", ondelete="CASCADE")
+    )
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

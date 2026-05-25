@@ -160,6 +160,20 @@ async def pending_persons(session: AsyncSession, survey_id: int) -> list[Person]
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def persons_without_message(
+    session: AsyncSession, survey_id: int
+) -> list[Person]:
+    """People whose Response row has no tg_message_id yet — the scheduler still
+    owes them a poll message. Used to safely retry across ticks without double-send."""
+    stmt = (
+        select(Person)
+        .join(Response, Response.person_id == Person.id)
+        .where(Response.survey_id == survey_id, Response.tg_message_id.is_(None))
+        .order_by(Person.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def gender_yes_counts(session: AsyncSession, survey_id: int) -> tuple[int, int]:
     """(male, female) — how many of each gender answered 'yes' to the survey."""
     stmt = (

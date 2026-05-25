@@ -70,6 +70,47 @@ async def test_tick_poll_is_idempotent(db, freeze) -> None:
     assert len(bot.sent) == 2  # poll not sent twice
 
 
+async def test_tick_polls_new_member_on_next_tick(db, freeze) -> None:
+    """Member added after the first tick should get the survey on the next one,
+    while existing members must not get a duplicate."""
+    group_id = await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+    assert len(bot.sent) == 2
+
+    async with session_scope() as s:
+        group = await groups.get_group(s, group_id)
+        await persons.add_to_group(s, group, 300, "newbie", "Новенький")
+
+    await sched.tick(bot)
+    assert [m.chat_id for m in bot.sent] == [200, 201, 300]
+
+
+async def test_tick_retries_failed_send_next_tick(db, freeze) -> None:
+    """If send_message fails, next tick must retry for that person (no tg_message_id stored)."""
+    await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))
+
+    class FlakyBot(FakeBot):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_once = {201}
+
+        async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+            if chat_id in self.fail_once:
+                self.fail_once.discard(chat_id)
+                raise RuntimeError("simulated telegram outage")
+            return await super().send_message(chat_id, text, reply_markup, **kwargs)
+
+    bot = FlakyBot()
+    await sched.tick(bot)
+    assert [m.chat_id for m in bot.sent] == [200]  # 201 failed
+
+    await sched.tick(bot)
+    assert [m.chat_id for m in bot.sent] == [200, 201]  # 201 retried, 200 not duplicated
+
+
 async def test_tick_sends_auto_summary(db, freeze) -> None:
     await _make_group()
     freeze(datetime(2026, 5, 25, 11, 0))  # past the halfway point (10:00)

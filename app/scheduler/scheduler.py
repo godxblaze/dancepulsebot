@@ -29,15 +29,18 @@ log = logging.getLogger(__name__)
 
 
 async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
-    """Create the attendance survey for `lesson_at` and message every student once."""
+    """Ensure the survey exists, then message everyone who hasn't been polled yet.
+
+    Идемпотентно по пере-tick'у: tg_message_id на Response отмечает «опрос отправлен»,
+    поэтому следующий tick не повторит отправку тем, кто уже получил, но дошлёт
+    тем, кому не успели (новые члены / упавший send в прошлый раз)."""
     async with session_scope() as s:
-        survey, created = await surveys_svc.get_or_create_survey(
+        survey, _ = await surveys_svc.get_or_create_survey(
             s, group.id, SurveyKind.attendance, lesson_at
         )
-        if not created:
-            return  # already polled this lesson
         members = await persons_svc.group_members(s, group.id)
         await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
+        to_poll = await surveys_svc.persons_without_message(s, survey.id)
         survey_id = survey.id
         venue = (
             await venues_svc.get_venue(s, group.venue_id)
@@ -45,9 +48,8 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
             else None
         )
 
-    if not members:
-        log.info("Group «%s» has no members — survey %s is empty", group.name, survey_id)
-        return
+    if not to_poll:
+        return  # all members already polled
 
     place = format_place(group, venue)
     lines = [
@@ -62,7 +64,7 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
     lines.append("Придёшь?")
     text = "\n".join(lines)
     sent = 0
-    for p in members:
+    for p in to_poll:
         try:
             msg = await bot.send_message(
                 p.tg_user_id,
@@ -71,12 +73,25 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
                 parse_mode=ParseMode.HTML,
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("Failed to send survey to tg_user_id=%s: %s", p.tg_user_id, e)
+            log.warning(
+                "survey=%s person=%s tg=%s — send failed, will retry: %s",
+                survey_id, p.id, p.tg_user_id, e,
+            )
             continue
-        async with session_scope() as s:
-            await surveys_svc.set_message_id(s, survey_id, p.id, msg.message_id)
+        try:
+            async with session_scope() as s:
+                await surveys_svc.set_message_id(s, survey_id, p.id, msg.message_id)
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "survey=%s person=%s tg=%s — message sent (mid=%s) but message_id "
+                "persistence failed, risk of re-send next tick: %s",
+                survey_id, p.id, p.tg_user_id, msg.message_id, e,
+            )
         sent += 1
-    log.info("Survey %s sent to %d/%d members of «%s»", survey_id, sent, len(members), group.name)
+    log.info(
+        "Survey %s polled %d/%d outstanding member(s) of «%s»",
+        survey_id, sent, len(to_poll), group.name,
+    )
 
 
 def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.SurveySummary) -> str:

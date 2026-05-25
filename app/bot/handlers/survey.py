@@ -5,8 +5,11 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
+from app.bot.keyboards import flip_answer_keyboard
+from app.bot.utils import format_group_title
 from app.db.models import Answer, SurveyStatus
 from app.db.session import session_scope
+from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
 
@@ -18,7 +21,8 @@ router = Router()
 async def on_attendance(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
     survey_id = int(parts[1])
-    answer = Answer.yes if parts[2] == "yes" else Answer.no
+    choice = parts[2]  # "yes" or "no"
+    answer = Answer.yes if choice == "yes" else Answer.no
 
     async with session_scope() as s:
         survey = await surveys_svc.get_survey(s, survey_id)
@@ -33,15 +37,21 @@ async def on_attendance(call: CallbackQuery) -> None:
             await call.answer("Тебя нет в этой группе", show_alert=True)
             return
         await surveys_svc.record_answer(s, survey_id, person.id, answer)
+        group = await groups_svc.get_group(s, survey.group_id)
+        title = format_group_title(group) if group is not None else "занятие"
+        lesson_at = survey.lesson_at
 
+    when = f"{lesson_at:%d.%m в %H:%M}"
     text = (
-        "✅ Записал: придёшь на занятие."
+        f"✅ Записал: придёшь на «{title}» {when}."
         if answer == Answer.yes
-        else "❌ Записал: не придёшь."
+        else f"❌ Записал: не придёшь на «{title}» {when}."
     )
     if call.message:
         try:
-            await call.message.edit_text(text)
+            await call.message.edit_text(
+                text, reply_markup=flip_answer_keyboard(survey_id, choice)
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not edit survey message: %s", e)
     await call.answer()

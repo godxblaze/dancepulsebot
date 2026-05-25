@@ -8,14 +8,19 @@ from app.bot.handlers.teacher import (
     _owned_group,
     cb_group_card,
     cb_group_delete,
-    cb_group_link,
+    cb_group_invite,
     cb_group_students,
     cb_groups_list,
     cmd_stats,
     cmd_today,
-    newgroup_name,
+    newgroup_level_pick,
+    newgroup_room_skip,
     newgroup_start,
+    newgroup_style_pick,
+    newgroup_style_typed,
+    newgroup_teachers_skip,
     newgroup_time,
+    newgroup_venue_pick,
     newgroup_weekdays,
 )
 from app.bot.states import NewGroup
@@ -33,20 +38,33 @@ class FakeMessage:
         )
         self.text = text
         self.replies: list[str] = []
+        self.photo_captions: list[str] = []
 
     async def answer(self, text: str, **kwargs) -> None:
         self.replies.append(text)
+
+    async def answer_photo(self, photo, caption: str | None = None, **kwargs) -> None:
+        self.photo_captions.append(caption or "")
 
 
 class FakeCbMessage:
     def __init__(self) -> None:
         self.text: str | None = None
+        self.reply_markup = None
+        self.photo_captions: list[str] = []
 
     async def edit_text(self, text: str, **kwargs) -> None:
         self.text = text
+        self.reply_markup = kwargs.get("reply_markup")
 
     async def edit_reply_markup(self, **kwargs) -> None:
-        pass
+        self.reply_markup = kwargs.get("reply_markup")
+
+    async def answer(self, text: str, **kwargs) -> None:
+        self.text = text
+
+    async def answer_photo(self, photo, caption: str | None = None, **kwargs) -> None:
+        self.photo_captions.append(caption or "")
 
 
 class FakeCallback:
@@ -96,6 +114,16 @@ def freeze_today(monkeypatch):
 
 
 async def test_today_no_teacher(db) -> None:
+    """Non-teacher who is also not a registered student falls through to the
+    student today screen, which nudges them to ask their teacher for a link."""
+    msg = FakeMessage(user_id=1)
+    await cmd_today(msg)
+    assert msg.replies and "попроси у преподавателя" in msg.replies[0]
+
+
+async def test_today_teacher_no_lessons(db) -> None:
+    async with session_scope() as s:
+        await teachers.get_or_create(s, 1, "t", "T")
     msg = FakeMessage(user_id=1)
     await cmd_today(msg)
     assert msg.replies == ["На сегодня и завтра занятий нет."]
@@ -134,9 +162,17 @@ async def test_today_lesson_today_with_survey(db, freeze_today) -> None:
 
 
 async def test_stats_no_groups(db) -> None:
+    async with session_scope() as s:
+        await teachers.get_or_create(s, 1, "t", "T")
     msg = FakeMessage(user_id=1)
     await cmd_stats(msg)
     assert "нет групп" in msg.replies[0]
+
+
+async def test_stats_non_teacher_silent(db) -> None:
+    msg = FakeMessage(user_id=999)
+    await cmd_stats(msg)
+    assert msg.replies == []
 
 
 async def test_stats_no_closed_surveys(db) -> None:
@@ -200,14 +236,19 @@ async def test_owned_group_unknown_group(db) -> None:
 # ── new-group wizard ─────────────────────────────────────────────────
 
 
-async def test_wizard_rejects_empty_name() -> None:
+async def test_wizard_rejects_empty_style(db) -> None:
+    async with session_scope() as s:
+        await teachers.get_or_create(s, 10, "t", "T")
     fsm = FakeFSM()
     await newgroup_start(FakeMessage(user_id=10), fsm)
-    assert fsm.state == NewGroup.name
+    assert fsm.state == NewGroup.style
+    # switch to free-typing then send blank text — wizard must hold the state
+    await newgroup_style_pick(FakeCallback("ngst:type", 10), fsm)
+    assert fsm.state == NewGroup.style_typing
     msg = FakeMessage(user_id=10, text="   ")
-    await newgroup_name(msg, fsm)
-    assert fsm.state == NewGroup.name  # not advanced
-    assert any("пустым" in r for r in msg.replies)
+    await newgroup_style_typed(msg, fsm)
+    assert fsm.state == NewGroup.style_typing  # not advanced
+    assert any("Пустое направление" in r for r in msg.replies)
 
 
 async def test_wizard_rejects_bad_time(db) -> None:
@@ -227,9 +268,19 @@ async def test_wizard_full_flow_creates_group(db, monkeypatch) -> None:
 
     monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", fake_username)
 
+    async with session_scope() as s:
+        await teachers.get_or_create(s, 30, "teacher", "Препод Тест")
+
     fsm = FakeFSM()
     await newgroup_start(FakeMessage(user_id=30), fsm)
-    await newgroup_name(FakeMessage(user_id=30, text="Сальса"), fsm)
+    assert fsm.state == NewGroup.style
+
+    await newgroup_style_pick(FakeCallback("ngst:type", 30), fsm)
+    assert fsm.state == NewGroup.style_typing
+    await newgroup_style_typed(FakeMessage(user_id=30, text="Сальса"), fsm)
+    assert fsm.state == NewGroup.level
+
+    await newgroup_level_pick(FakeCallback("nglv:pick:2", 30), fsm)
     assert fsm.state == NewGroup.weekdays
 
     await newgroup_weekdays(FakeCallback("wd:0", 30), fsm)  # Monday on
@@ -239,16 +290,34 @@ async def test_wizard_full_flow_creates_group(db, monkeypatch) -> None:
 
     msg = FakeMessage(user_id=30, text="19:00")
     await newgroup_time(msg, fsm, None)
+    assert fsm.state == NewGroup.venue
+    await newgroup_venue_pick(FakeCallback("ngvn:skip", 30), fsm)
+    assert fsm.state == NewGroup.room
+    await newgroup_room_skip(FakeCallback("ngrm:skip", 30), fsm)
+    assert fsm.state == NewGroup.teachers_note
+    final = FakeCallback("ngtn:skip", 30)
+    await newgroup_teachers_skip(final, fsm, None)
 
     async with session_scope() as s:
         t = await teachers.get_by_tg_id(s, 30)
         assert t is not None
         gs = await groups.teacher_groups(s, t.id)
     assert len(gs) == 1
-    assert gs[0].name == "Сальса"
+    assert gs[0].style == "Сальса"
+    assert gs[0].level == 2
+    assert gs[0].name == "Сальса · ур.2"
     assert gs[0].weekdays == "0,2"
     assert gs[0].lesson_time == "19:00"
-    assert any("создана" in r for r in msg.replies)
+
+
+async def test_wizard_rejects_non_teacher(db) -> None:
+    fsm = FakeFSM()
+    msg = FakeMessage(user_id=999)
+    await newgroup_start(msg, fsm)
+    assert fsm.state is None
+    assert msg.replies == []
+    async with session_scope() as s:
+        assert await teachers.get_by_tg_id(s, 999) is None
 
 
 async def test_wizard_done_with_no_weekdays_blocked(db) -> None:
@@ -267,7 +336,9 @@ async def test_wizard_done_with_no_weekdays_blocked(db) -> None:
 async def _make_group_with_members(owner_tg: int = 10, n: int = 2) -> int:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, owner_tg, "t", "Owner")
-        g = await groups.create_group(s, t.id, "Сальса", "0,2", "19:00", 18)
+        g = await groups.create_group(
+            s, t.id, "Сальса", "0,2", "19:00", 18, style="Сальса"
+        )
         for i in range(n):
             await persons.add_to_group(s, g, 600 + i, f"u{i}", f"Ученик {i}")
         return g.id
@@ -293,7 +364,14 @@ async def test_cb_group_students_lists_names(db) -> None:
     gid = await _make_group_with_members(n=2)
     call = FakeCallback(f"grpstu:{gid}", 10)
     await cb_group_students(call)
-    assert "Ученик 0" in call.message.text and "Ученик 1" in call.message.text
+    # Names now live in the inline-keyboard buttons, not the message body.
+    buttons = [
+        btn.text
+        for row in call.message.reply_markup.inline_keyboard
+        for btn in row
+    ]
+    assert any("Ученик 0" in t for t in buttons)
+    assert any("Ученик 1" in t for t in buttons)
 
 
 async def test_cb_group_students_empty(db) -> None:
@@ -303,7 +381,7 @@ async def test_cb_group_students_empty(db) -> None:
     assert "пока нет учеников" in call.message.text
 
 
-async def test_cb_group_link_contains_join_code(db, monkeypatch) -> None:
+async def test_cb_group_invite_sends_qr_with_link(db, monkeypatch) -> None:
     async with session_scope() as s:
         t = await teachers.get_or_create(s, 10, "t", "Owner")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
@@ -313,10 +391,12 @@ async def test_cb_group_link_contains_join_code(db, monkeypatch) -> None:
         return "dancepulsebot"
 
     monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", fake_username)
-    call = FakeCallback(f"grplink:{gid}", 10)
-    await cb_group_link(call, None)
-    assert f"start=join_{code}" in call.message.text
-    assert "dancepulsebot" in call.message.text
+    call = FakeCallback(f"grpinv:{gid}", 10)
+    await cb_group_invite(call, None)
+    assert call.message.photo_captions, "invite must be sent as a photo"
+    caption = call.message.photo_captions[0]
+    assert f"start=join_{code}" in caption
+    assert "dancepulsebot" in caption
 
 
 async def test_cb_group_delete_removes_group_and_students(db) -> None:
@@ -342,3 +422,55 @@ async def test_cb_groups_list_empty(db) -> None:
     call = FakeCallback("grplist", 555)
     await cb_groups_list(call)
     assert call.message.text is not None and "нет групп" in call.message.text
+
+
+# ── edit existing group ──────────────────────────────────────────────
+
+
+async def test_edit_level_updates_group_and_name(db) -> None:
+    from app.bot.handlers.teacher import cb_edit_level, edit_level_pick
+
+    gid = await _make_group_with_members(n=0)
+    fsm = FakeFSM()
+    # open the level picker
+    await cb_edit_level(FakeCallback(f"ge:level:{gid}", 10), fsm)
+    assert fsm.state.state.endswith(":level")  # EditGroup.level
+    # pick «ур.3»
+    await edit_level_pick(FakeCallback("nglv:pick:3", 10), fsm)
+    assert fsm.state is None
+    async with session_scope() as s:
+        g = await groups.get_group(s, gid)
+        assert g.level == 3
+        # Сальса was set in _make_group_with_members → name derives from style+level
+        assert g.name == "Сальса · ур.3"
+
+
+async def test_edit_room_typed_clears_when_skip(db) -> None:
+    from app.bot.handlers.teacher import (
+        cb_edit_room,
+        edit_room_skip,
+        edit_room_typed,
+    )
+
+    gid = await _make_group_with_members(n=0)
+    fsm = FakeFSM()
+    await cb_edit_room(FakeCallback(f"ge:room:{gid}", 10), fsm)
+    await edit_room_typed(FakeMessage(user_id=10, text="зал 38"), fsm)
+    async with session_scope() as s:
+        assert (await groups.get_group(s, gid)).room == "зал 38"
+    # second pass: skip clears it
+    fsm2 = FakeFSM()
+    await cb_edit_room(FakeCallback(f"ge:room:{gid}", 10), fsm2)
+    await edit_room_skip(FakeCallback("ngrm:skip", 10), fsm2)
+    async with session_scope() as s:
+        assert (await groups.get_group(s, gid)).room is None
+
+
+async def test_edit_rejects_non_owner(db) -> None:
+    from app.bot.handlers.teacher import cb_edit_level
+
+    gid = await _make_group_with_members(owner_tg=10, n=0)
+    fsm = FakeFSM()
+    await cb_edit_level(FakeCallback(f"ge:level:{gid}", 999), fsm)  # not the owner
+    assert fsm.state is None  # didn't enter the edit flow
+    assert any("не найдена" in a for a in FakeCallback(f"ge:level:{gid}", 999).answers) is False

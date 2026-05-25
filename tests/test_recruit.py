@@ -6,6 +6,7 @@ from app.bot.handlers.recruit import (
     cb_support_join,
     cb_support_pick,
     cb_support_pick_send,
+    cb_support_skip,
 )
 from app.bot.keyboards import support_pick_keyboard
 from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
@@ -296,3 +297,44 @@ async def test_support_join_records_claim(db) -> None:
     async with session_scope() as s:
         assert await supports.count_claims(s, ctx.call_id) == 1
     assert any(chat == 100 for chat, _ in bot.sent)  # teacher notified
+
+
+async def test_support_flip_skip_after_join(db) -> None:
+    """After saying yes a support can flip to «не смогу» — claim is reverted
+    and a closed call is re-opened. Teacher is told about the freed slot."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+        # needed=2; lower it to 1 so a single claim closes the call
+        call = await supports.get_call(s, ctx.call_id)
+        call.needed = 1
+
+    bot = FakeBot()
+    await cb_support_join(FakeCallback(f"sup:join:{ctx.call_id}", user_id=700), bot)
+    async with session_scope() as s:
+        c = await supports.get_call(s, ctx.call_id)
+        assert c.status == SupportCallStatus.closed
+        assert await supports.count_claims(s, ctx.call_id) == 1
+
+    skip_cb = FakeCallback(f"sup:skip:{ctx.call_id}", user_id=700)
+    await cb_support_skip(skip_cb, bot)
+    async with session_scope() as s:
+        c = await supports.get_call(s, ctx.call_id)
+        assert c.status == SupportCallStatus.open  # slot freed
+        assert await supports.count_claims(s, ctx.call_id) == 0
+    # teacher gets a heads-up
+    assert any("передумал" in t for _, t in bot.sent)
+    # ack message has the flip-back button
+    assert skip_cb.message.text and "не сможешь" in skip_cb.message.text
+
+
+async def test_support_flip_skip_without_prior_claim(db) -> None:
+    """Skip without a prior join is still a clean ack — no teacher ping."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+    bot = FakeBot()
+    cb = FakeCallback(f"sup:skip:{ctx.call_id}", user_id=700)
+    await cb_support_skip(cb, bot)
+    assert bot.sent == []  # teacher not pinged
+    assert cb.message.text and "не сможешь" in cb.message.text

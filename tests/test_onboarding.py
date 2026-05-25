@@ -7,7 +7,7 @@ from app.bot.handlers.student import (
     join_name_typed,
     join_start,
 )
-from app.bot.handlers.teacher import cb_group_qr
+from app.bot.handlers.teacher import cb_group_invite
 from app.bot.states import JoinFlow
 from app.bot.utils import qr_png
 from app.db.models import Gender
@@ -215,14 +215,14 @@ def test_qr_png_is_valid_png() -> None:
     assert len(png) > 100
 
 
-async def test_cb_group_qr_sends_photo(db, monkeypatch) -> None:
+async def test_cb_group_invite_sends_photo(db, monkeypatch) -> None:
     _, gid, _ = await _teacher_and_group()
 
     async def fake_username(bot) -> str:
         return "dancepulsebot"
 
     monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", fake_username)
-    call = FakeCallback(f"grpqr:{gid}", user_id=100)
-    await cb_group_qr(call, None)
+    call = FakeCallback(f"grpinv:{gid}", user_id=100)
+    await cb_group_invite(call, None)
     assert call.message.photo_captions
     assert "Сальса" in call.message.photo_captions[0]

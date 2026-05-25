@@ -19,18 +19,81 @@ async def create_group(
     weekdays: str,
     lesson_time: str,
     lead_hours: int,
+    *,
+    style: str | None = None,
+    level: int | None = None,
+    venue_id: int | None = None,
+    room: str | None = None,
+    teachers_note: str | None = None,
 ) -> Group:
     group = Group(
         teacher_id=teacher_id,
         name=name,
+        style=style,
+        level=level,
         weekdays=weekdays,
         lesson_time=lesson_time,
         lead_hours=lead_hours,
+        venue_id=venue_id,
+        room=room,
+        teachers_note=teachers_note,
         join_code=_gen_join_code(),
     )
     session.add(group)
     await session.flush()
     return group
+
+
+_UNSET = object()
+
+
+async def update_group(
+    session: AsyncSession,
+    group: Group,
+    *,
+    name: object = _UNSET,
+    style: object = _UNSET,
+    level: object = _UNSET,
+    weekdays: object = _UNSET,
+    lesson_time: object = _UNSET,
+    venue_id: object = _UNSET,
+    room: object = _UNSET,
+    teachers_note: object = _UNSET,
+) -> None:
+    """Patch arbitrary fields on a Group. Sentinel `_UNSET` distinguishes
+    «don't touch» from «set to None»."""
+    if name is not _UNSET:
+        group.name = name  # type: ignore[assignment]
+    if style is not _UNSET:
+        group.style = style  # type: ignore[assignment]
+    if level is not _UNSET:
+        group.level = level  # type: ignore[assignment]
+    if weekdays is not _UNSET:
+        group.weekdays = weekdays  # type: ignore[assignment]
+    if lesson_time is not _UNSET:
+        group.lesson_time = lesson_time  # type: ignore[assignment]
+    if venue_id is not _UNSET:
+        group.venue_id = venue_id  # type: ignore[assignment]
+    if room is not _UNSET:
+        group.room = room  # type: ignore[assignment]
+    if teachers_note is not _UNSET:
+        group.teachers_note = teachers_note  # type: ignore[assignment]
+    await session.flush()
+
+
+async def teacher_styles(session: AsyncSession, teacher_id: int) -> list[str]:
+    """Distinct non-empty style names the teacher has previously used, by recency."""
+    stmt = (
+        select(Group.style)
+        .where(Group.teacher_id == teacher_id, Group.style.is_not(None))
+        .order_by(Group.id.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    seen: list[str] = []
+    for s in rows:
+        if s and s not in seen:
+            seen.append(s)
+    return seen
 
 
 async def get_group(session: AsyncSession, group_id: int) -> Group | None:

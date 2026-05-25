@@ -48,6 +48,33 @@ async def count_claims(session: AsyncSession, call_id: int) -> int:
     return (await session.execute(stmt)).scalar_one()
 
 
+async def unclaim(
+    session: AsyncSession, call_id: int, person_id: int
+) -> bool:
+    """Revert a person's claim. Decrements helped_count and re-opens a closed
+    call so the freed slot is available again. Returns True if anything changed.
+    """
+    row = (
+        await session.execute(
+            select(SupportClaim).where(
+                SupportClaim.support_call_id == call_id,
+                SupportClaim.person_id == person_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    person = await session.get(Person, person_id)
+    if person is not None and person.helped_count > 0:
+        person.helped_count -= 1
+    await session.delete(row)
+    call = await session.get(SupportCall, call_id)
+    if call is not None and call.status == SupportCallStatus.closed:
+        call.status = SupportCallStatus.open
+    await session.flush()
+    return True
+
+
 async def claim(
     session: AsyncSession, call_id: int, person_id: int
 ) -> tuple[bool, int, int]:

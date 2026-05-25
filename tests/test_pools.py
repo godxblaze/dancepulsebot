@@ -46,9 +46,17 @@ async def _person_of_teacher(
 
 
 async def test_cmd_pool_empty(db) -> None:
+    async with session_scope() as s:
+        await teachers.get_or_create(s, 100, "t", "Препод")
     msg = FakeMessage(user_id=100)
     await cmd_pool(msg)
     assert msg.replies and "пуст" in msg.replies[0]
+
+
+async def test_cmd_pool_silent_for_non_teacher(db) -> None:
+    msg = FakeMessage(user_id=999)
+    await cmd_pool(msg)
+    assert msg.replies == []
 
 
 async def test_cmd_pool_lists_people(db) -> None:

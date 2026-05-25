@@ -11,6 +11,10 @@ async def get_by_tg_id(session: AsyncSession, tg_user_id: int) -> Teacher | None
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def list_all(session: AsyncSession) -> list[Teacher]:
+    return list((await session.execute(select(Teacher))).scalars().all())
+
+
 async def get_or_create(
     session: AsyncSession,
     tg_user_id: int,
@@ -23,3 +27,10 @@ async def get_or_create(
         session.add(teacher)
         await session.flush()
     return teacher
+
+
+async def set_name(session: AsyncSession, teacher_id: int, full_name: str) -> None:
+    teacher = await session.get(Teacher, teacher_id)
+    if teacher is not None:
+        teacher.full_name = full_name
+        await session.flush()

@@ -9,8 +9,12 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.bot.keyboards import attendance_keyboard, support_pick_keyboard
-from app.bot.utils import bar
+from app.bot.keyboards import (
+    attendance_keyboard,
+    lesson_card_keyboard,
+    support_pick_keyboard,
+)
+from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
 from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus, Teacher
 from app.db.session import session_scope
@@ -18,6 +22,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
+from app.services import venues as venues_svc
 from app.services.schedule import local_now, next_lesson_at
 
 log = logging.getLogger(__name__)
@@ -34,16 +39,28 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
         members = await persons_svc.group_members(s, group.id)
         await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
         survey_id = survey.id
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
 
     if not members:
         log.info("Group «%s» has no members — survey %s is empty", group.name, survey_id)
         return
 
-    text = (
-        f"💓 <b>{escape(group.name)}</b>\n"
-        f"Занятие {lesson_at:%d.%m} в {group.lesson_time}.\n\n"
-        f"Придёшь?"
-    )
+    place = format_place(group, venue)
+    lines = [
+        f"💓 <b>{escape(format_group_title(group))}</b>",
+        f"Занятие {lesson_at:%d.%m} в {group.lesson_time}.",
+    ]
+    if place:
+        lines.append(f"📍 {escape(place)}")
+    if group.teachers_note:
+        lines.append(f"👤 {escape(group.teachers_note)}")
+    lines.append("")
+    lines.append("Придёшь?")
+    text = "\n".join(lines)
     sent = 0
     for p in members:
         try:
@@ -99,6 +116,7 @@ async def _maybe_send_summary(
             teacher_tg,
             _format_summary(group, lesson_at, summary),
             parse_mode=ParseMode.HTML,
+            reply_markup=lesson_card_keyboard(group.id, survey_id, summary.pending),
         )
     except Exception as e:  # noqa: BLE001
         log.warning("Failed to send auto-summary to teacher %s: %s", teacher_tg, e)
@@ -144,15 +162,27 @@ async def _maybe_recruit(
         candidates = await persons_svc.support_candidates(
             s, group.teacher_id, gender_needed, group.id
         )
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
 
     total_pairs = male + female
-    head = (
-        f"🆘 <b>{escape(group.name)}</b> · {lesson_at:%d.%m} {group.lesson_time}\n"
-        f"баланс пар:\n"
-        f"👦 {bar(male, total_pairs)} {male}\n"
-        f"👧 {bar(female, total_pairs)} {female}\n"
-        f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}."
-    )
+    head_lines = [
+        f"🆘 <b>{escape(format_group_title(group))}</b> · "
+        f"{lesson_at:%d.%m} {group.lesson_time}",
+    ]
+    place = format_place(group, venue)
+    if place:
+        head_lines.append(f"📍 {escape(place)}")
+    head_lines.extend([
+        "баланс пар:",
+        f"🕺 {bar(male, total_pairs)} {male}",
+        f"💃 {bar(female, total_pairs)} {female}",
+        f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.",
+    ])
+    head = "\n".join(head_lines)
     try:
         if candidates:
             await bot.send_message(

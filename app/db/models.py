@@ -59,15 +59,34 @@ class Teacher(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Venue(Base):
+    """Place a teacher's lessons happen — reused across groups."""
+
+    __tablename__ = "venues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(120))
+    address: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
-    name: Mapped[str] = mapped_column(String(200))
+    name: Mapped[str] = mapped_column(String(200))  # auto-generated from style+level
+    style: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    level: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..4
     weekdays: Mapped[str] = mapped_column(String(20))  # "0,2" — Mon,Wed (0=Mon)
     lesson_time: Mapped[str] = mapped_column(String(5))  # "19:00"
     lead_hours: Mapped[int] = mapped_column(Integer, default=18)
+    venue_id: Mapped[int | None] = mapped_column(
+        ForeignKey("venues.id", ondelete="SET NULL"), nullable=True
+    )
+    room: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    teachers_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
     join_code: Mapped[str] = mapped_column(String(32), unique=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

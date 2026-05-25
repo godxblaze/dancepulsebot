@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Gender, Group, Membership, Person
+from app.db.models import Gender, Group, Membership, Person, Response, Survey, SurveyStatus
 
 
 async def get_person(
@@ -19,6 +19,13 @@ async def find_by_tg(session: AsyncSession, tg_user_id: int) -> Person | None:
     """Any person with this telegram id, regardless of teacher."""
     stmt = select(Person).where(Person.tg_user_id == tg_user_id).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def find_all_by_tg(session: AsyncSession, tg_user_id: int) -> list[Person]:
+    """Every Person row for this telegram account (one human can be a student
+    of multiple teachers)."""
+    stmt = select(Person).where(Person.tg_user_id == tg_user_id)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def person_groups(session: AsyncSession, person_id: int) -> list[Group]:
@@ -62,6 +69,25 @@ async def set_gender(session: AsyncSession, person_id: int, gender: Gender) -> N
     if person is not None:
         person.gender = gender
         await session.flush()
+
+
+async def set_name_everywhere(
+    session: AsyncSession, tg_user_id: int, full_name: str
+) -> int:
+    """Update full_name on every Person row for this telegram account.
+
+    A person can sit under several teachers, but it's the same human — the rename
+    should apply to all rows so every teacher sees the updated name.
+    """
+    persons = (
+        (await session.execute(select(Person).where(Person.tg_user_id == tg_user_id)))
+        .scalars()
+        .all()
+    )
+    for p in persons:
+        p.full_name = full_name
+    await session.flush()
+    return len(persons)
 
 
 async def set_support_level(
@@ -117,6 +143,31 @@ async def group_members(session: AsyncSession, group_id: int) -> list[Person]:
         .order_by(Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def remove_from_group(
+    session: AsyncSession, person_id: int, group_id: int
+) -> bool:
+    """Drop a person's membership in a group. Returns True if anything was removed.
+
+    Also drops their Response rows for any still-open survey of that group, so
+    they stop counting towards the next-lesson roll-call.
+    """
+    result = await session.execute(
+        delete(Membership).where(
+            Membership.person_id == person_id, Membership.group_id == group_id
+        )
+    )
+    open_surveys = select(Survey.id).where(
+        Survey.group_id == group_id, Survey.status == SurveyStatus.open
+    )
+    await session.execute(
+        delete(Response).where(
+            Response.person_id == person_id, Response.survey_id.in_(open_surveys)
+        )
+    )
+    await session.flush()
+    return (result.rowcount or 0) > 0
 
 
 async def count_members(session: AsyncSession, group_id: int) -> int:

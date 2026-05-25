@@ -5,13 +5,19 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
-from app.bot.keyboards import support_ask_keyboard, support_pick_keyboard
+from app.bot.keyboards import (
+    support_ask_keyboard,
+    support_flip_keyboard,
+    support_pick_keyboard,
+)
+from app.bot.utils import format_group_title, format_place
 from app.db.models import Person, SupportCallStatus, Teacher
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
+from app.services import venues as venues_svc
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -95,15 +101,27 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
             await call.answer("Никого не нашлось", show_alert=True)
             return
         await supports_svc.set_status(s, call_id, SupportCallStatus.open)
-        group_name = group.name
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
+        title = format_group_title(group)
+        place = format_place(group, venue)
+        teachers_note = group.teachers_note
         lesson_time = group.lesson_time
         lesson_at = survey.lesson_at
 
-    text = (
-        f"🆘 Нужна помощь!\n"
-        f"Группа «{group_name}», занятие {lesson_at:%d.%m} в {lesson_time}.\n"
-        f"Не хватает пары — сможешь подойти выручить?"
-    )
+    text_lines = [
+        "🆘 Нужна помощь!",
+        f"«{title}» — {lesson_at:%d.%m} в {lesson_time}.",
+    ]
+    if place:
+        text_lines.append(f"📍 {place}")
+    if teachers_note:
+        text_lines.append(f"👤 {teachers_note}")
+    text_lines.append("Не хватает пары — сможешь подойти выручить?")
+    text = "\n".join(text_lines)
     for tg_id, _name in invited:
         try:
             await bot.send_message(
@@ -140,19 +158,37 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         teacher = await s.get(Teacher, group.teacher_id)
         teacher_tg = teacher.tg_user_id if teacher else None
         person_name = person.full_name
+        title = format_group_title(group)
         group_name = group.name
+        lesson_at = survey.lesson_at
 
+    when = f"{lesson_at:%d.%m в %H:%M}"
     if not accepted:
+        # already-claimed branch covers the flip-to-yes case when the call is
+        # full or the user is already on the list — same outcome either way.
+        existing = await _is_already_claimed(call_id, person.id)
+        if existing:
+            if call.message:
+                await call.message.edit_text(
+                    f"✅ Ты записан саппортом на «{title}» {when} — "
+                    f"ждём тебя на занятии.",
+                    reply_markup=support_flip_keyboard(call_id, "join"),
+                )
+            await call.answer()
+            return
         if call.message:
             await call.message.edit_text(
-                "Уже набрали нужное число — спасибо, что откликнулся!"
+                f"Уже набрали нужное число на «{title}» {when} — "
+                f"спасибо, что откликнулся!"
             )
         await call.answer()
         return
 
     if call.message:
         await call.message.edit_text(
-            "✅ Спасибо! Ты записан саппортом — ждём тебя на занятии."
+            f"✅ Спасибо! Ты записан саппортом на «{title}» {when} — "
+            f"ждём тебя на занятии.",
+            reply_markup=support_flip_keyboard(call_id, "join"),
         )
     await call.answer("Записал!")
     if teacher_tg is not None:
@@ -168,7 +204,66 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data.startswith("sup:skip:"))
-async def cb_support_skip(call: CallbackQuery) -> None:
+async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
+    call_id = int((call.data or "").split(":")[2])
+    reverted_name: str | None = None
+    filled = needed = 0
+    teacher_tg: int | None = None
+    title = "занятие"
+    when = ""
+    group_name = ""
+    async with session_scope() as s:
+        sc = await supports_svc.get_call(s, call_id)
+        survey = await surveys_svc.get_survey(s, sc.survey_id) if sc else None
+        group = (
+            await groups_svc.get_group(s, survey.group_id) if survey else None
+        )
+        if group is not None and survey is not None:
+            title = format_group_title(group)
+            when = f"{survey.lesson_at:%d.%m в %H:%M}"
+            group_name = group.name
+            person = await persons_svc.get_person(
+                s, group.teacher_id, call.from_user.id
+            )
+            if person is not None and sc is not None:
+                if await supports_svc.unclaim(s, call_id, person.id):
+                    reverted_name = person.full_name
+                    filled = await supports_svc.count_claims(s, call_id)
+                    needed = sc.needed
+                    teacher = await s.get(Teacher, group.teacher_id)
+                    teacher_tg = teacher.tg_user_id if teacher else None
+
     if call.message:
-        await call.message.edit_text("Ок, в этот раз без тебя. Спасибо!")
+        text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
+        await call.message.edit_text(
+            text, reply_markup=support_flip_keyboard(call_id, "skip")
+        )
     await call.answer()
+
+    # If this was a flip-from-yes — tell the teacher the slot opened up again.
+    if reverted_name is not None and teacher_tg is not None:
+        try:
+            await bot.send_message(
+                teacher_tg,
+                f"↩️ {reverted_name} передумал — снова «{group_name}» "
+                f"{filled}/{needed}.",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _is_already_claimed(call_id: int, person_id: int) -> bool:
+    async with session_scope() as s:
+        from sqlalchemy import select
+
+        from app.db.models import SupportClaim
+
+        row = (
+            await s.execute(
+                select(SupportClaim).where(
+                    SupportClaim.support_call_id == call_id,
+                    SupportClaim.person_id == person_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return row is not None

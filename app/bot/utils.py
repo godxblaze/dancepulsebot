@@ -5,6 +5,8 @@ import io
 import segno
 from aiogram import Bot
 
+from app.db.models import Group, Venue
+
 _bot_username: str | None = None
 
 
@@ -28,3 +30,39 @@ def bar(filled: int, total: int, width: int = 10) -> str:
         return "░" * width
     n = max(0, min(width, round(width * filled / total)))
     return "█" * n + "░" * (width - n)
+
+
+def format_place(group: Group, venue: Venue | None) -> str | None:
+    """One-line venue+room description for a lesson, or None if nothing is set."""
+    parts: list[str] = []
+    if venue is not None:
+        if venue.address:
+            parts.append(f"{venue.name} — {venue.address}")
+        else:
+            parts.append(venue.name)
+    if group.room:
+        parts.append(group.room)
+    return ", ".join(parts) if parts else None
+
+
+def format_group_title(group: Group) -> str:
+    """Display title built from style + level. Falls back to the legacy `name`
+    column for groups created before those fields existed."""
+    parts: list[str] = []
+    if group.style:
+        parts.append(group.style)
+    if group.level is not None:
+        parts.append(f"ур.{group.level}")
+    if parts:
+        return " · ".join(parts)
+    return group.name  # legacy fallback
+
+
+def derive_group_name(style: str | None, level: int | None) -> str:
+    """Slug used as Group.name — keeps the column non-null and useful for old views."""
+    parts: list[str] = []
+    if style:
+        parts.append(style)
+    if level is not None:
+        parts.append(f"ур.{level}")
+    return " · ".join(parts) if parts else "Группа"

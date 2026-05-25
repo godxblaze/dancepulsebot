@@ -149,6 +149,17 @@ async def recent_closed_surveys(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def pending_persons(session: AsyncSession, survey_id: int) -> list[Person]:
+    """People in the survey who haven't answered yet."""
+    stmt = (
+        select(Person)
+        .join(Response, Response.person_id == Person.id)
+        .where(Response.survey_id == survey_id, Response.answer.is_(None))
+        .order_by(Person.full_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def gender_yes_counts(session: AsyncSession, survey_id: int) -> tuple[int, int]:
     """(male, female) — how many of each gender answered 'yes' to the survey."""
     stmt = (

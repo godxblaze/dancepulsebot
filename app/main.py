@@ -5,6 +5,7 @@ import logging
 
 from app.bot.bot import build_bot, build_dispatcher
 from app.bot.commands import grant_teacher_commands, set_default_commands
+from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, session_scope
 from app.scheduler.scheduler import build_scheduler
@@ -15,6 +16,7 @@ log = logging.getLogger("dance.main")
 
 async def run() -> None:
     setup_logging()
+    settings.validate_runtime()
     await init_db()
     log.info("Database ready")
 

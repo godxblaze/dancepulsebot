@@ -11,10 +11,12 @@ engine = create_async_engine(settings.database_url)
 
 
 @event.listens_for(engine.sync_engine, "connect")
-def _enable_sqlite_foreign_keys(dbapi_connection, _record) -> None:
-    """SQLite enforces ON DELETE CASCADE only when foreign keys are on per connection."""
+def _configure_sqlite(dbapi_connection, _record) -> None:
+    """Per-connection PRAGMAs: FK enforcement + WAL for concurrent reads/safer crashes."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
 

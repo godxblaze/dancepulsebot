@@ -1,3 +1,6 @@
+import sys
+
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,5 +18,27 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.db_path}"
 
+    def validate_runtime(self) -> None:
+        """Stop early on missing/obviously-wrong values — лучше упасть с понятным
+        сообщением при старте, чем загадочно молчать в polling-loop."""
+        problems: list[str] = []
+        if not self.bot_token or len(self.bot_token) < 20 or ":" not in self.bot_token:
+            problems.append(
+                "BOT_TOKEN пуст или некорректен — возьми у @BotFather и пропиши в .env"
+            )
+        if self.developer_id <= 0:
+            problems.append(
+                "DEVELOPER_ID не задан — без него никто не сможет получить роль "
+                "преподавателя через /grant. Пропиши свой Telegram user_id в .env"
+            )
+        if self.default_lead_hours <= 0:
+            problems.append("DEFAULT_LEAD_HOURS должен быть > 0")
+        if problems:
+            raise RuntimeError("Конфиг невалиден:\n  - " + "\n  - ".join(problems))
 
-settings = Settings()
+
+try:
+    settings = Settings()
+except ValidationError as e:
+    print(f"Не удалось прочитать .env: {e}", file=sys.stderr)
+    raise

@@ -38,9 +38,9 @@ from app.db.models import (
 )
 from app.db.session import init_db, session_scope
 from app.services import admins as admins_svc
-from app.services import schools as schools_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import venues as venues_svc
 
 # Pool of realistic Russian names

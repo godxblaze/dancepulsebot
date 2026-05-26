@@ -2155,7 +2155,7 @@ async def cb_school_list(call: CallbackQuery) -> None:
     if admin is None or call.message is None:
         await call.answer()
         return
-    await _render_school_list(call.message, admin.id)
+    await _render_school_list(call.message, admin.id, edit=True)
     await call.answer()
 
 
@@ -2167,7 +2167,7 @@ async def cb_school_card(call: CallbackQuery) -> None:
     if admin is None or call.message is None:
         await call.answer()
         return
-    await _render_school_card(call.message, school_id, admin.id)
+    await _render_school_card(call.message, school_id, admin.id, edit=True)
     await call.answer()
 
 
@@ -2208,7 +2208,7 @@ async def cb_school_remove_member(call: CallbackQuery) -> None:
     else:
         await call.answer("Уже не co-admin", show_alert=True)
     if call.message is not None:
-        await _render_school_card(call.message, school_id, me.id)
+        await _render_school_card(call.message, school_id, me.id, edit=True)
 
 
 @router.callback_query(F.data.startswith("schren:"))

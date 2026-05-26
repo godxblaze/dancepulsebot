@@ -26,7 +26,8 @@ def weekdays_keyboard(selected: set[int]) -> InlineKeyboardMarkup:
 def groups_keyboard(groups: list[Group]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for g in groups:
-        label = f"{g.name} · {g.style}" if g.style else g.name
+        prefix = "⏸ " if not g.active else ""
+        label = f"{prefix}{g.name} · {g.style}" if g.style else f"{prefix}{g.name}"
         if len(label) > 64:
             label = label[:61] + "…"
         kb.button(text=label, callback_data=f"grp:{g.id}")

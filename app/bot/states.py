@@ -43,3 +43,9 @@ class Broadcast(StatesGroup):
     group_id живёт в FSM data."""
 
     text = State()
+
+
+class RenameSchool(StatesGroup):
+    """Owner переименовывает школу. school_id в FSM data."""
+
+    name = State()

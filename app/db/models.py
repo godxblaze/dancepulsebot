@@ -56,11 +56,6 @@ class SchoolMemberRole(enum.StrEnum):
     coadmin = "coadmin"
 
 
-# Legacy: GroupAccessRole оставлен временно для миграционного периода.
-# Удалить вместе с таблицей group_access на этапе 5.
-class GroupAccessRole(enum.StrEnum):
-    owner = "owner"
-    coadmin = "coadmin"
 
 
 class Admin(Base):
@@ -188,53 +183,6 @@ class LessonCancellation(Base):
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
     lesson_at: Mapped[datetime] = mapped_column(DateTime)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class CoadminInvite(Base):
-    """Одноразовая ссылка-приглашение в co-admin'ы конкретной группы.
-
-    Owner запрашивает ссылку — создаётся короткоживущий код. По переходу
-    приглашённый делает /start coadm_<code>, бот спрашивает подтверждение и
-    выдаёт co-admin доступ. Использованные / просроченные инвайты лежат
-    мёртвыми (видны в БД, но не валидны) — пусть их подчищает фоновый
-    cleanup, для пилота это OK."""
-
-    __tablename__ = "coadmin_invites"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
-    code: Mapped[str] = mapped_column(String(32), unique=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    used_by_admin_id: Mapped[int | None] = mapped_column(
-        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class GroupAccess(Base):
-    """Many-to-many между Admin и Group с ролью.
-
-    Owner — первоначальный создатель: может приглашать/убирать co-admin'ов
-    и удалять группу. Co-admin видит группу в /groups, получает auto-summary
-    и может пинговать молчащих; не может удалить группу или сменить owner'а.
-
-    На создании группы автоматически добавляется одна строка с role=owner.
-    """
-
-    __tablename__ = "group_access"
-    __table_args__ = (
-        UniqueConstraint("group_id", "admin_id", name="uq_group_access_group_admin"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
-    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
-    role: Mapped[GroupAccessRole] = mapped_column(
-        Enum(GroupAccessRole, name="group_access_role"),
-        default=GroupAccessRole.coadmin,
-    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

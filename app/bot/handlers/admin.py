@@ -20,6 +20,7 @@ from app.bot.keyboards import (
     MENU_NAME,
     MENU_NEWGROUP,
     MENU_POOL,
+    MENU_SCHOOL,
     MENU_STATS,
     MENU_TEXTS,
     MENU_TODAY,
@@ -30,6 +31,8 @@ from app.bot.keyboards import (
     confirm_cancel_lesson_keyboard,
     confirm_delete_keyboard,
     confirm_remove_from_group_keyboard,
+    confirm_school_delete_keyboard,
+    confirm_school_leave_keyboard,
     group_actions_keyboard,
     group_edit_menu_keyboard,
     groups_keyboard,
@@ -37,6 +40,9 @@ from app.bot.keyboards import (
     person_card_keyboard,
     pick_lesson_to_cancel_keyboard,
     pool_keyboard,
+    school_accept_keyboard,
+    school_card_keyboard,
+    school_picker_keyboard,
     skip_keyboard,
     students_keyboard,
     style_picker_keyboard,
@@ -46,7 +52,7 @@ from app.bot.keyboards import (
     walk_in_picker_keyboard,
     weekdays_keyboard,
 )
-from app.bot.states import Broadcast, EditGroup, EditName, NewGroup
+from app.bot.states import Broadcast, EditGroup, EditName, NewGroup, RenameSchool
 from app.bot.utils import (
     bar,
     derive_group_name,
@@ -2077,4 +2083,317 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
         people = await persons_svc.admin_visible_persons(s, teacher.id)
     if call.message:
         await call.message.edit_reply_markup(reply_markup=pool_keyboard(people))
+    await call.answer()
+# Школьные handlers — append to admin.py
+
+
+# ── school management ────────────────────────────────────────────────
+
+
+async def _render_school_card(target, school_id: int, admin_id: int) -> None:
+    """Show a school card: name, member list and per-role action buttons."""
+    async with session_scope() as s:
+        school = await schools_svc.get_school(s, school_id)
+        if school is None:
+            return
+        role = await schools_svc.get_role(s, school_id, admin_id)
+        if role is None:
+            return
+        members = await schools_svc.members_of(s, school_id)
+        all_schools = await schools_svc.admin_schools(s, admin_id)
+    is_owner = role.value == "owner"
+    lines = [f"🏫 <b>{escape(school.name)}</b>", ""]
+    for admin, r in members:
+        glyph = "👑" if r.value == "owner" else "🛠"
+        lines.append(f"{glyph} {escape(admin.full_name)}")
+    text = "\n".join(lines)
+    multi = len(all_schools) > 1
+    await target.edit_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=school_card_keyboard(school_id, is_owner, multi_school=multi),
+    )
+
+
+async def _render_school_list(message_or_call, admin_id: int) -> None:
+    async with session_scope() as s:
+        all_schools = await schools_svc.admin_schools(s, admin_id)
+    if not all_schools:
+        return
+    if len(all_schools) == 1:
+        school, _ = all_schools[0]
+        if hasattr(message_or_call, "message") and message_or_call.message is not None:
+            await _render_school_card(message_or_call.message, school.id, admin_id)
+        else:
+            await _render_school_card(message_or_call, school.id, admin_id)
+        return
+    text = "🏫 Твои школы — выбери, какую открыть:"
+    markup = school_picker_keyboard(all_schools)
+    if hasattr(message_or_call, "answer"):
+        await message_or_call.answer(text, reply_markup=markup)
+    else:
+        await message_or_call.edit_text(text, reply_markup=markup)
+
+
+@router.message(Command("school"))
+@router.message(F.text == MENU_SCHOOL)
+async def cmd_school(message: Message) -> None:
+    tg = message.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, tg.id)
+    if admin is None:
+        return
+    await _render_school_list(message, admin.id)
+
+
+@router.callback_query(F.data == "schlist")
+async def cb_school_list(call: CallbackQuery) -> None:
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+    if admin is None or call.message is None:
+        await call.answer()
+        return
+    await _render_school_list(call.message, admin.id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schcard:"))
+async def cb_school_card(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+    if admin is None or call.message is None:
+        await call.answer()
+        return
+    await _render_school_card(call.message, school_id, admin.id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schlink:"))
+async def cb_school_invite_link(call: CallbackQuery, bot: Bot) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может приглашать", show_alert=True)
+            return
+        invite = await schools_svc.create_invite(s, school_id)
+        code = invite.code
+        school = await schools_svc.get_school(s, school_id)
+        school_name = school.name if school else "—"
+    link = await _partner_link(bot, code)
+    await call.message.answer(
+        f"🛠 Ссылка-приглашение co-админом школы «{escape(school_name)}» — "
+        f"действует 24 ч. Перешли её одному человеку:\n\n"
+        f"<code>{escape(link)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await call.answer("Ссылка готова — пересылай")
+
+
+@router.callback_query(F.data.startswith("schrem:"))
+async def cb_school_remove_member(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    school_id, admin_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        me = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if me is None or not await schools_svc.is_owner(s, school_id, me.id):
+            await call.answer("Только owner может убирать", show_alert=True)
+            return
+        removed = await schools_svc.remove_coadmin(s, school_id, admin_id)
+    if removed:
+        await call.answer("Убран")
+    else:
+        await call.answer("Уже не co-admin", show_alert=True)
+    if call.message is not None:
+        await _render_school_card(call.message, school_id, me.id)
+
+
+@router.callback_query(F.data.startswith("schren:"))
+async def cb_school_rename_start(call: CallbackQuery, state: FSMContext) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может переименовывать", show_alert=True)
+            return
+    await state.set_state(RenameSchool.name)
+    await state.update_data(school_id=school_id)
+    await call.message.answer(
+        "Напиши новое название школы. Чтобы передумать — /cancel."
+    )
+    await call.answer()
+
+
+@router.message(Command("cancel"), RenameSchool.name)
+async def school_rename_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменил.")
+
+
+@router.message(RenameSchool.name, F.text, ~F.text.in_(MENU_TEXTS))
+async def school_rename_save(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    school_id = data.get("school_id")
+    await state.clear()
+    new_name = (message.text or "").strip()
+    if not new_name:
+        await message.answer("Пустое название — отменил.")
+        return
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, message.from_user.id)
+        if admin is None or school_id is None:
+            return
+        if not await schools_svc.is_owner(s, school_id, admin.id):
+            await message.answer("Только owner может переименовывать.")
+            return
+        await schools_svc.rename_school(s, school_id, new_name)
+    await message.answer(f"✅ Теперь школа называется «{new_name}».")
+
+
+@router.callback_query(F.data.startswith("schdel:"))
+async def cb_school_delete_confirm(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может удалять школу", show_alert=True)
+            return
+        school = await schools_svc.get_school(s, school_id)
+        group_count = len(await groups_svc.school_groups(s, school_id))
+        name = school.name if school else "—"
+    await call.message.edit_text(
+        f"⚠️ Удалить школу «{escape(name)}»?\n"
+        f"Внутри {group_count} групп(ы) — они тоже будут удалены вместе с "
+        f"учениками, опросами и пулом саппортов. Это необратимо.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_school_delete_keyboard(school_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schdelok:"))
+async def cb_school_delete(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может удалять школу", show_alert=True)
+            return
+        school = await schools_svc.get_school(s, school_id)
+        if school is None:
+            await call.answer("Уже удалена", show_alert=True)
+            return
+        name = school.name
+        await schools_svc.delete_school(s, school)
+    await call.message.edit_text(f"🗑 Школа «{escape(name)}» удалена.")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schleave:"))
+async def cb_school_leave_confirm(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        school = await schools_svc.get_school(s, school_id)
+        if school is None:
+            await call.answer("Школа не найдена", show_alert=True)
+            return
+        name = school.name
+    await call.message.edit_text(
+        f"Выйти из школы «{escape(name)}»? Твои собственные данные не "
+        f"пропадут — ты просто перестанешь видеть её группы.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_school_leave_keyboard(school_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schleaveok:"))
+async def cb_school_leave(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None:
+            return
+        role = await schools_svc.get_role(s, school_id, admin.id)
+        if role is None:
+            await call.answer("Ты не в этой школе", show_alert=True)
+            return
+        if role.value == "owner":
+            await call.answer(
+                "Owner не может выйти; удали школу или передай владение.",
+                show_alert=True,
+            )
+            return
+        await schools_svc.remove_coadmin(s, school_id, admin.id)
+        school = await schools_svc.get_school(s, school_id)
+        name = school.name if school else "—"
+    await call.message.edit_text(f"↩ Вышел из школы «{escape(name)}».")
+    await call.answer()
+
+
+async def handle_school_invite_start(message: Message, code: str) -> None:
+    """Точка входа из student.join_start при partner_<code>. Показывает
+    карточку школы и кнопку «Принять» — ничего не пишем в БД до подтверждения."""
+    async with session_scope() as s:
+        invite = await schools_svc.get_invite(s, code)
+        if invite is None or not schools_svc.invite_is_valid(invite):
+            await message.answer(
+                "Эта ссылка устарела или уже использована. Попроси у owner'а новую."
+            )
+            return
+        school = await schools_svc.get_school(s, invite.school_id)
+        if school is None:
+            await message.answer("Школа не найдена — возможно, удалена.")
+            return
+        name = school.name
+    await message.answer(
+        f"🛠 Тебя приглашают co-админом школы «{escape(name)}». "
+        f"Co-admin видит все группы школы, может управлять учениками и "
+        f"опросами, но не может удалить школу.\n\nПринимаешь?",
+        parse_mode=ParseMode.HTML,
+        reply_markup=school_accept_keyboard(code),
+    )
+
+
+@router.callback_query(F.data.startswith("schaccept:"))
+async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
+    code = (call.data or "").split(":", 1)[1]
+    tg = call.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        invite = await schools_svc.get_invite(s, code)
+        if invite is None or not schools_svc.invite_is_valid(invite):
+            if call.message:
+                await call.message.edit_text(
+                    "Эта ссылка устарела или уже использована."
+                )
+            await call.answer()
+            return
+        admin = await admins_svc.get_or_create(
+            s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
+        )
+        await schools_svc.add_coadmin(s, invite.school_id, admin.id)
+        await schools_svc.consume_invite(s, invite, admin.id)
+        school = await schools_svc.get_school(s, invite.school_id)
+        name = school.name if school else "—"
+    try:
+        await grant_admin_commands(bot, tg.id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not set admin commands for %s: %s", tg.id, e)
+    if call.message:
+        await call.message.edit_text(
+            f"✅ Готово, ты теперь co-админ школы «{escape(name)}». "
+            f"Команда /groups покажет все её группы."
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "schdecline")
+async def cb_school_decline(call: CallbackQuery) -> None:
+    if call.message:
+        await call.message.edit_text("Окей, приглашение отклонено.")
     await call.answer()

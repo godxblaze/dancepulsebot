@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Admin, Gender, Group, Person, Venue
+from app.db.models import Admin, Gender, Group, Person, School, SchoolMemberRole, Venue
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -61,9 +61,6 @@ def group_actions_keyboard(
         callback_data=f"grpattnmark:{group_id}",
     )])
     if is_owner:
-        rows.append(
-            [InlineKeyboardButton(text="🛠 Со-админы", callback_data=f"grpcoa:{group_id}")]
-        )
         if is_active:
             rows.append([InlineKeyboardButton(
                 text="⏸ Пауза группы", callback_data=f"grppause:{group_id}",
@@ -168,30 +165,96 @@ def confirm_cancel_lesson_keyboard(group_id: int, ts: int) -> InlineKeyboardMark
     )
 
 
-def coadmins_menu_keyboard(
-    group_id: int, coadmins: list[Admin]
+def school_card_keyboard(
+    school_id: int, is_owner: bool, multi_school: bool = False
 ) -> InlineKeyboardMarkup:
-    """Подменю «Со-админы»: получить ссылку-приглашение + список existing с кнопкой убрать."""
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(
-            text="➕ Получить ссылку-приглашение",
-            callback_data=f"coalink:{group_id}",
-        )]
-    ]
-    for a in coadmins:
+    """Карточка школы. Owner видит больше (пригласить, переименовать,
+    удалить); co-admin — только посмотреть состав и выйти."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if is_owner:
         rows.append([InlineKeyboardButton(
-            text=f"🗑 Убрать {a.full_name}",
-            callback_data=f"coarem:{group_id}:{a.id}",
+            text="➕ Пригласить co-админа", callback_data=f"schlink:{school_id}",
         )])
-    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+        rows.append([InlineKeyboardButton(
+            text="✏️ Переименовать школу", callback_data=f"schren:{school_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="🗑 Удалить школу", callback_data=f"schdel:{school_id}",
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            text="↩ Выйти из школы", callback_data=f"schleave:{school_id}",
+        )])
+    if multi_school:
+        rows.append([InlineKeyboardButton(
+            text="◀ К списку школ", callback_data="schlist",
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def coadmin_accept_keyboard(code: str) -> InlineKeyboardMarkup:
+def school_members_keyboard(
+    school_id: int, members: list[tuple[Admin, SchoolMemberRole]], is_owner: bool
+) -> InlineKeyboardMarkup:
+    """Inline-список member'ов школы. Если ты owner — у coadmin-строк появляется кнопка убрать."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for admin, role in members:
+        prefix = "👑" if role == SchoolMemberRole.owner else "🛠"
+        label = f"{prefix} {admin.full_name}"
+        if is_owner and role == SchoolMemberRole.coadmin:
+            rows.append([InlineKeyboardButton(
+                text=f"🗑 Убрать {admin.full_name}",
+                callback_data=f"schrem:{school_id}:{admin.id}",
+            )])
+        else:
+            # Информационная строка — callback no-op
+            rows.append([InlineKeyboardButton(text=label, callback_data="noop")])
+    rows.append([InlineKeyboardButton(
+        text="◀ К карточке школы", callback_data=f"schcard:{school_id}",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def school_picker_keyboard(
+    schools: list[tuple[School, SchoolMemberRole]]
+) -> InlineKeyboardMarkup:
+    """Если у admin'а > 1 школы — выбор школы для дальнейшего действия."""
+    kb = InlineKeyboardBuilder()
+    for school, role in schools:
+        glyph = "👑" if role == SchoolMemberRole.owner else "🛠"
+        kb.button(text=f"{glyph} {school.name}", callback_data=f"schcard:{school.id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def school_accept_keyboard(code: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Принять", callback_data=f"coaacc:{code}")],
-            [InlineKeyboardButton(text="✗ Не сейчас", callback_data="coadecl")],
+            [InlineKeyboardButton(text="✅ Принять", callback_data=f"schaccept:{code}")],
+            [InlineKeyboardButton(text="✗ Не сейчас", callback_data="schdecline")],
+        ]
+    )
+
+
+def confirm_school_delete_keyboard(school_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"schcard:{school_id}")],
+            [InlineKeyboardButton(
+                text="🗑 Да, удалить школу со всеми группами",
+                callback_data=f"schdelok:{school_id}",
+            )],
+        ]
+    )
+
+
+def confirm_school_leave_keyboard(school_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"schcard:{school_id}")],
+            [InlineKeyboardButton(
+                text="↩ Да, выйти из школы",
+                callback_data=f"schleaveok:{school_id}",
+            )],
         ]
     )
 
@@ -434,12 +497,13 @@ MENU_TODAY = "📅 Сегодня"
 MENU_STATS = "📊 Статистика"
 MENU_POOL = "🆘 Саппорты"
 MENU_NEWGROUP = "➕ Новая группа"
+MENU_SCHOOL = "🏫 Школа"
 MENU_EXPORT = "📥 Экспорт"
 MENU_HELP = "❓ Помощь"
 MENU_NAME = "✏️ Моё имя"
 MENU_TEXTS = frozenset({
     MENU_GROUPS, MENU_TODAY, MENU_STATS, MENU_POOL,
-    MENU_NEWGROUP, MENU_EXPORT, MENU_HELP, MENU_NAME,
+    MENU_NEWGROUP, MENU_SCHOOL, MENU_EXPORT, MENU_HELP, MENU_NAME,
 })
 
 
@@ -449,8 +513,9 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
             [KeyboardButton(text=MENU_STATS), KeyboardButton(text=MENU_POOL)],
-            [KeyboardButton(text=MENU_NEWGROUP), KeyboardButton(text=MENU_EXPORT)],
-            [KeyboardButton(text=MENU_NAME), KeyboardButton(text=MENU_HELP)],
+            [KeyboardButton(text=MENU_NEWGROUP), KeyboardButton(text=MENU_SCHOOL)],
+            [KeyboardButton(text=MENU_EXPORT), KeyboardButton(text=MENU_NAME)],
+            [KeyboardButton(text=MENU_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,

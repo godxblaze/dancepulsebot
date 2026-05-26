@@ -48,23 +48,10 @@ async def _apply_lightweight_migrations(conn) -> None:
         await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
-async def _backfill_group_access(conn) -> None:
-    """Для уже существующих групп заводим owner-запись в group_access — если её
-    ещё нет. Идемпотентно (INSERT OR IGNORE через NOT EXISTS)."""
-    await conn.execute(text(
-        "INSERT INTO group_access (group_id, admin_id, role) "
-        "SELECT g.id, g.admin_id, 'owner' FROM groups g "
-        "WHERE g.admin_id IS NOT NULL AND NOT EXISTS ("
-        "  SELECT 1 FROM group_access ga "
-        "  WHERE ga.group_id = g.id AND ga.admin_id = g.admin_id"
-        ")"
-    ))
-
-
 async def _backfill_schools(conn) -> None:
     """Для каждого Admin без owner-школы создаём «Моя школа» и переносим в неё
-    все его группы/учеников/площадки (group_access.role=owner отождествляется
-    с «эта группа была его»). Идемпотентно — повторный запуск ничего не делает."""
+    все его группы/учеников/площадки. Идемпотентно — повторный запуск ничего
+    не делает."""
     # 1. У каждого admin'а должна быть своя owner-школа.
     await conn.execute(text(
         "INSERT INTO schools (name) "
@@ -109,7 +96,6 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _apply_lightweight_migrations(conn)
-        await _backfill_group_access(conn)
         await _backfill_schools(conn)
 
 

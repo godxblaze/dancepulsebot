@@ -38,6 +38,7 @@ from app.db.models import (
 )
 from app.db.session import init_db, session_scope
 from app.services import admins as admins_svc
+from app.services import schools as schools_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import venues as venues_svc
@@ -104,39 +105,41 @@ async def main() -> None:
         await s.execute(delete(Venue))
         await s.flush()
 
-        # 1) Admin = developer
+        # 1) Admin = developer (+ его owned-школа авто-создаётся)
         admin = await admins_svc.get_or_create(
             s, dev_id, None, "Тестовый Препод"
         )
         admin_id = admin.id
+        school = await schools_svc.get_or_create_owned_school(s, admin_id)
+        school_id = school.id
 
         # 2) Venue
         venue = await venues_svc.create_venue(
-            s, admin_id, "Wave Dance", "Шлюзовая наб. 8с2"
+            s, school_id, "Wave Dance", "Шлюзовая наб. 8с2"
         )
         venue_id = venue.id
 
         # 3) Группы
         # Сальса — баланс ОК
         g_salsa = await groups_svc.create_group(
-            s, admin_id, "Сальса · ур.1", "0,2", "19:00", 18,
+            s, school_id, "Сальса · ур.1", "0,2", "19:00", 18,
             style="Сальса", level=1, venue_id=venue_id, room="зал 38",
             teachers_note="Маша + Петя",
         )
         # Бачата — перекос (мало парней, много девушек) → recruit нужен
         g_bachata = await groups_svc.create_group(
-            s, admin_id, "Бачата · ур.2", "1,3", "20:00", 18,
+            s, school_id, "Бачата · ур.2", "1,3", "20:00", 18,
             style="Бачата", level=2, venue_id=venue_id, room="зал 22",
             teachers_note="Алина",
         )
         # Кизомба — баланс
         g_kizomba = await groups_svc.create_group(
-            s, admin_id, "Кизомба · ур.3", "5", "16:00", 18,
+            s, school_id, "Кизомба · ур.3", "5", "16:00", 18,
             style="Кизомба", level=3, venue_id=venue_id, room="зал 40",
         )
         # Хастл — на паузе (для теста UI)
         g_hustle = await groups_svc.create_group(
-            s, admin_id, "Хастл · ур.2", "4", "19:30", 18,
+            s, school_id, "Хастл · ур.2", "4", "19:30", 18,
             style="Хастл", level=2, venue_id=venue_id, room="зал 19",
             teachers_note="Дима",
         )

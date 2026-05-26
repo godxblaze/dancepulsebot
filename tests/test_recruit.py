@@ -12,7 +12,7 @@ from app.bot.keyboards import support_pick_keyboard
 from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import groups, persons, supports, surveys, admins
+from app.services import admins, groups, persons, supports, surveys
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 

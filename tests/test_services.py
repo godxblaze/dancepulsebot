@@ -3,7 +3,7 @@ from datetime import datetime
 
 from app.db.models import Person, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, persons, surveys, admins
+from app.services import admins, groups, persons, surveys
 
 
 async def test_teacher_get_or_create_idempotent(db) -> None:

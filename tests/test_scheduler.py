@@ -7,7 +7,7 @@ import pytest
 from app.db.models import SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import groups, persons, surveys, admins
+from app.services import admins, groups, persons, surveys
 
 MONDAY_LESSON = datetime(2026, 5, 25, 19, 0)
 

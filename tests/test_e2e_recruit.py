@@ -8,13 +8,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from app.bot.handlers.recruit import (
-    cb_support_join,
-    cb_support_pick,
-    cb_support_pick_send,
-)
-from app.bot.handlers.student import join_gender, join_name_typed, join_start
-from app.bot.handlers.survey import on_attendance
 from app.bot.handlers.admin import (
     cb_pool_toggle,
     newgroup_level_pick,
@@ -27,15 +20,22 @@ from app.bot.handlers.admin import (
     newgroup_venue_pick,
     newgroup_weekdays,
 )
+from app.bot.handlers.recruit import (
+    cb_support_join,
+    cb_support_pick,
+    cb_support_pick_send,
+)
+from app.bot.handlers.student import join_gender, join_name_typed, join_start
+from app.bot.handlers.survey import on_attendance
 from app.bot.states import JoinFlow, NewGroup
 from app.db.models import Gender, Person, SupportCallStatus
 from app.db.session import session_scope
 from app.scheduler.scheduler import _maybe_recruit, _poll_group
+from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import admins as admins_svc
 from tests._fakes import (
     FakeBot,
     FakeCallback,

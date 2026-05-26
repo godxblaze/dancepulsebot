@@ -26,7 +26,7 @@ from app.bot.handlers.admin import (
 from app.bot.states import NewGroup
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, persons, surveys, admins
+from app.services import admins, groups, persons, surveys
 
 # ── fakes ────────────────────────────────────────────────────────────
 

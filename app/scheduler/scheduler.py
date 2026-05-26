@@ -141,7 +141,10 @@ async def _maybe_send_summary(
         return  # ничего не доехало — попробуем на следующем tick
     async with session_scope() as s:
         await surveys_svc.mark_summary_sent(s, survey_id)
-    log.info("Auto-summary for survey %s sent to %d/%d admin(s)", survey_id, delivered, len(admin_tg_ids))
+    log.info(
+        "Auto-summary for survey %s sent to %d/%d admin(s)",
+        survey_id, delivered, len(admin_tg_ids),
+    )
 
 
 def _gender_plural(gender: Gender) -> str:

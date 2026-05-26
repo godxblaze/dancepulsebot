@@ -9,6 +9,8 @@ venv/
 *.sqlite3-shm
 *.sqlite3.bak
 backups/
+logs/
+*.fsm.json
 .pytest_cache/
 .ruff_cache/
 *.egg-info/

@@ -1,18 +1,18 @@
 """Tests for the join / onboarding flow and QR generation."""
 from types import SimpleNamespace
 
+from app.bot.handlers.admin import cb_group_invite
 from app.bot.handlers.student import (
     join_gender,
     join_name_confirm,
     join_name_typed,
     join_start,
 )
-from app.bot.handlers.admin import cb_group_invite
 from app.bot.states import JoinFlow
 from app.bot.utils import qr_png
 from app.db.models import Gender
 from app.db.session import session_scope
-from app.services import groups, persons, admins
+from app.services import admins, groups, persons
 
 # ── fakes ────────────────────────────────────────────────────────────
 

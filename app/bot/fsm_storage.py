@@ -19,7 +19,8 @@ from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
 
 
 def _key_to_str(key: StorageKey) -> str:
-    return f"{key.bot_id}:{key.chat_id}:{key.user_id}:{key.thread_id or 0}:{key.business_connection_id or ''}"
+    bc = key.business_connection_id or ""
+    return f"{key.bot_id}:{key.chat_id}:{key.user_id}:{key.thread_id or 0}:{bc}"
 
 
 class JsonFileStorage(BaseStorage):

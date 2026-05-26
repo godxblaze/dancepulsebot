@@ -24,11 +24,11 @@ from app.db.models import (
 )
 from app.db.session import init_db, session_scope
 from app.scheduler.scheduler import _maybe_recruit, _poll_group
+from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import admins as teachers_svc
 from app.services import venues as venues_svc
 
 GODBLAZE_TG = 791668206

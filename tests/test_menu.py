@@ -1,11 +1,11 @@
 """Tests for role-aware /start, /grant, and the student home screen."""
 from types import SimpleNamespace
 
-from app.bot.handlers.student import show_student_home
 from app.bot.handlers.admin import cmd_grant, cmd_start
+from app.bot.handlers.student import show_student_home
 from app.core.config import settings
 from app.db.session import session_scope
-from app.services import groups, persons, admins
+from app.services import admins, groups, persons
 
 
 class FakeMessage:

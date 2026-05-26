@@ -15,8 +15,8 @@ from sqlalchemy import select
 from app.core.logging import setup_logging
 from app.db.models import Group
 from app.db.session import init_db, session_scope
+from app.services import admins as admins_svc
 from app.services import groups as groups_svc
-from app.services import admins as teachers_svc
 
 log = logging.getLogger("seed")
 

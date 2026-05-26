@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from app.bot.handlers.survey import on_attendance
 from app.db.models import SurveyKind
 from app.db.session import session_scope
-from app.services import groups, persons, surveys, admins
+from app.services import admins, groups, persons, surveys
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 

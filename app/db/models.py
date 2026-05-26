@@ -76,6 +76,10 @@ class Admin(Base):
     full_name: Mapped[str] = mapped_column(String(200))
     support_threshold: Mapped[int] = mapped_column(Integer, default=2)
     support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=6)
+    # True если человек хоть раз прошёл onboarding (создал свою школу либо
+    # принял partner-приглашение). Используется чтобы не показывать
+    # CreateSchool-prompt бывшим co-admin'ам, которых сняли со всех школ.
+    has_completed_setup: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

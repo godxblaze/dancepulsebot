@@ -220,15 +220,17 @@ async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
                 s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
             )
         admin_schools: list = []
+        completed_setup = False
         if teacher is not None:
             admin_schools = await schools_svc.admin_schools(s, teacher.id)
+            completed_setup = bool(teacher.has_completed_setup)
     if teacher is None:
         # everyone is a student by default — teacher status is granted via /grant
         await show_student_home(message)
         return
-    if not admin_schools:
-        # Свежий admin (или старый кого вынесли из всех школ) — первый
-        # шаг это назвать собственную школу.
+    if not admin_schools and not completed_setup:
+        # Свежий admin: только что получил /grant или это первый /start
+        # developer'а. Первый шаг — назвать собственную школу.
         if state is not None:
             await state.set_state(CreateSchool.name)
         await message.answer(
@@ -238,6 +240,12 @@ async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
             "Например: «Wave Dance» или «Школа Маши».\n\n"
             "Чтобы передумать — /cancel."
         )
+        return
+    if not admin_schools:
+        # Бывший co-admin кого выгнали (или сам вышел) из всех школ.
+        # Не предлагаем создать свою — ему пусть пришлют новый partner-link.
+        # Admin-запись в БД оставляем, флаг — что онбординг уже пройден.
+        await show_student_home(message)
         return
     await message.answer(
         "💓 Dance Pulse\n\n"
@@ -277,6 +285,8 @@ async def create_school_name_typed(message: Message, state: FSMContext) -> None:
             school = existing
         else:
             school = await schools_svc.create_school(s, admin.id, name)
+        admin.has_completed_setup = True
+        await s.flush()
     await state.clear()
     await message.answer(
         f"✅ Школа «{escape(school.name)}» создана.\n\n"
@@ -2493,6 +2503,8 @@ async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
         )
         await schools_svc.add_coadmin(s, invite.school_id, admin.id)
         await schools_svc.consume_invite(s, invite, admin.id)
+        admin.has_completed_setup = True
+        await s.flush()
         school = await schools_svc.get_school(s, invite.school_id)
         name = school.name if school else "—"
     try:

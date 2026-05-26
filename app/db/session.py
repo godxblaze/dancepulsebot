@@ -36,6 +36,7 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("groups", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
     ("persons", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
     ("venues", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
+    ("admins", "has_completed_setup", "BOOLEAN DEFAULT 0 NOT NULL"),
 )
 
 
@@ -90,6 +91,13 @@ async def _backfill_schools(conn) -> None:
             ") "
             f"WHERE {table}.school_id IS NULL AND {table}.admin_id IS NOT NULL"
         ))
+    # 3. Все существующие admin'ы у которых есть хоть какая-то связь со школой
+    # уже прошли onboarding — отметим флаг чтобы не водить их снова через
+    # CreateSchool-prompt (важно для пилотной базы).
+    await conn.execute(text(
+        "UPDATE admins SET has_completed_setup = 1 "
+        "WHERE id IN (SELECT DISTINCT admin_id FROM school_members)"
+    ))
 
 
 async def init_db() -> None:

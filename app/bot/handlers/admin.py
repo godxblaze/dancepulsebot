@@ -25,6 +25,7 @@ from app.bot.keyboards import (
     attendance_keyboard,
     coadmin_accept_keyboard,
     coadmins_menu_keyboard,
+    confirm_cancel_lesson_keyboard,
     confirm_delete_keyboard,
     confirm_remove_from_group_keyboard,
     group_actions_keyboard,
@@ -50,12 +51,14 @@ from app.bot.utils import (
     qr_png,
 )
 from app.core.config import settings
-from app.db.models import Gender, Group, Person, SurveyStatus
+from app.db.models import Answer, Gender, Group, Person, SupportCallStatus, SurveyStatus
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import cancellations as cancellations_svc
 from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
 from app.services.schedule import format_weekdays, local_now, next_lesson_at
@@ -1437,6 +1440,106 @@ async def cb_group_delete(call: CallbackQuery) -> None:
         name = format_group_title(group)
         await groups_svc.delete_group(s, group)
     await call.message.edit_text(f"🗑 Группа «{name}» удалена.")
+    await call.answer()
+
+
+# ── cancel single lesson ────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("grpcancel:"))
+async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
+    """Шаг 1: показываем confirmation с датой ближайшего занятия."""
+    group_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, local_now())
+        if lesson_at is None:
+            await call.answer("Нет ближайших занятий", show_alert=True)
+            return
+        if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
+            await call.answer("Это занятие уже отменено", show_alert=True)
+            return
+        title = format_group_title(group)
+    await call.message.edit_text(
+        f"Отменить занятие «{title}» {lesson_at:%d.%m в %H:%M}?\n\n"
+        f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
+        f"уйдёт уведомление об отмене.",
+        reply_markup=confirm_cancel_lesson_keyboard(group_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpcancelok:"))
+async def cb_lesson_cancel(call: CallbackQuery, bot: Bot) -> None:
+    """Шаг 2: пишем cancellation, закрываем survey/support, шлём уведомления."""
+    group_id = int(call.data.split(":", 1)[1])
+    yes_tg_ids: list[int] = []
+    support_tg_ids: list[int] = []
+    title = ""
+    lesson_at = None
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, local_now())
+        if lesson_at is None:
+            await call.answer("Нет ближайших занятий", show_alert=True)
+            return
+        title = format_group_title(group)
+        await cancellations_svc.cancel(s, group.id, lesson_at)
+        # Если survey уже был разослан — закрываем и собираем «приду»-учеников.
+        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
+        if survey is not None:
+            if survey.status == SurveyStatus.open:
+                survey.status = SurveyStatus.closed
+                await s.flush()
+            from sqlalchemy import select as _sel
+
+            from app.db.models import Response
+            rows = (await s.execute(
+                _sel(Person.tg_user_id)
+                .join(Response, Response.person_id == Person.id)
+                .where(Response.survey_id == survey.id, Response.answer == Answer.yes)
+            )).scalars().all()
+            yes_tg_ids = list(rows)
+            # SupportCall на это занятие тоже закрываем и уведомляем согласившихся.
+            sc = await supports_svc.get_call_for_survey(s, survey.id)
+            if sc is not None and sc.status != SupportCallStatus.closed:
+                from app.db.models import SupportClaim
+                sup_rows = (await s.execute(
+                    _sel(Person.tg_user_id)
+                    .join(SupportClaim, SupportClaim.person_id == Person.id)
+                    .where(SupportClaim.support_call_id == sc.id)
+                )).scalars().all()
+                support_tg_ids = list(sup_rows)
+                sc.status = SupportCallStatus.closed
+                await s.flush()
+
+    notice = f"⚠️ Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено."
+    for tg in yes_tg_ids:
+        try:
+            await bot.send_message(tg, notice)
+        except Exception as e:  # noqa: BLE001
+            log.info("cancel-notice to %s failed: %s", tg, e)
+    sup_notice = (
+        f"⚠️ Помощь на занятии «{title}» {lesson_at:%d.%m в %H:%M} "
+        f"больше не нужна — занятие отменено."
+    )
+    for tg in support_tg_ids:
+        try:
+            await bot.send_message(tg, sup_notice)
+        except Exception as e:  # noqa: BLE001
+            log.info("cancel-notice (support) to %s failed: %s", tg, e)
+
+    await call.message.edit_text(
+        f"🚫 Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено. "
+        f"Уведомления отправлены ({len(yes_tg_ids)} ученикам, "
+        f"{len(support_tg_ids)} саппортам)."
+    )
     await call.answer()
 
 

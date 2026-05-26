@@ -47,6 +47,13 @@ def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarku
     rows.append(
         [InlineKeyboardButton(text="📨 Пригласить ученика", callback_data=f"grpinv:{group_id}")]
     )
+    rows.append(
+        [InlineKeyboardButton(text="📢 Сообщение группе", callback_data=f"grpbcast:{group_id}")]
+    )
+    rows.append([InlineKeyboardButton(
+        text="🚫 Отменить ближайшее занятие",
+        callback_data=f"grpcancel:{group_id}",
+    )])
     if is_owner:
         rows.append(
             [InlineKeyboardButton(text="🛠 Со-админы", callback_data=f"grpcoa:{group_id}")]
@@ -56,6 +63,18 @@ def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarku
         )
     rows.append([InlineKeyboardButton(text="◀ К списку", callback_data="grplist")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_cancel_lesson_keyboard(group_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grp:{group_id}")],
+            [InlineKeyboardButton(
+                text="🚫 Да, отменить занятие",
+                callback_data=f"grpcancelok:{group_id}",
+            )],
+        ]
+    )
 
 
 def coadmins_menu_keyboard(

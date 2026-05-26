@@ -106,6 +106,22 @@ class Group(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class LessonCancellation(Base):
+    """Отмена одного конкретного занятия. Когда такая запись есть, scheduler не
+    создаёт survey и не делает recruit для этой группы на эту дату."""
+
+    __tablename__ = "lesson_cancellations"
+    __table_args__ = (
+        UniqueConstraint("group_id", "lesson_at", name="uq_cancellation_group_lesson"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    lesson_at: Mapped[datetime] = mapped_column(DateTime)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class CoadminInvite(Base):
     """Одноразовая ссылка-приглашение в co-admin'ы конкретной группы.
 

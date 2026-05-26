@@ -19,6 +19,7 @@ from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
 from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
+from app.services import cancellations as cancellations_svc
 from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -318,6 +319,9 @@ async def tick(bot: Bot) -> None:
             continue
         hours_until = (lesson_at - now).total_seconds() / 3600
         if 0 < hours_until <= group.lead_hours:
+            async with session_scope() as s:
+                if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
+                    continue
             await _poll_group(bot, group, lesson_at)
             await _maybe_send_summary(bot, group, lesson_at, now)
             await _maybe_recruit(bot, group, lesson_at, now)

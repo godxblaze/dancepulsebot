@@ -32,6 +32,7 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("groups", "teachers_note", "VARCHAR(200)"),
     ("groups", "level", "INTEGER"),
     ("support_calls", "no_reply_notified", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("responses", "actually_attended", "BOOLEAN"),
 )
 
 

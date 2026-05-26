@@ -23,6 +23,8 @@ from app.bot.keyboards import (
     MENU_TODAY,
     admin_menu_keyboard,
     attendance_keyboard,
+    attendance_mark_keyboard,
+    closed_surveys_keyboard,
     coadmin_accept_keyboard,
     coadmins_menu_keyboard,
     confirm_cancel_lesson_keyboard,
@@ -262,10 +264,13 @@ async def cmd_stats(message: Message) -> None:
                 summary = await surveys_svc.summarize(s, survey.id)
                 total_yes += summary.yes
                 total_all += summary.total
-                lines.append(
+                line = (
                     f"{bar(summary.yes, summary.total)}  "
                     f"{survey.lesson_at:%d.%m} · {summary.yes}/{summary.total}"
                 )
+                if summary.actual_attended is not None:
+                    line += f" · реально пришло {summary.actual_attended}"
+                lines.append(line)
             if total_all:
                 pct = round(100 * total_yes / total_all)
                 lines.append(f"средний отклик: <b>{pct}%</b>")
@@ -1511,6 +1516,98 @@ async def broadcast_send(message: Message, state: FSMContext, bot: Bot) -> None:
     if failed:
         parts.append(f"не доехало: {failed}")
     await message.answer(" · ".join(parts))
+
+
+# ── post-lesson attendance mark ─────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("grpattnmark:"))
+async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
+    """Показываем 5 последних закрытых занятий — preпод выбирает какое отмечать."""
+    group_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        surveys = await surveys_svc.recent_closed_surveys(s, group_id, limit=5)
+        title = format_group_title(group)
+    if not surveys:
+        await call.answer("Нет прошедших занятий", show_alert=True)
+        return
+    items = [(s.id, s.lesson_at.strftime("%d.%m в %H:%M")) for s in surveys]
+    await call.message.edit_text(
+        f"✏️ Какое занятие «{title}» отметить?",
+        reply_markup=closed_surveys_keyboard(group_id, items),
+    )
+    await call.answer()
+
+
+async def _render_attendance_roster(
+    call: CallbackQuery, survey_id: int, group_id: int
+) -> None:
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        survey = await surveys_svc.get_survey(s, survey_id)
+        if survey is None or survey.group_id != group_id:
+            await call.answer("Опрос не найден", show_alert=True)
+            return
+        roster = await surveys_svc.attendance_roster(s, survey_id)
+        items = [
+            (p, r.actually_attended, r.answer.value if r.answer else None)
+            for p, r in roster
+        ]
+        title = format_group_title(group)
+    head = (
+        f"✏️ «{title}» — {survey.lesson_at:%d.%m в %H:%M}\n"
+        f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
+        f"В скобках: ✓ обещал, ✗ отказался, — молчал."
+    )
+    await call.message.edit_text(
+        head, reply_markup=attendance_mark_keyboard(survey_id, group_id, items)
+    )
+
+
+@router.callback_query(F.data.startswith("atnlesson:"))
+async def cb_attendance_open_lesson(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    survey_id, group_id = int(parts[1]), int(parts[2])
+    await _render_attendance_roster(call, survey_id, group_id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("atntog:"))
+async def cb_attendance_toggle(call: CallbackQuery) -> None:
+    """Переключение состояния: None → True → False → None."""
+    parts = (call.data or "").split(":")
+    survey_id, person_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        survey = await surveys_svc.get_survey(s, survey_id)
+        if survey is None:
+            await call.answer("Опрос не найден", show_alert=True)
+            return
+        group = await _accessible_group(s, survey.group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        # Найдём текущее состояние
+        from sqlalchemy import select as _sel
+
+        from app.db.models import Response
+        cur = (await s.execute(
+            _sel(Response.actually_attended).where(
+                Response.survey_id == survey_id, Response.person_id == person_id
+            )
+        )).scalar_one_or_none()
+        # None → True → False → None
+        new_value = True if cur is None else (False if cur is True else None)
+        await surveys_svc.set_actual_attendance(s, survey_id, person_id, new_value)
+        group_id = group.id
+    await _render_attendance_roster(call, survey_id, group_id)
+    await call.answer()
 
 
 # ── cancel single lesson ────────────────────────────────────────────

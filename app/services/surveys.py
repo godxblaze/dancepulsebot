@@ -25,6 +25,10 @@ class SurveySummary:
     pending: int
     no_names: list[str]
     pending_names: list[str]
+    # Опционально, заполняется после занятия. None — ни одного актуального
+    # ответа не отмечено (preпод ещё не нажимал «Отметить посещаемость»).
+    actual_attended: int | None = None
+    actual_marked: int = 0  # сколько вообще получили attendance-метку
 
 
 async def get_survey(session: AsyncSession, survey_id: int) -> Survey | None:
@@ -105,6 +109,8 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
     yes = no = pending = 0
     no_names: list[str] = []
     pending_names: list[str] = []
+    actual_attended = 0
+    actual_marked = 0
     for resp, person in rows:
         if resp.answer == Answer.yes:
             yes += 1
@@ -114,7 +120,15 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
         else:
             pending += 1
             pending_names.append(person.full_name)
-    return SurveySummary(len(rows), yes, no, pending, no_names, pending_names)
+        if resp.actually_attended is not None:
+            actual_marked += 1
+            if resp.actually_attended:
+                actual_attended += 1
+    return SurveySummary(
+        len(rows), yes, no, pending, no_names, pending_names,
+        actual_attended=actual_attended if actual_marked else None,
+        actual_marked=actual_marked,
+    )
 
 
 async def close_past_surveys(session: AsyncSession, now: datetime) -> int:
@@ -158,6 +172,34 @@ async def pending_persons(session: AsyncSession, survey_id: int) -> list[Person]
         .order_by(Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def attendance_roster(
+    session: AsyncSession, survey_id: int
+) -> list[tuple[Person, Response]]:
+    """Все Person'ы с их Response для конкретного survey — для post-lesson UI.
+
+    Возвращает ВСЕХ, кто был в опросе (включая «нет» и молчащих). preпод
+    решает кто реально был. Если хочется поглядывать только обещавших —
+    отфильтровать по resp.answer == Answer.yes на стороне вызывающего."""
+    stmt = (
+        select(Response, Person)
+        .join(Person, Response.person_id == Person.id)
+        .where(Response.survey_id == survey_id)
+        .order_by(Person.full_name)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(p, r) for r, p in rows]
+
+
+async def set_actual_attendance(
+    session: AsyncSession, survey_id: int, person_id: int, attended: bool | None
+) -> None:
+    await session.execute(
+        update(Response)
+        .where(Response.survey_id == survey_id, Response.person_id == person_id)
+        .values(actually_attended=attended)
+    )
 
 
 async def persons_without_message(

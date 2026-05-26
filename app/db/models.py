@@ -234,6 +234,8 @@ class Response(Base):
     survey_id: Mapped[int] = mapped_column(ForeignKey("surveys.id", ondelete="CASCADE"))
     person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
     answer: Mapped[Answer | None] = mapped_column(Enum(Answer, name="answer"), nullable=True)
+    # «Реально пришёл?» — заполняется preподом после занятия. None = не отмечено.
+    actually_attended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

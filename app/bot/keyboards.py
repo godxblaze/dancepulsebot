@@ -54,6 +54,10 @@ def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarku
         text="🚫 Отменить ближайшее занятие",
         callback_data=f"grpcancel:{group_id}",
     )])
+    rows.append([InlineKeyboardButton(
+        text="✏️ Отметить посещаемость",
+        callback_data=f"grpattnmark:{group_id}",
+    )])
     if is_owner:
         rows.append(
             [InlineKeyboardButton(text="🛠 Со-админы", callback_data=f"grpcoa:{group_id}")]
@@ -63,6 +67,51 @@ def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarku
         )
     rows.append([InlineKeyboardButton(text="◀ К списку", callback_data="grplist")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def attendance_mark_keyboard(
+    survey_id: int, group_id: int, items: list[tuple[Person, bool | None, str | None]]
+) -> InlineKeyboardMarkup:
+    """Ростер для пост-leson отметки. `items` — (person, attended, promised_answer).
+
+    Отображает рядом с именем:
+      ✅ — реально был (attended=True);
+      ❌ — не пришёл (attended=False);
+      ☐  — не отмечено (attended=None).
+    В скобках promise: «✓ обещал» / «✗ отказался» / «— молчал»."""
+    kb = InlineKeyboardBuilder()
+    for person, attended, promised in items:
+        if attended is True:
+            mark = "✅"
+        elif attended is False:
+            mark = "❌"
+        else:
+            mark = "☐"
+        if promised == "yes":
+            hint = "✓"
+        elif promised == "no":
+            hint = "✗"
+        else:
+            hint = "—"
+        kb.button(
+            text=f"{mark} {person.full_name} ({hint})",
+            callback_data=f"atntog:{survey_id}:{person.id}",
+        )
+    kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def closed_surveys_keyboard(
+    group_id: int, surveys_with_dates: list[tuple[int, str]]
+) -> InlineKeyboardMarkup:
+    """Список последних прошедших занятий — выбрать, какое отмечать."""
+    kb = InlineKeyboardBuilder()
+    for survey_id, label in surveys_with_dates:
+        kb.button(text=label, callback_data=f"atnlesson:{survey_id}:{group_id}")
+    kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def confirm_cancel_lesson_keyboard(group_id: int) -> InlineKeyboardMarkup:

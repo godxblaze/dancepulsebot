@@ -434,10 +434,13 @@ MENU_TODAY = "📅 Сегодня"
 MENU_STATS = "📊 Статистика"
 MENU_POOL = "🆘 Саппорты"
 MENU_NEWGROUP = "➕ Новая группа"
+MENU_EXPORT = "📥 Экспорт"
+MENU_HELP = "❓ Помощь"
 MENU_NAME = "✏️ Моё имя"
-MENU_TEXTS = frozenset(
-    {MENU_GROUPS, MENU_TODAY, MENU_STATS, MENU_POOL, MENU_NEWGROUP, MENU_NAME}
-)
+MENU_TEXTS = frozenset({
+    MENU_GROUPS, MENU_TODAY, MENU_STATS, MENU_POOL,
+    MENU_NEWGROUP, MENU_EXPORT, MENU_HELP, MENU_NAME,
+})
 
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -446,7 +449,8 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
             [KeyboardButton(text=MENU_STATS), KeyboardButton(text=MENU_POOL)],
-            [KeyboardButton(text=MENU_NEWGROUP), KeyboardButton(text=MENU_NAME)],
+            [KeyboardButton(text=MENU_NEWGROUP), KeyboardButton(text=MENU_EXPORT)],
+            [KeyboardButton(text=MENU_NAME), KeyboardButton(text=MENU_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,

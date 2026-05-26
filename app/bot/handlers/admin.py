@@ -14,7 +14,9 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.bot.commands import grant_admin_commands
 from app.bot.handlers.student import show_student_home, show_student_today
 from app.bot.keyboards import (
+    MENU_EXPORT,
     MENU_GROUPS,
+    MENU_HELP,
     MENU_NAME,
     MENU_NEWGROUP,
     MENU_POOL,
@@ -142,6 +144,7 @@ async def cmd_start(message: Message) -> None:
 
 
 @router.message(Command("help"))
+@router.message(F.text == MENU_HELP)
 async def cmd_help(message: Message) -> None:
     tg = message.from_user
     if not tg:
@@ -242,6 +245,7 @@ async def cmd_today(message: Message) -> None:
 
 
 @router.message(Command("export"))
+@router.message(F.text == MENU_EXPORT)
 async def cmd_export(message: Message, bot: Bot) -> None:
     """CSV-выгрузка учеников и посещаемости. Без аргументов — два файла одним
     диалогом. Сами файлы лежат в памяти, ничего не сохраняется на диск."""

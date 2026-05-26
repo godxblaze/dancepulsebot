@@ -33,6 +33,9 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("groups", "level", "INTEGER"),
     ("support_calls", "no_reply_notified", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("responses", "actually_attended", "BOOLEAN"),
+    ("groups", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
+    ("persons", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
+    ("venues", "school_id", "INTEGER REFERENCES schools(id) ON DELETE CASCADE"),
 )
 
 
@@ -51,11 +54,55 @@ async def _backfill_group_access(conn) -> None:
     await conn.execute(text(
         "INSERT INTO group_access (group_id, admin_id, role) "
         "SELECT g.id, g.admin_id, 'owner' FROM groups g "
-        "WHERE NOT EXISTS ("
+        "WHERE g.admin_id IS NOT NULL AND NOT EXISTS ("
         "  SELECT 1 FROM group_access ga "
         "  WHERE ga.group_id = g.id AND ga.admin_id = g.admin_id"
         ")"
     ))
+
+
+async def _backfill_schools(conn) -> None:
+    """Для каждого Admin без owner-школы создаём «Моя школа» и переносим в неё
+    все его группы/учеников/площадки (group_access.role=owner отождествляется
+    с «эта группа была его»). Идемпотентно — повторный запуск ничего не делает."""
+    # 1. У каждого admin'а должна быть своя owner-школа.
+    await conn.execute(text(
+        "INSERT INTO schools (name) "
+        "SELECT 'Моя школа' FROM admins a "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM school_members sm "
+        "  WHERE sm.admin_id = a.id AND sm.role = 'owner'"
+        ")"
+    ))
+    # Это создаёт N школ — но не привязывает их к admin'ам. Свяжу через
+    # «последняя школа без owner-membership = admin без owner-школы». Сложно
+    # для one-pass SQL → делаю pythonic loop.
+    admins_rows = (await conn.execute(text(
+        "SELECT a.id FROM admins a WHERE NOT EXISTS ("
+        "  SELECT 1 FROM school_members sm "
+        "  WHERE sm.admin_id = a.id AND sm.role = 'owner'"
+        ")"
+    ))).fetchall()
+    free_schools = (await conn.execute(text(
+        "SELECT s.id FROM schools s WHERE NOT EXISTS ("
+        "  SELECT 1 FROM school_members sm WHERE sm.school_id = s.id"
+        ") ORDER BY s.id"
+    ))).fetchall()
+    for (admin_id,), (school_id,) in zip(admins_rows, free_schools, strict=False):
+        await conn.execute(text(
+            "INSERT INTO school_members (school_id, admin_id, role) "
+            "VALUES (:sid, :aid, 'owner')"
+        ), {"sid": school_id, "aid": admin_id})
+
+    # 2. Backfill school_id у объектов, у которых он ещё NULL.
+    for table in ("groups", "persons", "venues"):
+        await conn.execute(text(
+            f"UPDATE {table} SET school_id = ("
+            "  SELECT sm.school_id FROM school_members sm "
+            f" WHERE sm.admin_id = {table}.admin_id AND sm.role = 'owner' LIMIT 1"
+            ") "
+            f"WHERE {table}.school_id IS NULL AND {table}.admin_id IS NOT NULL"
+        ))
 
 
 async def init_db() -> None:
@@ -63,6 +110,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _apply_lightweight_migrations(conn)
         await _backfill_group_access(conn)
+        await _backfill_schools(conn)
 
 
 @asynccontextmanager

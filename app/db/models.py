@@ -47,20 +47,31 @@ class SupportCallStatus(enum.StrEnum):
     closed = "closed"  # filled, declined, or nothing was needed
 
 
-class GroupAccessRole(enum.StrEnum):
-    """В пилотной модели только owner может приглашать co-admin'ов и удалять группу;
-    остальное (опросы, пинги, картотека учеников, recruit picker) — одинаково."""
+class SchoolMemberRole(enum.StrEnum):
+    """Роли админа внутри школы. Owner — создатель, может всё включая удалить
+    школу и убрать co-admin'ов; coadmin — равные операционные права, но не
+    может удалить школу или кикнуть owner'а."""
 
     owner = "owner"
     coadmin = "coadmin"
 
 
-class Admin(Base):
-    """School admin — the bot user who runs groups.
+# Legacy: GroupAccessRole оставлен временно для миграционного периода.
+# Удалить вместе с таблицей group_access на этапе 5.
+class GroupAccessRole(enum.StrEnum):
+    owner = "owner"
+    coadmin = "coadmin"
 
-    User-facing UI may still call them «преподаватель» / «препод» — the role
-    is an admin of the school's drives in the bot, but in real life they are
-    teachers of dance groups. Кода-уровень: Admin; UI-уровень: препод."""
+
+class Admin(Base):
+    """Bot-user who runs groups inside one or more schools.
+
+    Admin сам по себе не привязан к школе — связь через SchoolMember. Один
+    Admin может быть владельцем одной собственной школы и co-admin'ом в
+    любом числе чужих.
+
+    UI обычно зовёт их «преподаватель» / «препод» (real-life роль), но в
+    коде — Admin."""
 
     __tablename__ = "admins"
 
@@ -73,13 +84,65 @@ class Admin(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class School(Base):
+    """Top-level container: владеет группами, учениками, площадками, пулом
+    саппортов. Любой member школы видит весь её контент."""
+
+    __tablename__ = "schools"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SchoolMember(Base):
+    """Admin-в-школе. Уникален по (school_id, admin_id)."""
+
+    __tablename__ = "school_members"
+    __table_args__ = (
+        UniqueConstraint("school_id", "admin_id", name="uq_school_members"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[int] = mapped_column(ForeignKey("schools.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    role: Mapped[SchoolMemberRole] = mapped_column(
+        Enum(SchoolMemberRole, name="school_member_role"),
+        default=SchoolMemberRole.coadmin,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SchoolInvite(Base):
+    """Одноразовая ссылка-приглашение в школу. Принятие → SchoolMember(coadmin)."""
+
+    __tablename__ = "school_invites"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[int] = mapped_column(ForeignKey("schools.id", ondelete="CASCADE"))
+    code: Mapped[str] = mapped_column(String(32), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_by_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Venue(Base):
-    """Place an admin's lessons happen — reused across groups."""
+    """Place a school's lessons happen — reused across groups in that school."""
 
     __tablename__ = "venues"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    # legacy: admin_id остался от прошлой модели. Удалить вместе с цепочкой
+    # на этапе 5; пока nullable, новый код пишет только school_id.
+    admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
+    )
+    school_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -89,7 +152,13 @@ class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    # legacy admin_id оставлен на время рефактора. Новый код использует school_id.
+    admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
+    )
+    school_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(200))  # auto-generated from style+level
     style: Mapped[str | None] = mapped_column(String(80), nullable=True)
     level: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..4
@@ -170,18 +239,23 @@ class GroupAccess(Base):
 
 
 class Person(Base):
-    """A human in an admin's audience — a student of groups and/or a support.
-
-    One row per (admin, telegram account); group membership lives in Membership.
-    """
+    """A human inside one school — student and/or support. One row per
+    (school, telegram account); group membership через Membership."""
 
     __tablename__ = "persons"
     __table_args__ = (
+        # legacy unique для совместимости со старой схемой; новый — на school_id.
         UniqueConstraint("admin_id", "tg_user_id", name="uq_persons_admin_tg"),
+        UniqueConstraint("school_id", "tg_user_id", name="uq_persons_school_tg"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
+    )
+    school_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
+    )
     tg_user_id: Mapped[int] = mapped_column(BigInteger)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))

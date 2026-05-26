@@ -255,6 +255,9 @@ async def cmd_stats(message: Message) -> None:
         if not groups:
             await message.answer("У тебя пока нет групп. Создай первую: /newgroup")
             return
+        top_helpers = await persons_svc.top_supports(s, teacher.id, limit=3)
+        four_weeks_ago = local_now() - timedelta(weeks=4)
+        absent = await persons_svc.long_absent(s, teacher.id, four_weeks_ago)
         for g in groups:
             closed = await surveys_svc.recent_closed_surveys(s, g.id, limit=5)
             if not closed:
@@ -282,6 +285,21 @@ async def cmd_stats(message: Message) -> None:
                 pct = round(100 * total_yes / total_all)
                 lines.append(f"средний отклик: <b>{pct}%</b>")
             blocks.append("\n".join(lines))
+
+    if top_helpers:
+        top_lines = ["🏆 <b>Топ саппортов</b>"]
+        for p in top_helpers:
+            top_lines.append(f"• {escape(p.full_name)} — помог {p.helped_count}")
+        blocks.append("\n".join(top_lines))
+
+    if absent:
+        ab_lines = ["💤 <b>Давно не приходили</b> (≥4 недель или вообще ни разу)"]
+        for person, last in absent[:10]:
+            tail = f"последний раз {last:%d.%m.%Y}" if last else "ни разу не отмечен"
+            ab_lines.append(f"• {escape(person.full_name)} — {tail}")
+        if len(absent) > 10:
+            ab_lines.append(f"… и ещё {len(absent) - 10}")
+        blocks.append("\n".join(ab_lines))
 
     await message.answer("\n\n".join(blocks), parse_mode=ParseMode.HTML)
 

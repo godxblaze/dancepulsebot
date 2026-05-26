@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -187,6 +189,52 @@ async def list_persons(session: AsyncSession, admin_id: int) -> list[Person]:
         .order_by(Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def top_supports(
+    session: AsyncSession, admin_id: int, limit: int = 3
+) -> list[Person]:
+    """Топ saппортов admin'а по helped_count (только те, у кого был хотя бы один)."""
+    stmt = (
+        select(Person)
+        .where(Person.admin_id == admin_id, Person.helped_count > 0)
+        .order_by(Person.helped_count.desc(), Person.full_name)
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def long_absent(
+    session: AsyncSession, admin_id: int, since: datetime
+) -> list[tuple[Person, datetime | None]]:
+    """Persons из активных групп admin'а, у которых последняя посещаемость
+    раньше `since` (или вообще не зафиксирована). Возвращает (person, last_seen)."""
+
+    active_member_ids = (
+        select(Membership.person_id)
+        .join(Group, Group.id == Membership.group_id)
+        .where(Group.admin_id == admin_id, Group.active.is_(True))
+        .distinct()
+    )
+    last_seen_stmt = (
+        select(Response.person_id, func.max(Survey.lesson_at).label("last"))
+        .join(Survey, Survey.id == Response.survey_id)
+        .where(Response.actually_attended.is_(True))
+        .group_by(Response.person_id)
+    )
+    last_seen = dict((await session.execute(last_seen_stmt)).all())
+    persons_stmt = (
+        select(Person)
+        .where(Person.admin_id == admin_id, Person.id.in_(active_member_ids))
+        .order_by(Person.full_name)
+    )
+    persons = list((await session.execute(persons_stmt)).scalars().all())
+    result: list[tuple[Person, datetime | None]] = []
+    for p in persons:
+        last = last_seen.get(p.id)
+        if last is None or last < since:
+            result.append((p, last))
+    return result
 
 
 async def support_candidates(

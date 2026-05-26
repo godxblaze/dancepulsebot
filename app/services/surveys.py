@@ -202,6 +202,25 @@ async def set_actual_attendance(
     )
 
 
+async def add_walk_in(
+    session: AsyncSession, survey_id: int, person_id: int
+) -> None:
+    """Walk-in: незаписанный человек пришёл на занятие. Создаём/обновляем Response
+    с actually_attended=True и answer=None (он ничего не обещал — просто появился)."""
+    existing = (await session.execute(
+        select(Response).where(
+            Response.survey_id == survey_id, Response.person_id == person_id
+        )
+    )).scalar_one_or_none()
+    if existing is None:
+        session.add(Response(
+            survey_id=survey_id, person_id=person_id, actually_attended=True,
+        ))
+    else:
+        existing.actually_attended = True
+    await session.flush()
+
+
 async def persons_without_message(
     session: AsyncSession, survey_id: int
 ) -> list[Person]:

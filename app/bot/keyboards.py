@@ -79,6 +79,18 @@ def group_actions_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def walk_in_picker_keyboard(
+    survey_id: int, group_id: int, candidates: list[Person]
+) -> InlineKeyboardMarkup:
+    """Список персон, которых ещё нет в ростере опроса — выбрать «walk-in»."""
+    kb = InlineKeyboardBuilder()
+    for p in candidates:
+        kb.button(text=p.full_name, callback_data=f"atnwkpick:{survey_id}:{p.id}")
+    kb.button(text="◀ Назад к ростеру", callback_data=f"atnlesson:{survey_id}:{group_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def attendance_mark_keyboard(
     survey_id: int, group_id: int, items: list[tuple[Person, bool | None, str | None]]
 ) -> InlineKeyboardMarkup:
@@ -107,6 +119,10 @@ def attendance_mark_keyboard(
             text=f"{mark} {person.full_name} ({hint})",
             callback_data=f"atntog:{survey_id}:{person.id}",
         )
+    kb.button(
+        text="➕ Был ещё кто-то (walk-in)",
+        callback_data=f"atnwk:{survey_id}:{group_id}",
+    )
     kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
     kb.adjust(1)
     return kb.as_markup()

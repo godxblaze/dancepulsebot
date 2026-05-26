@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import BaseStorage
 
 from app.bot.handlers import recruit, student, survey, teacher
 from app.core.config import settings
@@ -13,8 +15,17 @@ def build_bot() -> Bot:
     return Bot(token=settings.bot_token)
 
 
+def _build_storage() -> BaseStorage:
+    """Persist FSM state across restarts — мастер группы и онбординг ученика
+    переживают рестарт. Файл лежит рядом с основной БД."""
+    from app.bot.fsm_storage import JsonFileStorage
+
+    state_path = Path(settings.db_path).with_suffix(".fsm.json")
+    return JsonFileStorage(state_path)
+
+
 def build_dispatcher() -> Dispatcher:
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=_build_storage())
     # student first: it claims /start with a deep-link payload
     dp.include_router(student.router)
     dp.include_router(survey.router)

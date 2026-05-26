@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Gender, Group, Person, Venue
+from app.db.models import Admin, Gender, Group, Person, Venue
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -34,14 +34,54 @@ def groups_keyboard(groups: list[Group]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def group_actions_keyboard(group_id: int) -> InlineKeyboardMarkup:
+def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarkup:
+    """Кнопки в карточке группы. Owner видит больше (изменить, co-админы, удалить);
+    co-admin — только то, что ему доступно."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="👥 Ученики", callback_data=f"grpstu:{group_id}")],
+    ]
+    if is_owner:
+        rows.append(
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"grpedit:{group_id}")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="📨 Пригласить ученика", callback_data=f"grpinv:{group_id}")]
+    )
+    if is_owner:
+        rows.append(
+            [InlineKeyboardButton(text="🛠 Со-админы", callback_data=f"grpcoa:{group_id}")]
+        )
+        rows.append(
+            [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"grpdel:{group_id}")]
+        )
+    rows.append([InlineKeyboardButton(text="◀ К списку", callback_data="grplist")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def coadmins_menu_keyboard(
+    group_id: int, coadmins: list[Admin]
+) -> InlineKeyboardMarkup:
+    """Подменю «Со-админы»: получить ссылку-приглашение + список existing с кнопкой убрать."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text="➕ Получить ссылку-приглашение",
+            callback_data=f"coalink:{group_id}",
+        )]
+    ]
+    for a in coadmins:
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 Убрать {a.full_name}",
+            callback_data=f"coarem:{group_id}:{a.id}",
+        )])
+    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def coadmin_accept_keyboard(code: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Ученики", callback_data=f"grpstu:{group_id}")],
-            [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"grpedit:{group_id}")],
-            [InlineKeyboardButton(text="📨 Пригласить", callback_data=f"grpinv:{group_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"grpdel:{group_id}")],
-            [InlineKeyboardButton(text="◀ К списку", callback_data="grplist")],
+            [InlineKeyboardButton(text="✅ Принять", callback_data=f"coaacc:{code}")],
+            [InlineKeyboardButton(text="✗ Не сейчас", callback_data="coadecl")],
         ]
     )
 

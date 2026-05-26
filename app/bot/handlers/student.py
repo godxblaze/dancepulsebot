@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 JOIN_PREFIX = "join_"
+COADMIN_PREFIX = "coadm_"
 
 
 def _display_name(tg) -> str:
@@ -69,6 +70,12 @@ async def join_start(
     payload = (command.args or "").strip()
     tg = message.from_user
     if not tg:
+        return
+    if payload.startswith(COADMIN_PREFIX):
+        # Co-admin приглашение — обрабатывает admin.py через UI с кнопкой «Принять».
+        from app.bot.handlers.admin import handle_coadmin_invite_start
+
+        await handle_coadmin_invite_start(message, payload[len(COADMIN_PREFIX):])
         return
     if not payload.startswith(JOIN_PREFIX):
         await message.answer(

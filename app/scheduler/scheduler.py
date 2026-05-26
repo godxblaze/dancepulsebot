@@ -78,7 +78,8 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
             # Terminal: пользователь заблокировал бота или чат недоступен.
             # Помечаем -1, чтобы persons_without_message больше его не возвращал.
             log.info(
-                "survey=%s person=%s tg=%s — terminal delivery failure (%s); marking as undeliverable",
+                "survey=%s person=%s tg=%s — terminal delivery failure (%s); "
+                "marking as undeliverable",
                 survey_id, p.id, p.tg_user_id, type(e).__name__,
             )
             async with session_scope() as s:

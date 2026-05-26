@@ -7,10 +7,15 @@ co-admin'ов. И owner, и co-admin видят группу в /groups, пол�
 """
 from __future__ import annotations
 
+import secrets
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Admin, Group, GroupAccess, GroupAccessRole
+from app.db.models import Admin, CoadminInvite, Group, GroupAccess, GroupAccessRole
+
+COADMIN_INVITE_TTL = timedelta(hours=24)
 
 
 async def grant_access(
@@ -125,4 +130,50 @@ async def accessible_groups(
 async def remove_all_for_group(session: AsyncSession, group_id: int) -> None:
     """Called on group delete — drops all access rows."""
     await session.execute(delete(GroupAccess).where(GroupAccess.group_id == group_id))
+    await session.flush()
+
+
+# ── co-admin invites ────────────────────────────────────────────────
+
+
+def _gen_invite_code() -> str:
+    return secrets.token_urlsafe(8)
+
+
+async def create_coadmin_invite(
+    session: AsyncSession, group_id: int
+) -> CoadminInvite:
+    """Создать одноразовую ссылку-приглашение, валидную 24 часа."""
+    invite = CoadminInvite(
+        group_id=group_id,
+        code=_gen_invite_code(),
+        expires_at=datetime.now(UTC) + COADMIN_INVITE_TTL,
+    )
+    session.add(invite)
+    await session.flush()
+    return invite
+
+
+async def get_coadmin_invite(
+    session: AsyncSession, code: str
+) -> CoadminInvite | None:
+    stmt = select(CoadminInvite).where(CoadminInvite.code == code)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+def invite_is_valid(invite: CoadminInvite) -> bool:
+    if invite.used_at is not None:
+        return False
+    # expires_at читается из SQLite как naive — приведём явно к aware
+    expires = invite.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    return expires > datetime.now(UTC)
+
+
+async def consume_coadmin_invite(
+    session: AsyncSession, invite: CoadminInvite, admin_id: int
+) -> None:
+    invite.used_at = datetime.now(UTC)
+    invite.used_by_admin_id = admin_id
     await session.flush()

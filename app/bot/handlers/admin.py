@@ -23,6 +23,8 @@ from app.bot.keyboards import (
     MENU_TODAY,
     admin_menu_keyboard,
     attendance_keyboard,
+    coadmin_accept_keyboard,
+    coadmins_menu_keyboard,
     confirm_delete_keyboard,
     confirm_remove_from_group_keyboard,
     group_actions_keyboard,
@@ -91,6 +93,11 @@ _HELP_STUDENT = (
 async def _join_link(bot: Bot, code: str) -> str:
     username = await get_bot_username(bot)
     return f"https://t.me/{username}?start=join_{code}"
+
+
+async def _coadmin_link(bot: Bot, code: str) -> str:
+    username = await get_bot_username(bot)
+    return f"https://t.me/{username}?start=coadm_{code}"
 
 
 # ── registration & help ──────────────────────────────────────────────
@@ -1139,6 +1146,10 @@ async def cb_group_card(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        is_owner = teacher is not None and await access_svc.is_owner(
+            s, group.id, teacher.id
+        )
         count = await persons_svc.count_members(s, group_id)
         summary = await _format_group_summary(s, group)
         title = format_group_title(group)
@@ -1148,7 +1159,7 @@ async def cb_group_card(call: CallbackQuery) -> None:
             f"Опрос приходит за {group.lead_hours} ч до занятия\n"
             f"Учеников: {count}"
         )
-    await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id))
+    await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
     await call.answer()
 
 
@@ -1160,6 +1171,10 @@ async def cb_group_students(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        is_owner = teacher is not None and await access_svc.is_owner(
+            s, group.id, teacher.id
+        )
         members = await persons_svc.group_members(s, group_id)
     title = format_group_title(group)
     if members:
@@ -1167,7 +1182,7 @@ async def cb_group_students(call: CallbackQuery) -> None:
         await call.message.edit_text(text, reply_markup=students_keyboard(group_id, members))
     else:
         text = f"👥 В группе «{title}» пока нет учеников. Перешли им ссылку-приглашение."
-        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id))
+        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
     await call.answer()
 
 
@@ -1302,8 +1317,13 @@ async def cb_person_remove(call: CallbackQuery) -> None:
         text = f"👥 Ученики «{group_name}» ({len(members)}). Тап по имени — карточка:"
         await call.message.edit_text(text, reply_markup=students_keyboard(group_id, members))
     else:
+        async with session_scope() as s:
+            teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+            is_owner = teacher is not None and await access_svc.is_owner(
+                s, group_id, teacher.id
+            )
         text = f"👥 В группе «{group_name}» больше никого нет. Перешли ссылку-приглашение."
-        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id))
+        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
     await call.answer(f"{name} убран(а)")
 
 
@@ -1417,6 +1437,148 @@ async def cb_group_delete(call: CallbackQuery) -> None:
         name = format_group_title(group)
         await groups_svc.delete_group(s, group)
     await call.message.edit_text(f"🗑 Группа «{name}» удалена.")
+    await call.answer()
+
+
+# ── co-admin management ─────────────────────────────────────────────
+
+
+async def _show_coadmins_menu(call: CallbackQuery, group_id: int) -> None:
+    async with session_scope() as s:
+        group = await _owned_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Только owner может управлять co-админами", show_alert=True)
+            return
+        coadmins = await access_svc.coadmins_of_group(s, group.id)
+        title = format_group_title(group)
+    lines = [f"🛠 Со-админы «{title}»"]
+    if coadmins:
+        lines.append("")
+        for a in coadmins:
+            lines.append(f"• {a.full_name}")
+    else:
+        lines.append("Сейчас никого нет.")
+    lines.append("")
+    lines.append(
+        "Чтобы добавить — получи ссылку и перешли её кандидату. "
+        "Он откроет ссылку, бот спросит подтверждение, и он станет co-админом."
+    )
+    if call.message:
+        await call.message.edit_text(
+            "\n".join(lines),
+            reply_markup=coadmins_menu_keyboard(group_id, coadmins),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpcoa:"))
+async def cb_group_coadmins(call: CallbackQuery) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    await _show_coadmins_menu(call, group_id)
+
+
+@router.callback_query(F.data.startswith("coalink:"))
+async def cb_coadmin_invite_link(call: CallbackQuery, bot: Bot) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        group = await _owned_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Только owner может приглашать co-админов", show_alert=True)
+            return
+        invite = await access_svc.create_coadmin_invite(s, group.id)
+        code = invite.code
+        title = format_group_title(group)
+    link = await _coadmin_link(bot, code)
+    await call.message.answer(
+        f"🛠 Ссылка-приглашение co-админом группы «{title}» — действует 24 ч.\n\n"
+        f"Перешли её одному человеку. По клику бот спросит подтверждение.\n\n"
+        f"<code>{escape(link)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await call.answer("Ссылка готова — пересылай")
+
+
+@router.callback_query(F.data.startswith("coarem:"))
+async def cb_coadmin_remove(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    group_id, admin_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        group = await _owned_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Только owner может убирать co-админов", show_alert=True)
+            return
+        removed = await access_svc.revoke_access(s, group.id, admin_id)
+    if not removed:
+        await call.answer("Уже не co-админ", show_alert=True)
+    else:
+        await call.answer("Убран")
+    await _show_coadmins_menu(call, group_id)
+
+
+async def handle_coadmin_invite_start(message: Message, code: str) -> None:
+    """Точка входа из student.join_start, когда payload начинается с `coadm_`.
+
+    Показывает приглашённому кнопку «Принять» — ничего не пишем в БД до подтверждения."""
+    async with session_scope() as s:
+        invite = await access_svc.get_coadmin_invite(s, code)
+        if invite is None or not access_svc.invite_is_valid(invite):
+            await message.answer(
+                "Эта ссылка устарела или уже использована. Попроси у owner'а новую."
+            )
+            return
+        group = await groups_svc.get_group(s, invite.group_id)
+        if group is None:
+            await message.answer("Группа не найдена — возможно, удалена.")
+            return
+        title = format_group_title(group)
+        summary = await _format_group_summary(s, group)
+    await message.answer(
+        f"🛠 Тебя приглашают co-админом группы «{title}».\n{summary}\n\n"
+        f"Принимаешь?",
+        reply_markup=coadmin_accept_keyboard(code),
+    )
+
+
+@router.callback_query(F.data.startswith("coaacc:"))
+async def cb_coadmin_accept(call: CallbackQuery, bot: Bot) -> None:
+    """Кандидат подтверждает приглашение — создаём Admin (если надо) и grant_access."""
+    code = (call.data or "").split(":", 1)[1]
+    tg = call.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        invite = await access_svc.get_coadmin_invite(s, code)
+        if invite is None or not access_svc.invite_is_valid(invite):
+            if call.message:
+                await call.message.edit_text(
+                    "Эта ссылка устарела или уже использована. "
+                    "Попроси у owner'а новую."
+                )
+            await call.answer()
+            return
+        admin = await admins_svc.get_or_create(
+            s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
+        )
+        await access_svc.grant_access(s, invite.group_id, admin.id)
+        await access_svc.consume_coadmin_invite(s, invite, admin.id)
+        group = await groups_svc.get_group(s, invite.group_id)
+        title = format_group_title(group) if group else "—"
+    try:
+        await grant_admin_commands(bot, tg.id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not set admin commands for %s: %s", tg.id, e)
+    if call.message:
+        await call.message.edit_text(
+            f"✅ Готово, теперь ты co-админ группы «{title}». "
+            f"Команда /groups покажет её."
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "coadecl")
+async def cb_coadmin_decline(call: CallbackQuery) -> None:
+    if call.message:
+        await call.message.edit_text("Окей, приглашение отклонено.")
     await call.answer()
 
 

@@ -237,6 +237,9 @@ class SupportCall(Base):
         Enum(SupportCallStatus, name="support_call_status"),
         default=SupportCallStatus.pending,
     )
+    # Помечается, когда scheduler отправил «никто не откликнулся за X часов» —
+    # чтобы не пинговать препода повторно на каждом tick'е.
+    no_reply_notified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

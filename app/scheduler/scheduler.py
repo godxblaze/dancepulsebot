@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -255,6 +255,50 @@ async def _maybe_recruit(
         log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)
 
 
+SUPPORT_NO_REPLY_AFTER = timedelta(hours=1)
+
+
+async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
+    """Если SupportCall в open уже больше SUPPORT_NO_REPLY_AFTER, а откликов
+    ещё нет/мало — пингуем preпода: «никто не откликнулся, попробуй сам»."""
+    async with session_scope() as s:
+        # SupportCall.created_at в SQLite хранится без таймзоны (server_default=now()),
+        # потому сравниваем naive UTC vs naive UTC.
+        now_utc = datetime.now(UTC).replace(tzinfo=None)
+        stale = await supports_svc.stale_open_calls(s, now_utc, SUPPORT_NO_REPLY_AFTER)
+        items: list[tuple[int, int, int, str]] = []  # needed, filled, admin_tg, title
+        for call in stale:
+            filled = await supports_svc.count_claims(s, call.id)
+            if filled >= call.needed:
+                # Уже хватает — просто пометим чтобы не пинговать.
+                await supports_svc.mark_no_reply_notified(s, call.id)
+                continue
+            survey = await surveys_svc.get_survey(s, call.survey_id)
+            if survey is None:
+                continue
+            group = await groups_svc.get_group(s, survey.group_id)
+            if group is None:
+                continue
+            admin_tgs = await access_svc.admin_tg_ids_for_group(s, group.id)
+            if not admin_tgs:
+                continue
+            title = format_group_title(group)
+            for tg in admin_tgs:
+                items.append((call.needed, filled, tg, title))
+            await supports_svc.mark_no_reply_notified(s, call.id)
+
+    for needed, filled, tg, title in items:
+        text = (
+            f"🆘 «{escape(title)}» — никто из приглашённых не откликнулся "
+            f"за час ({filled}/{needed}). Стоит написать им лично или поискать "
+            f"саппорта через /pool."
+        )
+        try:
+            await bot.send_message(tg, text, parse_mode=ParseMode.HTML)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Failed to send stale-support notice to admin %s: %s", tg, e)
+
+
 async def tick(bot: Bot) -> None:
     """Runs every 15 min: close past surveys, send polls, auto-summaries and recruit."""
     now = local_now()
@@ -262,6 +306,8 @@ async def tick(bot: Bot) -> None:
         closed = await surveys_svc.close_past_surveys(s, now)
     if closed:
         log.info("Closed %d past survey(s)", closed)
+
+    await _notify_stale_support_calls(bot, now)
 
     async with session_scope() as s:
         groups = await groups_svc.active_groups(s)

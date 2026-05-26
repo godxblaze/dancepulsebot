@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,6 +75,32 @@ async def unclaim(
         call.status = SupportCallStatus.open
     await session.flush()
     return True
+
+
+async def stale_open_calls(
+    session: AsyncSession, now: datetime, idle_for: timedelta
+) -> list[SupportCall]:
+    """Open SupportCall'ы, созданные раньше чем now-idle_for, у которых ещё
+    нет required-числа отклинков и preпод ещё не был уведомлён про тишину.
+
+    Используется scheduler'ом чтобы сказать preподу «никто не откликнулся за час»."""
+    cutoff = now - idle_for
+    stmt = (
+        select(SupportCall)
+        .where(
+            SupportCall.status == SupportCallStatus.open,
+            SupportCall.no_reply_notified.is_(False),
+            SupportCall.created_at < cutoff,
+        )
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_no_reply_notified(session: AsyncSession, call_id: int) -> None:
+    call = await session.get(SupportCall, call_id)
+    if call is not None:
+        call.no_reply_notified = True
+        await session.flush()
 
 
 async def claim(

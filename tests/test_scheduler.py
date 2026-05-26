@@ -181,3 +181,45 @@ async def test_tick_empty_group_creates_survey_without_crash(db, freeze) -> None
     async with session_scope() as s:
         survey = await surveys.find_attendance_survey(s, group_id, MONDAY_LESSON)
         assert survey is not None
+
+
+async def test_tick_pings_admin_when_no_replies_to_support(db, freeze) -> None:
+    """Если SupportCall в open уже >1h без откликов, scheduler пингует админа."""
+    from datetime import UTC, timedelta
+
+    from app.db.models import Gender, SupportCall, SupportCallStatus
+
+    group_id = await _make_group(n_students=0)
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, MONDAY_LESSON
+        )
+        call = SupportCall(
+            survey_id=survey.id,
+            gender=Gender.male,
+            needed=2,
+            status=SupportCallStatus.open,
+        )
+        s.add(call)
+        await s.flush()
+        # Имитируем «прошёл час с создания»
+        call.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+        await s.flush()
+        call_id = call.id
+
+    # tick за пределами окна опросов — обработает только stale-supports
+    freeze(datetime(2026, 5, 26, 6, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+
+    pings = [m for m in bot.sent if "никто из приглашённых" in m.text]
+    assert len(pings) == 1
+    assert pings[0].chat_id == 111
+
+    # Второй tick — повторно НЕ пингуем (no_reply_notified=True)
+    await sched.tick(bot)
+    assert sum(1 for m in bot.sent if "никто из приглашённых" in m.text) == 1
+    # Sanity: call помечен
+    async with session_scope() as s:
+        c = await s.get(SupportCall, call_id)
+        assert c.no_reply_notified is True

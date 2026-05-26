@@ -2090,8 +2090,12 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
 # ── school management ────────────────────────────────────────────────
 
 
-async def _render_school_card(target, school_id: int, admin_id: int) -> None:
-    """Show a school card: name, member list and per-role action buttons."""
+async def _render_school_card(
+    target: Message, school_id: int, admin_id: int, *, edit: bool = True
+) -> None:
+    """Карточка школы. edit=True — отредактировать существующее сообщение
+    (для callback'ов с inline-keyboard). edit=False — отправить новым
+    (для /school и нажатий по reply-меню)."""
     async with session_scope() as s:
         school = await schools_svc.get_school(s, school_id)
         if school is None:
@@ -2101,38 +2105,43 @@ async def _render_school_card(target, school_id: int, admin_id: int) -> None:
             return
         members = await schools_svc.members_of(s, school_id)
         all_schools = await schools_svc.admin_schools(s, admin_id)
+        group_count = len(await groups_svc.school_groups(s, school_id))
     is_owner = role.value == "owner"
-    lines = [f"🏫 <b>{escape(school.name)}</b>", ""]
+    lines = [
+        f"🏫 <b>{escape(school.name)}</b>",
+        f"Групп: {group_count}",
+        "",
+        "Состав:",
+    ]
     for admin, r in members:
-        glyph = "👑" if r.value == "owner" else "🛠"
-        lines.append(f"{glyph} {escape(admin.full_name)}")
+        glyph = "👑 owner" if r.value == "owner" else "🛠 co-admin"
+        lines.append(f"• {escape(admin.full_name)} — {glyph}")
     text = "\n".join(lines)
     multi = len(all_schools) > 1
-    await target.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=school_card_keyboard(school_id, is_owner, multi_school=multi),
-    )
+    markup = school_card_keyboard(school_id, is_owner, multi_school=multi)
+    if edit:
+        await target.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    else:
+        await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
-async def _render_school_list(message_or_call, admin_id: int) -> None:
+async def _render_school_list(
+    target: Message, admin_id: int, *, edit: bool = False
+) -> None:
     async with session_scope() as s:
         all_schools = await schools_svc.admin_schools(s, admin_id)
     if not all_schools:
         return
     if len(all_schools) == 1:
         school, _ = all_schools[0]
-        if hasattr(message_or_call, "message") and message_or_call.message is not None:
-            await _render_school_card(message_or_call.message, school.id, admin_id)
-        else:
-            await _render_school_card(message_or_call, school.id, admin_id)
+        await _render_school_card(target, school.id, admin_id, edit=edit)
         return
     text = "🏫 Твои школы — выбери, какую открыть:"
     markup = school_picker_keyboard(all_schools)
-    if hasattr(message_or_call, "answer"):
-        await message_or_call.answer(text, reply_markup=markup)
+    if edit:
+        await target.edit_text(text, reply_markup=markup)
     else:
-        await message_or_call.edit_text(text, reply_markup=markup)
+        await target.answer(text, reply_markup=markup)
 
 
 @router.message(Command("school"))
@@ -2145,7 +2154,7 @@ async def cmd_school(message: Message) -> None:
         admin = await admins_svc.get_by_tg_id(s, tg.id)
     if admin is None:
         return
-    await _render_school_list(message, admin.id)
+    await _render_school_list(message, admin.id, edit=False)
 
 
 @router.callback_query(F.data == "schlist")

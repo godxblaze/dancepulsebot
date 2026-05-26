@@ -50,10 +50,11 @@ from app.bot.utils import (
 from app.core.config import settings
 from app.db.models import Gender, Group, Person, SurveyStatus
 from app.db.session import session_scope
+from app.services import admins as admins_svc
+from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
-from app.services import admins as admins_svc
 from app.services import venues as venues_svc
 from app.services.schedule import format_weekdays, local_now, next_lesson_at
 
@@ -617,6 +618,9 @@ async def _format_group_summary(session, group: Group) -> str:
         lines.append(f"Зал: {group.room}")
     if group.teachers_note:
         lines.append(f"Ведут: {group.teachers_note}")
+    coadmins = await access_svc.coadmins_of_group(session, group.id)
+    if coadmins:
+        lines.append("🛠 Co-админы: " + ", ".join(a.full_name for a in coadmins))
     return "\n".join(lines)
 
 
@@ -1061,12 +1065,31 @@ async def _apply_group_edit(group_id: int, **fields) -> None:
 # ── groups list & actions ────────────────────────────────────────────
 
 
-async def _owned_group(session, group_id: int, tg_user_id: int) -> Group | None:
+async def _accessible_group(session, group_id: int, tg_user_id: int) -> Group | None:
+    """Return the group if the caller is owner OR co-admin; None otherwise.
+
+    Use this for «view» actions: opening card, students roster, ping, /today.
+    For destructive actions (delete, edit settings) use _owned_group instead."""
     teacher = await admins_svc.get_by_tg_id(session, tg_user_id)
     if teacher is None:
         return None
     group = await groups_svc.get_group(session, group_id)
-    if group is None or group.admin_id != teacher.id:
+    if group is None:
+        return None
+    if not await access_svc.has_access(session, group.id, teacher.id):
+        return None
+    return group
+
+
+async def _owned_group(session, group_id: int, tg_user_id: int) -> Group | None:
+    """Like _accessible_group but only the owner — for destructive actions."""
+    teacher = await admins_svc.get_by_tg_id(session, tg_user_id)
+    if teacher is None:
+        return None
+    group = await groups_svc.get_group(session, group_id)
+    if group is None:
+        return None
+    if not await access_svc.is_owner(session, group.id, teacher.id):
         return None
     return group
 
@@ -1112,7 +1135,7 @@ async def cb_groups_list(call: CallbackQuery) -> None:
 async def cb_group_card(call: CallbackQuery) -> None:
     group_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
@@ -1133,7 +1156,7 @@ async def cb_group_card(call: CallbackQuery) -> None:
 async def cb_group_students(call: CallbackQuery) -> None:
     group_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
@@ -1174,7 +1197,7 @@ async def cb_person_card(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
@@ -1195,7 +1218,7 @@ async def cb_person_card_level(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
@@ -1218,7 +1241,7 @@ async def cb_person_remove_confirm(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
@@ -1239,7 +1262,7 @@ async def cb_person_remove(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
@@ -1290,7 +1313,10 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
             return
         group = await groups_svc.get_group(s, survey.group_id)
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if group is None or teacher is None or group.admin_id != teacher.id:
+        if group is None or teacher is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        if not await access_svc.has_access(s, group.id, teacher.id):
             await call.answer("Группа не найдена", show_alert=True)
             return
         pending = await surveys_svc.pending_persons(s, survey_id)
@@ -1326,7 +1352,7 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
 async def cb_group_invite(call: CallbackQuery, bot: Bot) -> None:
     group_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
+        group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return

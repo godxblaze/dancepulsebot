@@ -18,6 +18,7 @@ from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
 from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
+from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
@@ -112,7 +113,9 @@ def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.Surv
 async def _maybe_send_summary(
     bot: Bot, group: Group, lesson_at: datetime, now: datetime
 ) -> None:
-    """Once per lesson, halfway through the poll window, send the teacher the summary."""
+    """Once per lesson, halfway through the poll window, send every admin of the
+    group the same auto-summary. mark_summary_sent ставится только после хотя бы
+    одной успешной отправки, чтобы недосланные адресаты доехали на след. tick."""
     if now < lesson_at - timedelta(hours=group.lead_hours / 2):
         return
     async with session_scope() as s:
@@ -120,25 +123,25 @@ async def _maybe_send_summary(
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
             return
         summary = await surveys_svc.summarize(s, survey.id)
-        teacher = await s.get(Admin, group.admin_id)
+        admin_tg_ids = await access_svc.admin_tg_ids_for_group(s, group.id)
         survey_id = survey.id
-        teacher_tg = teacher.tg_user_id if teacher else None
 
-    if teacher_tg is None:
+    if not admin_tg_ids:
         return
-    try:
-        await bot.send_message(
-            teacher_tg,
-            _format_summary(group, lesson_at, summary),
-            parse_mode=ParseMode.HTML,
-            reply_markup=lesson_card_keyboard(group.id, survey_id, summary.pending),
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Failed to send auto-summary to teacher %s: %s", teacher_tg, e)
-        return  # not marked — next tick retries
+    text = _format_summary(group, lesson_at, summary)
+    markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
+    delivered = 0
+    for tg in admin_tg_ids:
+        try:
+            await bot.send_message(tg, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            delivered += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Failed to send auto-summary to admin %s: %s", tg, e)
+    if delivered == 0:
+        return  # ничего не доехало — попробуем на следующем tick
     async with session_scope() as s:
         await surveys_svc.mark_summary_sent(s, survey_id)
-    log.info("Auto-summary for survey %s sent to teacher %s", survey_id, teacher_tg)
+    log.info("Auto-summary for survey %s sent to %d/%d admin(s)", survey_id, delivered, len(admin_tg_ids))
 
 
 def _gender_plural(gender: Gender) -> str:

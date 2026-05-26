@@ -5,7 +5,7 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Group
+from app.db.models import Group, GroupAccess, GroupAccessRole
 
 
 def _gen_join_code() -> str:
@@ -40,6 +40,12 @@ async def create_group(
         join_code=_gen_join_code(),
     )
     session.add(group)
+    await session.flush()
+    # Создатель автоматически получает owner-доступ. Сделано здесь, а не в
+    # хэндлере, чтобы scripts/demo_*.py и тесты тоже всегда давали owner'а.
+    session.add(
+        GroupAccess(group_id=group.id, admin_id=admin_id, role=GroupAccessRole.owner)
+    )
     await session.flush()
     return group
 
@@ -106,7 +112,14 @@ async def get_by_join_code(session: AsyncSession, code: str) -> Group | None:
 
 
 async def admin_groups(session: AsyncSession, admin_id: int) -> list[Group]:
-    stmt = select(Group).where(Group.admin_id == admin_id).order_by(Group.id)
+    """Все группы, к которым у админа есть доступ (owner ИЛИ co-admin) — owner'ы
+    перечислены через GroupAccess, потому одной выборкой через junction."""
+    stmt = (
+        select(Group)
+        .join(GroupAccess, GroupAccess.group_id == Group.id)
+        .where(GroupAccess.admin_id == admin_id)
+        .order_by(Group.id)
+    )
     return list((await session.execute(stmt)).scalars().all())
 
 

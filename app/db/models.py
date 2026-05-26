@@ -47,6 +47,14 @@ class SupportCallStatus(enum.StrEnum):
     closed = "closed"  # filled, declined, or nothing was needed
 
 
+class GroupAccessRole(enum.StrEnum):
+    """В пилотной модели только owner может приглашать co-admin'ов и удалять группу;
+    остальное (опросы, пинги, картотека учеников, recruit picker) — одинаково."""
+
+    owner = "owner"
+    coadmin = "coadmin"
+
+
 class Admin(Base):
     """School admin — the bot user who runs groups.
 
@@ -95,6 +103,31 @@ class Group(Base):
     teachers_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
     join_code: Mapped[str] = mapped_column(String(32), unique=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupAccess(Base):
+    """Many-to-many между Admin и Group с ролью.
+
+    Owner — первоначальный создатель: может приглашать/убирать co-admin'ов
+    и удалять группу. Co-admin видит группу в /groups, получает auto-summary
+    и может пинговать молчащих; не может удалить группу или сменить owner'а.
+
+    На создании группы автоматически добавляется одна строка с role=owner.
+    """
+
+    __tablename__ = "group_access"
+    __table_args__ = (
+        UniqueConstraint("group_id", "admin_id", name="uq_group_access_group_admin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    role: Mapped[GroupAccessRole] = mapped_column(
+        Enum(GroupAccessRole, name="group_access_role"),
+        default=GroupAccessRole.coadmin,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

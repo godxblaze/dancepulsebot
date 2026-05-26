@@ -1,10 +1,10 @@
 """Tests for the teacher's support pool with skill levels."""
 from types import SimpleNamespace
 
-from app.bot.handlers.teacher import cb_pool_toggle, cmd_pool
+from app.bot.handlers.admin import cb_pool_toggle, cmd_pool
 from app.db.models import Person
 from app.db.session import session_scope
-from app.services import groups, persons, teachers
+from app.services import groups, persons, admins
 
 
 class FakeCbMessage:
@@ -39,7 +39,7 @@ async def _person_of_teacher(
     teacher_tg: int = 100, person_tg: int = 500, name: str = "Аня"
 ) -> tuple[int, int]:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, teacher_tg, "t", "Препод")
+        t = await admins.get_or_create(s, teacher_tg, "t", "Препод")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
         p, _ = await persons.add_to_group(s, g, person_tg, "u", name)
         return t.id, p.id
@@ -47,7 +47,7 @@ async def _person_of_teacher(
 
 async def test_cmd_pool_empty(db) -> None:
     async with session_scope() as s:
-        await teachers.get_or_create(s, 100, "t", "Препод")
+        await admins.get_or_create(s, 100, "t", "Препод")
     msg = FakeMessage(user_id=100)
     await cmd_pool(msg)
     assert msg.replies and "пуст" in msg.replies[0]
@@ -79,7 +79,7 @@ async def test_pool_toggle_cycles_level(db) -> None:
 async def test_pool_toggle_rejects_foreign_person(db) -> None:
     _, pid = await _person_of_teacher(teacher_tg=100, person_tg=500)
     async with session_scope() as s:
-        await teachers.get_or_create(s, 200, "x", "Чужой Препод")
+        await admins.get_or_create(s, 200, "x", "Чужой Препод")
     await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=200))
     async with session_scope() as s:
         person = await s.get(Person, pid)

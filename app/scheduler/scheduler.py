@@ -16,7 +16,7 @@ from app.bot.keyboards import (
 )
 from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
-from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus, Teacher
+from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -120,7 +120,7 @@ async def _maybe_send_summary(
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
             return
         summary = await surveys_svc.summarize(s, survey.id)
-        teacher = await s.get(Teacher, group.teacher_id)
+        teacher = await s.get(Admin, group.admin_id)
         survey_id = survey.id
         teacher_tg = teacher.tg_user_id if teacher else None
 
@@ -151,7 +151,7 @@ async def _maybe_recruit(
     """At the cutoff, measure the gender imbalance; if it crosses the threshold,
     ask the teacher whether to recruit supports. One decision per lesson."""
     async with session_scope() as s:
-        teacher = await s.get(Teacher, group.teacher_id)
+        teacher = await s.get(Admin, group.admin_id)
         if teacher is None:
             return
         if now < lesson_at - timedelta(hours=teacher.support_cutoff_hours):
@@ -175,7 +175,7 @@ async def _maybe_recruit(
         call_id = call.id
         teacher_tg = teacher.tg_user_id
         candidates = await persons_svc.support_candidates(
-            s, group.teacher_id, gender_needed, group.id
+            s, group.admin_id, gender_needed, group.id
         )
         venue = (
             await venues_svc.get_venue(s, group.venue_id)

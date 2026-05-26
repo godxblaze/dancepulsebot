@@ -10,7 +10,7 @@ STUDENT_COMMANDS = [
     BotCommand(command="name", description="Изменить моё имя"),
 ]
 
-TEACHER_COMMANDS = [
+ADMIN_COMMANDS = [
     BotCommand(command="newgroup", description="Создать группу"),
     BotCommand(command="groups", description="Мои группы"),
     BotCommand(command="today", description="Сводка на сегодня"),
@@ -25,12 +25,12 @@ async def set_default_commands(bot: Bot) -> None:
     await bot.set_my_commands(STUDENT_COMMANDS, scope=BotCommandScopeDefault())
 
 
-async def grant_teacher_commands(bot: Bot, tg_user_id: int) -> None:
+async def grant_admin_commands(bot: Bot, tg_user_id: int) -> None:
     await bot.set_my_commands(
-        TEACHER_COMMANDS, scope=BotCommandScopeChat(chat_id=tg_user_id)
+        ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=tg_user_id)
     )
 
 
-async def revoke_teacher_commands(bot: Bot, tg_user_id: int) -> None:
-    """Drop the per-chat teacher menu — user falls back to the default (student) list."""
+async def revoke_admin_commands(bot: Bot, tg_user_id: int) -> None:
+    """Drop the per-chat admin menu — user falls back to the default (student) list."""
     await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=tg_user_id))

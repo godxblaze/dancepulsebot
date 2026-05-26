@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Moscow"
     default_lead_hours: int = 18
     log_level: str = "INFO"
-    developer_id: int = 0  # Telegram id allowed to grant teacher status via /grant
+    developer_id: int = 0  # Telegram id allowed to grant admin status via /grant
 
     @property
     def database_url(self) -> str:
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
         if self.developer_id <= 0:
             problems.append(
                 "DEVELOPER_ID не задан — без него никто не сможет получить роль "
-                "преподавателя через /grant. Пропиши свой Telegram user_id в .env"
+                "админа через /grant. Пропиши свой Telegram user_id в .env"
             )
         if self.default_lead_hours <= 0:
             problems.append("DEFAULT_LEAD_HOURS должен быть > 0")

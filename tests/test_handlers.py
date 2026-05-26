@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from app.bot.handlers.survey import on_attendance
 from app.db.models import SurveyKind
 from app.db.session import session_scope
-from app.services import groups, persons, surveys, teachers
+from app.services import groups, persons, surveys, admins
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -31,7 +31,7 @@ class FakeCallback:
 
 async def _survey_with_member() -> int:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 1, "t", "T")
+        t = await admins.get_or_create(s, 1, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
         p, _ = await persons.add_to_group(s, g, 700, "u", "Ученик")
         survey, _ = await surveys.get_or_create_survey(

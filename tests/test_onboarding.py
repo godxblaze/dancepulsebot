@@ -7,12 +7,12 @@ from app.bot.handlers.student import (
     join_name_typed,
     join_start,
 )
-from app.bot.handlers.teacher import cb_group_invite
+from app.bot.handlers.admin import cb_group_invite
 from app.bot.states import JoinFlow
 from app.bot.utils import qr_png
 from app.db.models import Gender
 from app.db.session import session_scope
-from app.services import groups, persons, teachers
+from app.services import groups, persons, admins
 
 # ── fakes ────────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ class FakeFSM:
 
 async def _teacher_and_group(name: str = "Сальса", weekdays: str = "0"):
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "teach", "Препод")
+        t = await admins.get_or_create(s, 100, "teach", "Препод")
         g = await groups.create_group(s, t.id, name, weekdays, "19:00", 18)
         return t.id, g.id, g.join_code
 
@@ -159,7 +159,7 @@ async def test_join_already_member(db) -> None:
 async def test_join_returning_person_skips_onboarding(db) -> None:
     """A known person (gender already set) joining another group: no questions."""
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "teach", "Препод")
+        t = await admins.get_or_create(s, 100, "teach", "Препод")
         g1 = await groups.create_group(s, t.id, "G1", "0", "19:00", 18)
         g2 = await groups.create_group(s, t.id, "G2", "2", "20:00", 18)
         p, _ = await persons.add_to_group(s, g1, 500, "u", "Аня")
@@ -178,7 +178,7 @@ async def test_join_returning_person_skips_onboarding(db) -> None:
 async def test_join_known_person_without_gender_runs_onboarding(db) -> None:
     """Person known to the bot but with no gender set still goes through onboarding."""
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "teach", "Препод")
+        t = await admins.get_or_create(s, 100, "teach", "Препод")
         g1 = await groups.create_group(s, t.id, "G1", "0", "19:00", 18)
         g2 = await groups.create_group(s, t.id, "G2", "2", "20:00", 18)
         await persons.add_to_group(s, g1, 500, "u", "Старое Имя")  # no gender set
@@ -221,7 +221,7 @@ async def test_cb_group_invite_sends_photo(db, monkeypatch) -> None:
     async def fake_username(bot) -> str:
         return "dancepulsebot"
 
-    monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", fake_username)
+    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", fake_username)
     call = FakeCallback(f"grpinv:{gid}", user_id=100)
     await cb_group_invite(call, None)
     assert call.message.photo_captions

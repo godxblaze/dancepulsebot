@@ -279,8 +279,8 @@ MENU_TEXTS = frozenset(
 )
 
 
-def teacher_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Persistent bottom menu for the teacher — instead of typing slash-commands."""
+def admin_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent bottom menu for the admin — instead of typing slash-commands."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
@@ -319,7 +319,7 @@ def style_picker_keyboard(suggestions: list[str]) -> InlineKeyboardMarkup:
 
 
 def style_typing_keyboard() -> InlineKeyboardMarkup:
-    """Shown while the teacher types a custom style — only a skip button."""
+    """Shown while the admin types a custom style — only a skip button."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⏭ Пропустить", callback_data="ngst:skip")]

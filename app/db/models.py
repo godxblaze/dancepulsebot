@@ -42,13 +42,19 @@ class Gender(enum.StrEnum):
 
 
 class SupportCallStatus(enum.StrEnum):
-    pending = "pending"  # awaiting the teacher's confirmation
+    pending = "pending"  # awaiting the admin's confirmation
     open = "open"  # broadcasting / collecting claims
     closed = "closed"  # filled, declined, or nothing was needed
 
 
-class Teacher(Base):
-    __tablename__ = "teachers"
+class Admin(Base):
+    """School admin — the bot user who runs groups.
+
+    User-facing UI may still call them «преподаватель» / «препод» — the role
+    is an admin of the school's drives in the bot, but in real life they are
+    teachers of dance groups. Кода-уровень: Admin; UI-уровень: препод."""
+
+    __tablename__ = "admins"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True)
@@ -60,12 +66,12 @@ class Teacher(Base):
 
 
 class Venue(Base):
-    """Place a teacher's lessons happen — reused across groups."""
+    """Place an admin's lessons happen — reused across groups."""
 
     __tablename__ = "venues"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -75,7 +81,7 @@ class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(200))  # auto-generated from style+level
     style: Mapped[str | None] = mapped_column(String(80), nullable=True)
     level: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..4
@@ -93,18 +99,18 @@ class Group(Base):
 
 
 class Person(Base):
-    """A human in a teacher's audience — a student of groups and/or a support.
+    """A human in an admin's audience — a student of groups and/or a support.
 
-    One row per (teacher, telegram account); group membership lives in Membership.
+    One row per (admin, telegram account); group membership lives in Membership.
     """
 
     __tablename__ = "persons"
     __table_args__ = (
-        UniqueConstraint("teacher_id", "tg_user_id", name="uq_persons_teacher_tg"),
+        UniqueConstraint("admin_id", "tg_user_id", name="uq_persons_admin_tg"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
     tg_user_id: Mapped[int] = mapped_column(BigInteger)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))

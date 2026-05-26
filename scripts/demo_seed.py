@@ -16,7 +16,7 @@ from app.core.logging import setup_logging
 from app.db.models import Group
 from app.db.session import init_db, session_scope
 from app.services import groups as groups_svc
-from app.services import teachers as teachers_svc
+from app.services import admins as teachers_svc
 
 log = logging.getLogger("seed")
 
@@ -24,11 +24,11 @@ log = logging.getLogger("seed")
 async def seed(teacher_tg_id: int) -> None:
     await init_db()
     async with session_scope() as s:
-        teacher = await teachers_svc.get_or_create(
+        teacher = await admins_svc.get_or_create(
             s, teacher_tg_id, "demo_teacher", "Демо Преподаватель"
         )
         existing = (
-            await s.execute(select(Group).where(Group.teacher_id == teacher.id))
+            await s.execute(select(Group).where(Group.admin_id == teacher.id))
         ).scalars().first()
         if existing:
             log.warning("Teacher already has groups — skipping group creation")

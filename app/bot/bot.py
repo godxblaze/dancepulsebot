@@ -5,7 +5,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.base import BaseStorage
 
-from app.bot.handlers import recruit, student, survey, teacher
+from app.bot.handlers import admin, recruit, student, survey
 from app.core.config import settings
 
 
@@ -30,5 +30,5 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(student.router)
     dp.include_router(survey.router)
     dp.include_router(recruit.router)
-    dp.include_router(teacher.router)
+    dp.include_router(admin.router)
     return dp

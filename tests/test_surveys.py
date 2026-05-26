@@ -3,14 +3,14 @@ from datetime import datetime
 
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
-from app.services import groups, persons, surveys, teachers
+from app.services import admins, groups, persons, surveys
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 
 
 async def _setup_group() -> tuple[int, list[int]]:
     async with session_scope() as s:
-        teacher = await teachers.get_or_create(s, 111, "t", "Препод")
+        teacher = await admins.get_or_create(s, 111, "t", "Препод")
         group = await groups.create_group(s, teacher.id, "Группа A", "0,2", "19:00", 18)
         p1, _ = await persons.add_to_group(s, group, 201, "a", "Аня")
         p2, _ = await persons.add_to_group(s, group, 202, "b", "Боря")

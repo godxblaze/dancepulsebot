@@ -28,7 +28,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import teachers as teachers_svc
+from app.services import admins as teachers_svc
 from app.services import venues as venues_svc
 
 GODBLAZE_TG = 791668206
@@ -55,7 +55,7 @@ async def main() -> None:
             await s.execute(delete(Venue))
             await s.flush()
 
-            teacher = await teachers_svc.get_by_tg_id(s, GODBLAZE_TG)
+            teacher = await admins_svc.get_by_tg_id(s, GODBLAZE_TG)
             assert teacher is not None, "Godblazer teacher row missing"
             tid = teacher.id
 
@@ -98,7 +98,7 @@ async def main() -> None:
             females = (
                 await s.execute(
                     select(Person).where(
-                        Person.teacher_id == tid, Person.gender == Gender.female
+                        Person.admin_id == tid, Person.gender == Gender.female
                     )
                 )
             ).scalars().all()
@@ -112,7 +112,7 @@ async def main() -> None:
             extra_male = (
                 await s.execute(
                     select(Person).where(
-                        Person.teacher_id == tid,
+                        Person.admin_id == tid,
                         Person.gender == Gender.male,
                         Person.tg_user_id != ANUBIS_TG,
                     ).limit(1)

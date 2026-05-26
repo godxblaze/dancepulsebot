@@ -17,7 +17,7 @@ from app.bot.handlers.student import (
     join_start,
 )
 from app.bot.handlers.survey import on_attendance
-from app.bot.handlers.teacher import (
+from app.bot.handlers.admin import (
     cb_group_delete,
     cb_group_delete_confirm,
     cb_pool_toggle,
@@ -48,7 +48,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import teachers as teachers_svc
+from app.services import admins as admins_svc
 from tests._fakes import (
     FakeBot,
     FakeCallback,
@@ -78,12 +78,12 @@ async def _create_group_via_wizard(
     async def _fake_username(_bot) -> str:
         return "dancepulsebot"
 
-    monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", _fake_username)
+    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
     teacher = fake_user(teacher_tg, full_name=teacher_name)
     fsm = FakeFSM()
 
     async with session_scope() as s:
-        await teachers_svc.get_or_create(s, teacher_tg, None, teacher_name)
+        await admins_svc.get_or_create(s, teacher_tg, None, teacher_name)
 
     start_msg = FakeMessage(teacher, bot=bot)
     await newgroup_start(start_msg, fsm)
@@ -133,9 +133,9 @@ async def _create_group_via_wizard(
     assert fsm.state is None
 
     async with session_scope() as s:
-        t = await teachers_svc.get_by_tg_id(s, teacher_tg)
+        t = await admins_svc.get_by_tg_id(s, teacher_tg)
         assert t is not None
-        gs = await groups_svc.teacher_groups(s, t.id)
+        gs = await groups_svc.admin_groups(s, t.id)
         # newest group is the last one
         return gs[-1].id
 
@@ -186,8 +186,8 @@ async def test_group_lifecycle(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         assert await groups_svc.get_group(s, g1_id) is None
-        t = await teachers_svc.get_by_tg_id(s, TEACHER_TG)
-        gs = await groups_svc.teacher_groups(s, t.id)
+        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        gs = await groups_svc.admin_groups(s, t.id)
         assert len(gs) == 1 and gs[0].id == g2_id
         live_code = gs[0].join_code
 
@@ -215,7 +215,7 @@ async def test_onboarding_suggested_name(db, monkeypatch) -> None:
     async with session_scope() as s:
         g = await groups_svc.get_group(s, gid)
         code = g.join_code
-        tid = g.teacher_id
+        tid = g.admin_id
 
     student = fake_user(501, full_name="Аня Иванова", username="anya")
     fsm = FakeFSM()
@@ -286,13 +286,13 @@ async def test_newgroup_wizard_validation(db, monkeypatch) -> None:
     async def _fake_username(_bot) -> str:
         return "dancepulsebot"
 
-    monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", _fake_username)
+    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
     bot = FakeBot()
     teacher = fake_user(TEACHER_TG, full_name="Препод")
     fsm = FakeFSM()
 
     async with session_scope() as s:
-        await teachers_svc.get_or_create(s, TEACHER_TG, None, "Препод")
+        await admins_svc.get_or_create(s, TEACHER_TG, None, "Препод")
 
     start_msg = FakeMessage(teacher, bot=bot)
     await newgroup_start(start_msg, fsm)
@@ -351,9 +351,9 @@ async def test_newgroup_wizard_validation(db, monkeypatch) -> None:
     assert fsm.state is None
 
     async with session_scope() as s:
-        t = await teachers_svc.get_by_tg_id(s, TEACHER_TG)
+        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
-        gs = await groups_svc.teacher_groups(s, t.id)
+        gs = await groups_svc.admin_groups(s, t.id)
         assert len(gs) == 1
         assert gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
 
@@ -414,7 +414,7 @@ async def test_poll_mixed_answers(db, monkeypatch) -> None:
 
     # /today — pin clock to "today is Monday, lesson today"
     monkeypatch.setattr(
-        "app.bot.handlers.teacher.local_now",
+        "app.bot.handlers.admin.local_now",
         lambda: LESSON - timedelta(hours=4),
     )
     today_msg = FakeMessage(fake_user(TEACHER_TG, full_name="Препод"), bot=bot)
@@ -578,7 +578,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
         code = group.join_code
-        teacher_id = group.teacher_id
+        admin_id = group.admin_id
 
     specs = [
         (901, "M1", Gender.male),
@@ -607,7 +607,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
     # add a pool member so picker keyboard appears
     async with session_scope() as s:
         sibling = await groups_svc.create_group(
-            s, teacher_id, "Другая", "2", "20:00", 18
+            s, admin_id, "Другая", "2", "20:00", 18
         )
         sup, _ = await persons_svc.add_to_group(s, sibling, 910, "u", "Саппорт")
         await persons_svc.set_gender(s, sup.id, Gender.male)
@@ -625,7 +625,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
 
     # outsider teacher
     async with session_scope() as s:
-        await teachers_svc.get_or_create(s, 999, "x", "Чужой")
+        await admins_svc.get_or_create(s, 999, "x", "Чужой")
     foreign = fake_user(999, full_name="Чужой")
 
     # 9a. foreign tries to toggle
@@ -652,7 +652,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
     group_id = await _create_group_via_wizard(bot, monkeypatch)
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        teacher_id = group.teacher_id
+        admin_id = group.admin_id
         code = group.join_code
 
     # 1 male, 3 female → deficit 2
@@ -682,7 +682,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
     # three pool members
     async with session_scope() as s:
         sibling = await groups_svc.create_group(
-            s, teacher_id, "Другая", "2", "20:00", 18
+            s, admin_id, "Другая", "2", "20:00", 18
         )
         pool_ids = []
         for tg, name in ((1101, "S1"), (1102, "S2"), (1103, "S3")):
@@ -828,7 +828,7 @@ async def test_grant_makes_teacher(db, monkeypatch) -> None:
     cmd_obj = SimpleNamespace(args="999")
     await cmd_grant(dev_msg, cmd_obj, bot)
     async with session_scope() as s:
-        t = await teachers_svc.get_by_tg_id(s, 999)
+        t = await admins_svc.get_by_tg_id(s, 999)
         assert t is not None
     # one reply to dev_msg.answer (dev), one bot.send_message to 999
     assert dev_msg.replies and "теперь преподаватель" in dev_msg.replies[0].text
@@ -841,7 +841,7 @@ async def test_grant_makes_teacher(db, monkeypatch) -> None:
     other_msg = FakeMessage(other, bot=bot2)
     await cmd_grant(other_msg, SimpleNamespace(args="888"), bot2)
     async with session_scope() as s:
-        assert await teachers_svc.get_by_tg_id(s, 888) is None
+        assert await admins_svc.get_by_tg_id(s, 888) is None
     assert other_msg.replies == []  # silent
     assert bot2.sent == []
 
@@ -854,7 +854,7 @@ async def test_full_tick(db, monkeypatch) -> None:
     group_id = await _create_group_via_wizard(bot, monkeypatch)
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        teacher_id = group.teacher_id
+        admin_id = group.admin_id
         code = group.join_code
 
     # 1 male + 4 female yes → imbalance 3, threshold 2
@@ -871,7 +871,7 @@ async def test_full_tick(db, monkeypatch) -> None:
     # Make a pool candidate so a picker keyboard is sent
     async with session_scope() as s:
         sibling = await groups_svc.create_group(
-            s, teacher_id, "Другая", "2", "20:00", 18
+            s, admin_id, "Другая", "2", "20:00", 18
         )
         sup, _ = await persons_svc.add_to_group(s, sibling, 1410, "u", "Помощник")
         await persons_svc.set_gender(s, sup.id, Gender.male)

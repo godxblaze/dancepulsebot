@@ -2,10 +2,10 @@
 from types import SimpleNamespace
 
 from app.bot.handlers.student import show_student_home
-from app.bot.handlers.teacher import cmd_grant, cmd_start
+from app.bot.handlers.admin import cmd_grant, cmd_start
 from app.core.config import settings
 from app.db.session import session_scope
-from app.services import groups, persons, teachers
+from app.services import groups, persons, admins
 
 
 class FakeMessage:
@@ -36,7 +36,7 @@ async def test_start_new_user_is_not_teacher(db) -> None:
     msg = FakeMessage(user_id=10)
     await cmd_start(msg)
     async with session_scope() as s:
-        assert await teachers.get_by_tg_id(s, 10) is None  # not auto-promoted
+        assert await admins.get_by_tg_id(s, 10) is None  # not auto-promoted
     assert any("ссылк" in r.lower() for r in msg.replies)  # guest view
 
 
@@ -45,13 +45,13 @@ async def test_start_developer_becomes_teacher(db, monkeypatch) -> None:
     msg = FakeMessage(user_id=777)
     await cmd_start(msg)
     async with session_scope() as s:
-        assert await teachers.get_by_tg_id(s, 777) is not None
+        assert await admins.get_by_tg_id(s, 777) is not None
     assert msg.markups[-1] is not None  # teacher menu keyboard
 
 
 async def test_start_known_teacher_shows_menu(db) -> None:
     async with session_scope() as s:
-        await teachers.get_or_create(s, 10, "t", "Препод")
+        await admins.get_or_create(s, 10, "t", "Препод")
     msg = FakeMessage(user_id=10)
     await cmd_start(msg)
     assert msg.markups[-1] is not None
@@ -59,14 +59,14 @@ async def test_start_known_teacher_shows_menu(db) -> None:
 
 async def test_start_student_sees_home_not_teacher(db) -> None:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 1, "t", "Препод")
+        t = await admins.get_or_create(s, 1, "t", "Препод")
         g = await groups.create_group(s, t.id, "Сальса", "0", "19:00", 18)
         await persons.add_to_group(s, g, 500, "u", "Аня")
     msg = FakeMessage(user_id=500)
     await cmd_start(msg)
     assert any("Сальса" in r for r in msg.replies)
     async with session_scope() as s:
-        assert await teachers.get_by_tg_id(s, 500) is None
+        assert await admins.get_by_tg_id(s, 500) is None
 
 
 # ── /grant ───────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ async def test_grant_makes_teacher(db, monkeypatch) -> None:
     bot = FakeBot()
     await cmd_grant(FakeMessage(777), SimpleNamespace(args="555"), bot)
     async with session_scope() as s:
-        assert await teachers.get_by_tg_id(s, 555) is not None
+        assert await admins.get_by_tg_id(s, 555) is not None
     assert any(chat == 555 for chat, _ in bot.sent)  # new teacher notified
 
 
@@ -86,13 +86,13 @@ async def test_grant_ignored_for_non_developer(db, monkeypatch) -> None:
     bot = FakeBot()
     await cmd_grant(FakeMessage(999), SimpleNamespace(args="555"), bot)
     async with session_scope() as s:
-        assert await teachers.get_by_tg_id(s, 555) is None
+        assert await admins.get_by_tg_id(s, 555) is None
 
 
 async def test_grant_already_teacher(db, monkeypatch) -> None:
     monkeypatch.setattr(settings, "developer_id", 777)
     async with session_scope() as s:
-        await teachers.get_or_create(s, 555, "t", "Уже Препод")
+        await admins.get_or_create(s, 555, "t", "Уже Препод")
     msg = FakeMessage(777)
     await cmd_grant(msg, SimpleNamespace(args="555"), FakeBot())
     assert any("уже" in r.lower() for r in msg.replies)
@@ -103,7 +103,7 @@ async def test_grant_already_teacher(db, monkeypatch) -> None:
 
 async def test_student_home_lists_groups(db) -> None:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 1, "t", "Препод")
+        t = await admins.get_or_create(s, 1, "t", "Препод")
         g = await groups.create_group(s, t.id, "Бачата", "0,2", "19:00", 18)
         await persons.add_to_group(s, g, 500, "u", "Аня")
     msg = FakeMessage(user_id=500)

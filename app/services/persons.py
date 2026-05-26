@@ -7,23 +7,23 @@ from app.db.models import Gender, Group, Membership, Person, Response, Survey, S
 
 
 async def get_person(
-    session: AsyncSession, teacher_id: int, tg_user_id: int
+    session: AsyncSession, admin_id: int, tg_user_id: int
 ) -> Person | None:
     stmt = select(Person).where(
-        Person.teacher_id == teacher_id, Person.tg_user_id == tg_user_id
+        Person.admin_id == admin_id, Person.tg_user_id == tg_user_id
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def find_by_tg(session: AsyncSession, tg_user_id: int) -> Person | None:
-    """Any person with this telegram id, regardless of teacher."""
+    """Any person with this telegram id, regardless of admin."""
     stmt = select(Person).where(Person.tg_user_id == tg_user_id).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def find_all_by_tg(session: AsyncSession, tg_user_id: int) -> list[Person]:
     """Every Person row for this telegram account (one human can be a student
-    of multiple teachers)."""
+    of multiple admins)."""
     stmt = select(Person).where(Person.tg_user_id == tg_user_id)
     return list((await session.execute(stmt)).scalars().all())
 
@@ -41,16 +41,16 @@ async def person_groups(session: AsyncSession, person_id: int) -> list[Group]:
 
 async def _get_or_create_person(
     session: AsyncSession,
-    teacher_id: int,
+    admin_id: int,
     tg_user_id: int,
     tg_username: str | None,
     full_name: str,
 ) -> Person:
-    """One Person per (teacher, telegram account); refreshes name/username."""
-    person = await get_person(session, teacher_id, tg_user_id)
+    """One Person per (admin, telegram account); refreshes name/username."""
+    person = await get_person(session, admin_id, tg_user_id)
     if person is None:
         person = Person(
-            teacher_id=teacher_id,
+            admin_id=admin_id,
             tg_user_id=tg_user_id,
             tg_username=tg_username,
             full_name=full_name,
@@ -76,8 +76,8 @@ async def set_name_everywhere(
 ) -> int:
     """Update full_name on every Person row for this telegram account.
 
-    A person can sit under several teachers, but it's the same human — the rename
-    should apply to all rows so every teacher sees the updated name.
+    A person can sit under several admins, but it's the same human — the rename
+    should apply to all rows so every admin sees the updated name.
     """
     persons = (
         (await session.execute(select(Person).where(Person.tg_user_id == tg_user_id)))
@@ -112,7 +112,7 @@ async def add_to_group(
     Returns (person, joined) — `joined` is False if they were already a member.
     """
     person = await _get_or_create_person(
-        session, group.teacher_id, tg_user_id, tg_username, full_name
+        session, group.admin_id, tg_user_id, tg_username, full_name
     )
     stmt = select(Membership).where(
         Membership.person_id == person.id, Membership.group_id == group.id
@@ -179,21 +179,21 @@ async def count_members(session: AsyncSession, group_id: int) -> int:
     return (await session.execute(stmt)).scalar_one()
 
 
-async def list_persons(session: AsyncSession, teacher_id: int) -> list[Person]:
-    """Everyone in a teacher's audience, ordered by name."""
+async def list_persons(session: AsyncSession, admin_id: int) -> list[Person]:
+    """Everyone in a admin's audience, ordered by name."""
     stmt = (
         select(Person)
-        .where(Person.teacher_id == teacher_id)
+        .where(Person.admin_id == admin_id)
         .order_by(Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())
 
 
 async def support_candidates(
-    session: AsyncSession, teacher_id: int, gender: Gender, exclude_group_id: int
+    session: AsyncSession, admin_id: int, gender: Gender, exclude_group_id: int
 ) -> list[Person]:
     """Pool members of the given gender who can be asked to support a lesson — the
-    teacher's support pool (support_level set), excluding regular members of that
+    admin's support pool (support_level set), excluding regular members of that
     group. Highest skill level first, then name.
     """
     members = select(Membership.person_id).where(
@@ -202,7 +202,7 @@ async def support_candidates(
     stmt = (
         select(Person)
         .where(
-            Person.teacher_id == teacher_id,
+            Person.admin_id == admin_id,
             Person.gender == gender,
             Person.support_level.is_not(None),
             Person.id.not_in(members),

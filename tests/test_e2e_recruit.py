@@ -15,7 +15,7 @@ from app.bot.handlers.recruit import (
 )
 from app.bot.handlers.student import join_gender, join_name_typed, join_start
 from app.bot.handlers.survey import on_attendance
-from app.bot.handlers.teacher import (
+from app.bot.handlers.admin import (
     cb_pool_toggle,
     newgroup_level_pick,
     newgroup_room_skip,
@@ -35,7 +35,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import teachers as teachers_svc
+from app.services import admins as admins_svc
 from tests._fakes import (
     FakeBot,
     FakeCallback,
@@ -58,12 +58,12 @@ async def _create_group_via_wizard(bot: FakeBot, monkeypatch) -> int:
     async def _fake_username(_bot) -> str:
         return "dancepulsebot"
 
-    monkeypatch.setattr("app.bot.handlers.teacher.get_bot_username", _fake_username)
+    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
     teacher = fake_user(TEACHER_TG, full_name="Препод")
     fsm = FakeFSM()
 
     async with session_scope() as s:
-        await teachers_svc.get_or_create(s, TEACHER_TG, None, "Препод")
+        await admins_svc.get_or_create(s, TEACHER_TG, None, "Препод")
 
     start_msg = FakeMessage(teacher, bot=bot)
     await newgroup_start(start_msg, fsm)
@@ -111,9 +111,9 @@ async def _create_group_via_wizard(bot: FakeBot, monkeypatch) -> int:
     assert fsm.state is None
 
     async with session_scope() as s:
-        t = await teachers_svc.get_by_tg_id(s, TEACHER_TG)
+        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
-        gs = await groups_svc.teacher_groups(s, t.id)
+        gs = await groups_svc.admin_groups(s, t.id)
         assert len(gs) == 1 and gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
         return gs[0].id
 
@@ -152,7 +152,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
         group = await groups_svc.get_group(s, group_id)
         assert group is not None
         join_code = group.join_code
-        teacher_id = group.teacher_id
+        admin_id = group.admin_id
 
     # 2. Six students onboard through the join link: 1 male + 5 female (deficit 4).
     student_specs = [
@@ -190,7 +190,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     # 5. Two male supports exist in a sibling group; teacher promotes both to
     #    her personal pool via /pool (one tap = level 1).
     async with session_scope() as s:
-        sibling = await groups_svc.create_group(s, teacher_id, "Другая", "2", "20:00", 18)
+        sibling = await groups_svc.create_group(s, admin_id, "Другая", "2", "20:00", 18)
         sup1, _ = await persons_svc.add_to_group(s, sibling, 701, "u", "Витя")
         await persons_svc.set_gender(s, sup1.id, Gender.male)
         sup2, _ = await persons_svc.add_to_group(s, sibling, 702, "u", "Слава")
@@ -209,7 +209,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     # 6. Cutoff: scheduler measures the deficit and pings the teacher with the picker.
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        t = await teachers_svc.get_by_tg_id(s, TEACHER_TG)
+        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
         cutoff_h = t.support_cutoff_hours
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=cutoff_h - 1))

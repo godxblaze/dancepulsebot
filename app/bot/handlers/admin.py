@@ -11,7 +11,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from app.bot.commands import grant_teacher_commands
+from app.bot.commands import grant_admin_commands
 from app.bot.handlers.student import show_student_home, show_student_today
 from app.bot.keyboards import (
     MENU_GROUPS,
@@ -34,7 +34,7 @@ from app.bot.keyboards import (
     students_keyboard,
     style_picker_keyboard,
     style_typing_keyboard,
-    teacher_menu_keyboard,
+    admin_menu_keyboard,
     today_ping_keyboard,
     venue_picker_keyboard,
     weekdays_keyboard,
@@ -53,7 +53,7 @@ from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
-from app.services import teachers as teachers_svc
+from app.services import admins as admins_svc
 from app.services import venues as venues_svc
 from app.services.schedule import format_weekdays, local_now, next_lesson_at
 
@@ -63,7 +63,7 @@ router = Router()
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _MAX_LEVEL = 3
 
-_HELP_TEACHER = (
+_HELP_ADMIN = (
     "💓 Dance Pulse — бот опросов посещаемости\n\n"
     "Перед каждым занятием бот спрашивает учеников группы, придут ли они, "
     "и показывает тебе сводку.\n\n"
@@ -101,9 +101,9 @@ async def cmd_start(message: Message) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is None and tg.id == settings.developer_id:
-            teacher = await teachers_svc.get_or_create(
+            teacher = await admins_svc.get_or_create(
                 s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
             )
     if teacher is None:
@@ -115,7 +115,7 @@ async def cmd_start(message: Message) -> None:
         "Я опрашиваю учеников перед каждым занятием и сам собираю саппортов, "
         "когда в паре перекос.\n\n"
         "Всё — кнопками меню снизу 👇",
-        reply_markup=teacher_menu_keyboard(),
+        reply_markup=admin_menu_keyboard(),
     )
 
 
@@ -125,8 +125,8 @@ async def cmd_help(message: Message) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
-    await message.answer(_HELP_TEACHER if teacher else _HELP_STUDENT)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
+    await message.answer(_HELP_ADMIN if teacher else _HELP_STUDENT)
 
 
 @router.message(Command("myid"))
@@ -147,12 +147,12 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
         return
     target_id = int(arg)
     async with session_scope() as s:
-        if await teachers_svc.get_by_tg_id(s, target_id) is not None:
+        if await admins_svc.get_by_tg_id(s, target_id) is not None:
             await message.answer(f"id {target_id} — уже преподаватель.")
             return
-        await teachers_svc.get_or_create(s, target_id, None, f"id{target_id}")
+        await admins_svc.get_or_create(s, target_id, None, f"id{target_id}")
     try:
-        await grant_teacher_commands(bot, target_id)
+        await grant_admin_commands(bot, target_id)
     except Exception as e:  # noqa: BLE001
         log.warning("Could not set teacher commands for %s: %s", target_id, e)
     await message.answer(f"✅ id {target_id} теперь преподаватель.")
@@ -171,7 +171,7 @@ async def cmd_today(message: Message) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
     if teacher is None:
         await show_student_today(message)
         return
@@ -182,7 +182,7 @@ async def cmd_today(message: Message) -> None:
     pending_by_group: list[tuple[str, int, int]] = []  # name, survey_id, pending
 
     async with session_scope() as s:
-        groups = await groups_svc.teacher_groups(s, teacher.id)
+        groups = await groups_svc.admin_groups(s, teacher.id)
         for g in groups:
             lesson_at = next_lesson_at(g.weekdays, g.lesson_time, now)
             if lesson_at is None or lesson_at.date() not in (today, tomorrow):
@@ -228,10 +228,10 @@ async def cmd_stats(message: Message) -> None:
     blocks: list[str] = []
 
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is None:
             return
-        groups = await groups_svc.teacher_groups(s, teacher.id)
+        groups = await groups_svc.admin_groups(s, teacher.id)
         if not groups:
             await message.answer("У тебя пока нет групп. Создай первую: /newgroup")
             return
@@ -275,9 +275,9 @@ async def newgroup_start(message: Message, state: FSMContext) -> None:
     tg = message.from_user
     assert tg is not None
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         suggestions = (
-            await groups_svc.teacher_styles(s, teacher.id) if teacher else []
+            await groups_svc.admin_styles(s, teacher.id) if teacher else []
         )
     if teacher is None:
         return
@@ -309,9 +309,9 @@ async def newgroup_style_pick(call: CallbackQuery, state: FSMContext) -> None:
         idx = int(action.split(":", 1)[1])
         tg = call.from_user
         async with session_scope() as s:
-            teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+            teacher = await admins_svc.get_by_tg_id(s, tg.id)
             suggestions = (
-                await groups_svc.teacher_styles(s, teacher.id) if teacher else []
+                await groups_svc.admin_styles(s, teacher.id) if teacher else []
             )
         if not (0 <= idx < len(suggestions)):
             await call.answer()
@@ -415,11 +415,11 @@ async def newgroup_time(message: Message, state: FSMContext, bot: Bot) -> None:
     tg = message.from_user
     assert tg is not None
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is None:
             await state.clear()
             return
-        venues = await venues_svc.teacher_venues(s, teacher.id)
+        venues = await venues_svc.admin_venues(s, teacher.id)
 
     await state.set_state(NewGroup.venue)
     await message.answer(
@@ -448,9 +448,9 @@ async def newgroup_venue_pick(call: CallbackQuery, state: FSMContext) -> None:
         venue_id = int(action.split(":", 1)[1])
         tg = call.from_user
         async with session_scope() as s:
-            teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+            teacher = await admins_svc.get_by_tg_id(s, tg.id)
             venue = await venues_svc.get_venue(s, venue_id)
-            if teacher is None or venue is None or venue.teacher_id != teacher.id:
+            if teacher is None or venue is None or venue.admin_id != teacher.id:
                 await call.answer()
                 return
         await state.update_data(venue_id=venue_id)
@@ -495,7 +495,7 @@ async def _save_new_venue(
 ) -> None:
     data = await state.get_data()
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg_user_id)
+        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
         if teacher is None:
             return
         venue = await venues_svc.create_venue(
@@ -570,7 +570,7 @@ async def _finish_new_group(
     style = data.get("style")
     level = data.get("level")
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg_user_id)
+        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
         if teacher is None:
             await state.clear()
             return
@@ -685,8 +685,8 @@ async def cb_edit_style(call: CallbackQuery, state: FSMContext) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
-        suggestions = await groups_svc.teacher_styles(s, teacher.id) if teacher else []
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        suggestions = await groups_svc.admin_styles(s, teacher.id) if teacher else []
     await state.set_state(EditGroup.style)
     await state.update_data(edit_gid=group_id)
     if call.message:
@@ -719,9 +719,9 @@ async def edit_style_pick(call: CallbackQuery, state: FSMContext) -> None:
     if action.startswith("pick:"):
         idx = int(action.split(":", 1)[1])
         async with session_scope() as s:
-            teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
+            teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
             suggestions = (
-                await groups_svc.teacher_styles(s, teacher.id) if teacher else []
+                await groups_svc.admin_styles(s, teacher.id) if teacher else []
             )
         if not (0 <= idx < len(suggestions)):
             await call.answer()
@@ -875,8 +875,8 @@ async def cb_edit_venue(call: CallbackQuery, state: FSMContext) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
-        venues = await venues_svc.teacher_venues(s, teacher.id) if teacher else []
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        venues = await venues_svc.admin_venues(s, teacher.id) if teacher else []
     await state.set_state(EditGroup.venue)
     await state.update_data(edit_gid=group_id)
     if call.message:
@@ -908,9 +908,9 @@ async def edit_venue_pick(call: CallbackQuery, state: FSMContext) -> None:
     if action.startswith("pick:"):
         venue_id = int(action.split(":", 1)[1])
         async with session_scope() as s:
-            teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
+            teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
             venue = await venues_svc.get_venue(s, venue_id)
-            if teacher is None or venue is None or venue.teacher_id != teacher.id:
+            if teacher is None or venue is None or venue.admin_id != teacher.id:
                 await call.answer()
                 return
         await _apply_group_edit(gid, venue_id=venue_id)
@@ -962,7 +962,7 @@ async def _save_new_venue_for_edit(
 ) -> int | None:
     data = await state.get_data()
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg_user_id)
+        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
         if teacher is None:
             return None
         venue = await venues_svc.create_venue(
@@ -1062,11 +1062,11 @@ async def _apply_group_edit(group_id: int, **fields) -> None:
 
 
 async def _owned_group(session, group_id: int, tg_user_id: int) -> Group | None:
-    teacher = await teachers_svc.get_by_tg_id(session, tg_user_id)
+    teacher = await admins_svc.get_by_tg_id(session, tg_user_id)
     if teacher is None:
         return None
     group = await groups_svc.get_group(session, group_id)
-    if group is None or group.teacher_id != teacher.id:
+    if group is None or group.admin_id != teacher.id:
         return None
     return group
 
@@ -1074,8 +1074,8 @@ async def _owned_group(session, group_id: int, tg_user_id: int) -> Group | None:
 async def _send_groups_list(target: Message) -> None:
     tg = target.chat
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
-        groups = await groups_svc.teacher_groups(s, teacher.id) if teacher else []
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
+        groups = await groups_svc.admin_groups(s, teacher.id) if teacher else []
     if not groups:
         await target.answer("У тебя пока нет групп. Создай первую: /newgroup")
         return
@@ -1089,7 +1089,7 @@ async def cmd_groups(message: Message) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
     if teacher is None:
         await show_student_home(message)
         return
@@ -1099,8 +1099,8 @@ async def cmd_groups(message: Message) -> None:
 @router.callback_query(F.data == "grplist")
 async def cb_groups_list(call: CallbackQuery) -> None:
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
-        groups = await groups_svc.teacher_groups(s, teacher.id) if teacher else []
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        groups = await groups_svc.admin_groups(s, teacher.id) if teacher else []
     if not groups:
         await call.message.edit_text("У тебя пока нет групп. Создай первую: /newgroup")
     else:
@@ -1176,7 +1176,7 @@ async def cb_person_card(call: CallbackQuery) -> None:
     async with session_scope() as s:
         group = await _owned_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
-        if group is None or person is None or person.teacher_id != group.teacher_id:
+        if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
             return
         groups = await persons_svc.person_groups(s, person.id)
@@ -1197,7 +1197,7 @@ async def cb_person_card_level(call: CallbackQuery) -> None:
     async with session_scope() as s:
         group = await _owned_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
-        if group is None or person is None or person.teacher_id != group.teacher_id:
+        if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
             return
         new_level = None if person.support_level == _MAX_LEVEL else (person.support_level or 0) + 1
@@ -1220,7 +1220,7 @@ async def cb_person_remove_confirm(call: CallbackQuery) -> None:
     async with session_scope() as s:
         group = await _owned_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
-        if group is None or person is None or person.teacher_id != group.teacher_id:
+        if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
             return
         name = person.full_name
@@ -1241,7 +1241,7 @@ async def cb_person_remove(call: CallbackQuery) -> None:
     async with session_scope() as s:
         group = await _owned_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
-        if group is None or person is None or person.teacher_id != group.teacher_id:
+        if group is None or person is None or person.admin_id != group.admin_id:
             await call.answer("Не найдено", show_alert=True)
             return
         removed = await persons_svc.remove_from_group(s, person_id, group_id)
@@ -1289,8 +1289,8 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
             await call.answer("Занятие уже прошло — опрос закрыт", show_alert=True)
             return
         group = await groups_svc.get_group(s, survey.group_id)
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
-        if group is None or teacher is None or group.teacher_id != teacher.id:
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if group is None or teacher is None or group.admin_id != teacher.id:
             await call.answer("Группа не найдена", show_alert=True)
             return
         pending = await surveys_svc.pending_persons(s, survey_id)
@@ -1380,7 +1380,7 @@ async def cmd_pool(message: Message) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is None:
             return
         people = await persons_svc.list_persons(s, teacher.id)
@@ -1407,7 +1407,7 @@ async def cmd_edit_name(message: Message, state: FSMContext) -> None:
     if not tg:
         return
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         persons_rows = await persons_svc.find_all_by_tg(s, tg.id)
     if teacher is None and not persons_rows:
         await message.answer(
@@ -1435,9 +1435,9 @@ async def edit_name_typed(message: Message, state: FSMContext) -> None:
     if len(new_name) > 200:
         new_name = new_name[:200]
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is not None:
-            await teachers_svc.set_name(s, teacher.id, new_name)
+            await admins_svc.set_name(s, teacher.id, new_name)
         touched = await persons_svc.set_name_everywhere(s, tg.id, new_name)
     await state.clear()
     if teacher is not None and touched == 0:
@@ -1459,9 +1459,9 @@ async def edit_name_typed(message: Message, state: FSMContext) -> None:
 async def cb_pool_toggle(call: CallbackQuery) -> None:
     person_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
-        teacher = await teachers_svc.get_by_tg_id(s, call.from_user.id)
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
         person = await s.get(Person, person_id)
-        if teacher is None or person is None or person.teacher_id != teacher.id:
+        if teacher is None or person is None or person.admin_id != teacher.id:
             await call.answer("Не найдено", show_alert=True)
             return
         current = person.support_level

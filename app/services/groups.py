@@ -14,7 +14,7 @@ def _gen_join_code() -> str:
 
 async def create_group(
     session: AsyncSession,
-    teacher_id: int,
+    admin_id: int,
     name: str,
     weekdays: str,
     lesson_time: str,
@@ -27,7 +27,7 @@ async def create_group(
     teachers_note: str | None = None,
 ) -> Group:
     group = Group(
-        teacher_id=teacher_id,
+        admin_id=admin_id,
         name=name,
         style=style,
         level=level,
@@ -81,11 +81,11 @@ async def update_group(
     await session.flush()
 
 
-async def teacher_styles(session: AsyncSession, teacher_id: int) -> list[str]:
-    """Distinct non-empty style names the teacher has previously used, by recency."""
+async def admin_styles(session: AsyncSession, admin_id: int) -> list[str]:
+    """Distinct non-empty style names the admin has previously used, by recency."""
     stmt = (
         select(Group.style)
-        .where(Group.teacher_id == teacher_id, Group.style.is_not(None))
+        .where(Group.admin_id == admin_id, Group.style.is_not(None))
         .order_by(Group.id.desc())
     )
     rows = (await session.execute(stmt)).scalars().all()
@@ -105,8 +105,8 @@ async def get_by_join_code(session: AsyncSession, code: str) -> Group | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def teacher_groups(session: AsyncSession, teacher_id: int) -> list[Group]:
-    stmt = select(Group).where(Group.teacher_id == teacher_id).order_by(Group.id)
+async def admin_groups(session: AsyncSession, admin_id: int) -> list[Group]:
+    stmt = select(Group).where(Group.admin_id == admin_id).order_by(Group.id)
     return list((await session.execute(stmt)).scalars().all())
 
 

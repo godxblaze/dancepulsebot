@@ -11,7 +11,7 @@ from app.bot.keyboards import (
     support_pick_keyboard,
 )
 from app.bot.utils import format_group_title, format_place
-from app.db.models import Person, SupportCallStatus, Teacher
+from app.db.models import Admin, Person, SupportCallStatus
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -58,12 +58,12 @@ async def cb_support_pick(call: CallbackQuery) -> None:
         if sc is None or group is None:
             await call.answer()
             return
-        teacher = await s.get(Teacher, group.teacher_id)
+        teacher = await s.get(Admin, group.admin_id)
         if teacher is None or teacher.tg_user_id != call.from_user.id:
             await call.answer()
             return
         candidates = await persons_svc.support_candidates(
-            s, group.teacher_id, sc.gender, group.id
+            s, group.admin_id, sc.gender, group.id
         )
     if call.message:
         await call.message.edit_reply_markup(
@@ -85,7 +85,7 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
         if sc is None or survey is None or group is None:
             await call.answer("Уже обработано", show_alert=True)
             return
-        teacher = await s.get(Teacher, group.teacher_id)
+        teacher = await s.get(Admin, group.admin_id)
         if teacher is None or teacher.tg_user_id != call.from_user.id:
             await call.answer()
             return
@@ -150,12 +150,12 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         if group is None:
             await call.answer()
             return
-        person = await persons_svc.get_person(s, group.teacher_id, call.from_user.id)
+        person = await persons_svc.get_person(s, group.admin_id, call.from_user.id)
         if person is None:
             await call.answer()
             return
         accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
-        teacher = await s.get(Teacher, group.teacher_id)
+        teacher = await s.get(Admin, group.admin_id)
         teacher_tg = teacher.tg_user_id if teacher else None
         person_name = person.full_name
         title = format_group_title(group)
@@ -223,14 +223,14 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
             when = f"{survey.lesson_at:%d.%m в %H:%M}"
             group_name = group.name
             person = await persons_svc.get_person(
-                s, group.teacher_id, call.from_user.id
+                s, group.admin_id, call.from_user.id
             )
             if person is not None and sc is not None:
                 if await supports_svc.unclaim(s, call_id, person.id):
                     reverted_name = person.full_name
                     filled = await supports_svc.count_claims(s, call_id)
                     needed = sc.needed
-                    teacher = await s.get(Teacher, group.teacher_id)
+                    teacher = await s.get(Admin, group.admin_id)
                     teacher_tg = teacher.tg_user_id if teacher else None
 
     if call.message:

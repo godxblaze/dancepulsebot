@@ -12,7 +12,7 @@ from app.bot.keyboards import support_pick_keyboard
 from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import groups, persons, supports, surveys, teachers
+from app.services import groups, persons, supports, surveys, admins
 
 LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -51,7 +51,7 @@ class FakeBot:
 async def _imbalanced_lesson(males_yes: int = 1, females_yes: int = 4):
     """Group + survey where the given numbers of each gender said 'yes'."""
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "teach", "Препод")
+        t = await admins.get_or_create(s, 100, "teach", "Препод")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
@@ -71,7 +71,7 @@ async def _imbalanced_lesson(males_yes: int = 1, females_yes: int = 4):
 
 async def test_gender_yes_counts(db) -> None:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "T")
+        t = await admins.get_or_create(s, 100, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
@@ -95,7 +95,7 @@ async def test_gender_yes_counts(db) -> None:
 
 async def test_support_candidates_pool_gender_level(db) -> None:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "T")
+        t = await admins.get_or_create(s, 100, "t", "T")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
         other = await groups.create_group(s, t.id, "Другая", "2", "20:00", 18)
         # male member of the target group, even in the pool — excluded
@@ -128,7 +128,7 @@ async def test_support_candidates_pool_gender_level(db) -> None:
 
 async def _open_call(needed: int) -> tuple[int, list[int]]:
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "t", "T")
+        t = await admins.get_or_create(s, 100, "t", "T")
         g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
@@ -217,7 +217,7 @@ async def test_maybe_recruit_idempotent(db) -> None:
 
 async def _call_with_pool_candidate():
     async with session_scope() as s:
-        t = await teachers.get_or_create(s, 100, "teach", "Препод")
+        t = await admins.get_or_create(s, 100, "teach", "Препод")
         g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
         survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, LESSON
@@ -230,7 +230,7 @@ async def _call_with_pool_candidate():
         await persons.set_gender(s, sup.id, Gender.male)
         await persons.set_support_level(s, sup.id, 2)
         return SimpleNamespace(
-            call_id=call.id, sup_pid=sup.id, teacher_id=t.id, group_id=g.id
+            call_id=call.id, sup_pid=sup.id, admin_id=t.id, group_id=g.id
         )
 
 
@@ -238,7 +238,7 @@ async def test_pick_and_send_invites(db) -> None:
     ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
         candidates = await persons.support_candidates(
-            s, ctx.teacher_id, Gender.male, ctx.group_id
+            s, ctx.admin_id, Gender.male, ctx.group_id
         )
     kb = support_pick_keyboard(ctx.call_id, candidates, set())
     pick = FakeCallback(
@@ -261,7 +261,7 @@ async def test_pick_send_nothing_selected(db) -> None:
     ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
         candidates = await persons.support_candidates(
-            s, ctx.teacher_id, Gender.male, ctx.group_id
+            s, ctx.admin_id, Gender.male, ctx.group_id
         )
     kb = support_pick_keyboard(ctx.call_id, candidates, set())  # nobody ticked
     bot = FakeBot()
@@ -274,9 +274,9 @@ async def test_pick_send_nothing_selected(db) -> None:
 async def test_pick_send_rejects_foreign_teacher(db) -> None:
     ctx = await _call_with_pool_candidate()
     async with session_scope() as s:
-        await teachers.get_or_create(s, 999, "x", "Чужой Препод")
+        await admins.get_or_create(s, 999, "x", "Чужой Препод")
         candidates = await persons.support_candidates(
-            s, ctx.teacher_id, Gender.male, ctx.group_id
+            s, ctx.admin_id, Gender.male, ctx.group_id
         )
     kb = support_pick_keyboard(ctx.call_id, candidates, {ctx.sup_pid})
     bot = FakeBot()

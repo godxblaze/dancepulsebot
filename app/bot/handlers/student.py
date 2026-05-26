@@ -17,7 +17,7 @@ from aiogram.types import (
 from app.bot.keyboards import gender_keyboard, join_name_keyboard, student_menu_keyboard
 from app.bot.states import JoinFlow
 from app.bot.utils import format_group_title, format_place
-from app.db.models import Gender, Group, Teacher
+from app.db.models import Admin, Gender, Group
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -34,13 +34,13 @@ def _display_name(tg) -> str:
     return tg.full_name or tg.username or f"id{tg.id}"
 
 
-async def _notify_teacher(
+async def _notify_admin(
     bot: Bot, group: Group, person_name: str, person_id: int | None = None
 ) -> None:
-    """Tell the teacher that a person just joined one of their groups."""
+    """Tell the group's admin(s) that a person just joined."""
     async with session_scope() as s:
-        teacher = await s.get(Teacher, group.teacher_id)
-    if teacher is None:
+        admin = await s.get(Admin, group.admin_id)
+    if admin is None:
         return
     reply_markup = None
     if person_id is not None:
@@ -54,12 +54,12 @@ async def _notify_teacher(
         )
     try:
         await bot.send_message(
-            teacher.tg_user_id,
+            admin.tg_user_id,
             f"🔔 {person_name} записал(ась) в группу «{format_group_title(group)}».",
             reply_markup=reply_markup,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("Could not notify teacher %s: %s", teacher.tg_user_id, e)
+        log.warning("Could not notify admin %s: %s", admin.tg_user_id, e)
 
 
 @router.message(CommandStart(deep_link=True))
@@ -86,7 +86,7 @@ async def join_start(
         if await persons_svc.get_in_group(s, group.id, tg.id) is not None:
             await message.answer(f"Ты уже в группе «{format_group_title(group)}». Всё в порядке.")
             return
-        person = await persons_svc.get_person(s, group.teacher_id, tg.id)
+        person = await persons_svc.get_person(s, group.admin_id, tg.id)
         known = person is not None and person.gender is not None
         known_person_id: int | None = None
         if known:
@@ -97,7 +97,7 @@ async def join_start(
             known_person_id = joined_person.id
 
     if known:
-        await _notify_teacher(bot, group, known_name, known_person_id)
+        await _notify_admin(bot, group, known_name, known_person_id)
         await message.answer(
             f"✅ Записал тебя в группу «{format_group_title(group)}». "
             f"Перед занятием спрошу, придёшь ли."
@@ -163,7 +163,7 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
             f"просто жми кнопку."
         )
     await call.answer()
-    await _notify_teacher(bot, group, name, person_id)
+    await _notify_admin(bot, group, name, person_id)
 
 
 def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:

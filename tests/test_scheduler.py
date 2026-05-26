@@ -7,7 +7,7 @@ import pytest
 from app.db.models import SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import groups, persons, surveys, teachers
+from app.services import groups, persons, surveys, admins
 
 MONDAY_LESSON = datetime(2026, 5, 25, 19, 0)
 
@@ -40,7 +40,7 @@ def freeze(monkeypatch):
 
 async def _make_group(lead_hours: int = 18, n_students: int = 2) -> int:
     async with session_scope() as s:
-        teacher = await teachers.get_or_create(s, 111, "t", "Препод")
+        teacher = await admins.get_or_create(s, 111, "t", "Препод")
         group = await groups.create_group(
             s, teacher.id, "Группа A", "0", "19:00", lead_hours
         )

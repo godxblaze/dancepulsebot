@@ -5,12 +5,12 @@ import logging
 import signal
 
 from app.bot.bot import build_bot, build_dispatcher
-from app.bot.commands import grant_teacher_commands, set_default_commands
+from app.bot.commands import grant_admin_commands, set_default_commands
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, session_scope
 from app.scheduler.scheduler import build_scheduler
-from app.services import teachers as teachers_svc
+from app.services import admins as admins_svc
 
 log = logging.getLogger("dance.main")
 
@@ -24,11 +24,11 @@ async def run() -> None:
     bot = build_bot()
     await set_default_commands(bot)
     async with session_scope() as s:
-        for t in await teachers_svc.list_all(s):
+        for a in await admins_svc.list_all(s):
             try:
-                await grant_teacher_commands(bot, t.tg_user_id)
+                await grant_admin_commands(bot, a.tg_user_id)
             except Exception as e:  # noqa: BLE001
-                log.warning("Could not set teacher commands for %s: %s", t.tg_user_id, e)
+                log.warning("Could not set admin commands for %s: %s", a.tg_user_id, e)
     dp = build_dispatcher()
     scheduler = build_scheduler(bot)
     scheduler.start()

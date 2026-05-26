@@ -140,11 +140,12 @@ def students_keyboard(group_id: int, members: list[Person]) -> InlineKeyboardMar
 
 
 def person_card_keyboard(
-    group_id: int, person_id: int, support_level: int | None
+    group_id: int, person_id: int, support_level: int | None, gender: Gender | None
 ) -> InlineKeyboardMarkup:
-    """Actions on a person inside a group: pool level, remove, back.
+    """Actions on a person inside a group: pool level, gender, remove, back.
 
     The pool-level button shows what tap will do next (cycles 1→2→3→null).
+    Gender-toggle button лечит ошибки онбординга (выбрал не тот пол).
     """
     if support_level is None:
         level_text = "🆘 В пул саппортов (тап: → ур.1)"
@@ -152,11 +153,21 @@ def person_card_keyboard(
         level_text = f"🆘 В пуле, ур.{support_level} (тап: убрать)"
     else:
         level_text = f"🆘 В пуле, ур.{support_level} (тап: → ур.{support_level + 1})"
+    if gender == Gender.male:
+        gender_text = "🕺 Парень (тап: переключить на 💃)"
+    elif gender == Gender.female:
+        gender_text = "💃 Девушка (тап: переключить на 🕺)"
+    else:
+        gender_text = "❓ Пол не задан (тап: задать)"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
                 text=level_text,
                 callback_data=f"pcardlvl:{group_id}:{person_id}",
+            )],
+            [InlineKeyboardButton(
+                text=gender_text,
+                callback_data=f"pcardgnd:{group_id}:{person_id}",
             )],
             [InlineKeyboardButton(
                 text="🚪 Убрать из группы",

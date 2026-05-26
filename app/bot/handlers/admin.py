@@ -1207,7 +1207,7 @@ async def cb_person_card(call: CallbackQuery) -> None:
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=person_card_keyboard(group_id, person_id, person.support_level),
+        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
     )
     await call.answer()
 
@@ -1231,9 +1231,33 @@ async def cb_person_card_level(call: CallbackQuery) -> None:
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=person_card_keyboard(group_id, person_id, person.support_level),
+        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
     )
     await call.answer("Уровень обновлён")
+
+
+@router.callback_query(F.data.startswith("pcardgnd:"))
+async def cb_person_gender_toggle(call: CallbackQuery) -> None:
+    """Переключение пола: male ↔ female; если был None — ставим male."""
+    parts = (call.data or "").split(":")
+    group_id, person_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        person = await s.get(Person, person_id)
+        if group is None or person is None or person.admin_id != group.admin_id:
+            await call.answer("Не найдено", show_alert=True)
+            return
+        new_gender = Gender.female if person.gender == Gender.male else Gender.male
+        await persons_svc.set_gender(s, person_id, new_gender)
+        await s.refresh(person)
+        groups = await persons_svc.person_groups(s, person.id)
+        text = _person_card_text(person, groups)
+    await call.message.edit_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
+    )
+    await call.answer("Пол обновлён")
 
 
 @router.callback_query(F.data.startswith("pcardrem:"))

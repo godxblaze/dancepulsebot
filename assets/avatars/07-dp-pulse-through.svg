@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="g7" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff3d7f"/>
+      <stop offset="1" stop-color="#7a1fa2"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g7)"/>
+  <text x="256" y="335" text-anchor="middle"
+        font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="280" font-weight="800" fill="#fff" letter-spacing="-8">DP</text>
+  <polyline points="40,260 150,260 180,200 220,330 256,220 290,290 320,260 472,260"
+            fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M380 145 C374 135 360 135 360 150 C360 165 380 178 380 178 C380 178 400 165 400 150 C400 135 386 135 380 145 Z"
+        fill="#fff"/>
+</svg>

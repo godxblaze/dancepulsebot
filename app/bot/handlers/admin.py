@@ -182,14 +182,17 @@ async def _attendance_csv_for(session, admin) -> bytes:
 
 
 async def _demote_to_student_if_empty(bot: Bot, admin_id: int, tg_id: int) -> None:
-    """Если у admin'а не осталось школ — снимаем admin-меню и пушим student'а.
+    """Если у admin'а не осталось школ — полностью снимаем роль:
+    удаляем Admin-запись, revoke slash-меню и пушим student reply-меню.
 
-    Admin-объект в БД остаётся: если человека снова пригласят, его не нужно
-    регистрировать заново."""
+    Удаляем полностью, чтобы при повторном /grant или partner-invite
+    человек проходил онбординг заново как новенький, а не «оживал» со
+    старым именем и поднятым has_completed_setup."""
     async with session_scope() as s:
         schools = await schools_svc.admin_schools(s, admin_id)
-    if schools:
-        return
+        if schools:
+            return
+        await admins_svc.delete_admin(s, admin_id)
     try:
         await revoke_admin_commands(bot, tg_id)
     except Exception as e:  # noqa: BLE001
@@ -242,9 +245,15 @@ async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
         )
         return
     if not admin_schools:
-        # Бывший co-admin кого выгнали (или сам вышел) из всех школ.
-        # Не предлагаем создать свою — ему пусть пришлют новый partner-link.
-        # Admin-запись в БД оставляем, флаг — что онбординг уже пройден.
+        # Бывший co-admin кого выгнали (или сам вышел) из всех школ. Чистим
+        # Admin-запись, чтобы повторное приглашение прошло онбординг с нуля,
+        # и снимаем admin-меню на стороне Telegram.
+        async with session_scope() as s:
+            await admins_svc.delete_admin(s, teacher.id)
+        try:
+            await revoke_admin_commands(message.bot, tg.id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("revoke admin cmds for %s failed: %s", tg.id, e)
         await show_student_home(message)
         return
     await message.answer(

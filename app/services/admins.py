@@ -37,3 +37,18 @@ async def set_name(session: AsyncSession, admin_id: int, full_name: str) -> None
     if admin is not None:
         admin.full_name = full_name
         await session.flush()
+
+
+async def delete_admin(session: AsyncSession, admin_id: int) -> bool:
+    """Полностью снести Admin-запись. Возвращает True если что-то удалено.
+
+    Используется когда человек больше не member ни одной школы — Admin без
+    школ всё равно бесполезен, а оставлять его «на потом» означает что при
+    повторном /grant или partner-invite get_or_create вернёт старый объект
+    с has_completed_setup=True и старым именем. Чище удалить совсем."""
+    admin = await session.get(Admin, admin_id)
+    if admin is None:
+        return False
+    await session.delete(admin)
+    await session.flush()
+    return True

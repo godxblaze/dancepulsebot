@@ -2395,9 +2395,18 @@ async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
         log.warning("Could not set admin commands for %s: %s", tg.id, e)
     if call.message:
         await call.message.edit_text(
-            f"✅ Готово, ты теперь co-админ школы «{escape(name)}». "
-            f"Команда /groups покажет все её группы."
+            f"✅ Готово, ты теперь co-админ школы «{escape(name)}»."
         )
+    # Отправляем второе сообщение, чтобы Telegram переключил reply-keyboard
+    # на админ-меню — без этого юзер видит старое (или дефолтное) до /start.
+    try:
+        await bot.send_message(
+            tg.id,
+            "Открой меню снизу 👇 — там есть «📋 Мои группы», «🏫 Школа» и всё остальное.",
+            reply_markup=admin_menu_keyboard(),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not push admin menu to %s: %s", tg.id, e)
     await call.answer()
 
 

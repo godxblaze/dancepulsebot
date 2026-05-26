@@ -17,10 +17,11 @@ from aiogram.types import (
 from app.bot.keyboards import gender_keyboard, join_name_keyboard, student_menu_keyboard
 from app.bot.states import JoinFlow
 from app.bot.utils import format_group_title, format_place
-from app.db.models import Admin, Gender, Group
+from app.db.models import Gender, Group
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import venues as venues_svc
 from app.services.schedule import format_weekdays, local_now, next_lesson_at
 
@@ -28,7 +29,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 JOIN_PREFIX = "join_"
-COADMIN_PREFIX = "coadm_"
+PARTNER_PREFIX = "partner_"
 
 
 def _display_name(tg) -> str:
@@ -38,10 +39,12 @@ def _display_name(tg) -> str:
 async def _notify_admin(
     bot: Bot, group: Group, person_name: str, person_id: int | None = None
 ) -> None:
-    """Tell the group's admin(s) that a person just joined."""
+    """Сообщить всем admin'ам школы группы что записался ученик."""
+    if group.school_id is None:
+        return
     async with session_scope() as s:
-        admin = await s.get(Admin, group.admin_id)
-    if admin is None:
+        tg_ids = await schools_svc.member_tg_ids(s, group.school_id)
+    if not tg_ids:
         return
     reply_markup = None
     if person_id is not None:
@@ -53,14 +56,12 @@ async def _notify_admin(
                 )]
             ]
         )
-    try:
-        await bot.send_message(
-            admin.tg_user_id,
-            f"🔔 {person_name} записал(ась) в группу «{format_group_title(group)}».",
-            reply_markup=reply_markup,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Could not notify admin %s: %s", admin.tg_user_id, e)
+    text = f"🔔 {person_name} записал(ась) в группу «{format_group_title(group)}»."
+    for tg_id in tg_ids:
+        try:
+            await bot.send_message(tg_id, text, reply_markup=reply_markup)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not notify admin %s: %s", tg_id, e)
 
 
 @router.message(CommandStart(deep_link=True))
@@ -71,11 +72,11 @@ async def join_start(
     tg = message.from_user
     if not tg:
         return
-    if payload.startswith(COADMIN_PREFIX):
-        # Co-admin приглашение — обрабатывает admin.py через UI с кнопкой «Принять».
-        from app.bot.handlers.admin import handle_coadmin_invite_start
+    if payload.startswith(PARTNER_PREFIX):
+        # Приглашение co-admin'ом в школу — обрабатывает admin.py с подтверждением.
+        from app.bot.handlers.admin import handle_school_invite_start
 
-        await handle_coadmin_invite_start(message, payload[len(COADMIN_PREFIX):])
+        await handle_school_invite_start(message, payload[len(PARTNER_PREFIX):])
         return
     if not payload.startswith(JOIN_PREFIX):
         await message.answer(
@@ -93,7 +94,7 @@ async def join_start(
         if await persons_svc.get_in_group(s, group.id, tg.id) is not None:
             await message.answer(f"Ты уже в группе «{format_group_title(group)}». Всё в порядке.")
             return
-        person = await persons_svc.get_person(s, group.admin_id, tg.id)
+        person = await persons_svc.get_person(s, group.school_id, tg.id)
         known = person is not None and person.gender is not None
         known_person_id: int | None = None
         if known:

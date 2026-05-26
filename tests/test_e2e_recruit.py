@@ -113,7 +113,7 @@ async def _create_group_via_wizard(bot: FakeBot, monkeypatch) -> int:
     async with session_scope() as s:
         t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
-        gs = await groups_svc.admin_groups(s, t.id)
+        gs = await groups_svc.admin_visible_groups(s, t.id)
         assert len(gs) == 1 and gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
         return gs[0].id
 
@@ -152,7 +152,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
         group = await groups_svc.get_group(s, group_id)
         assert group is not None
         join_code = group.join_code
-        admin_id = group.admin_id
+        admin_id = group.school_id
 
     # 2. Six students onboard through the join link: 1 male + 5 female (deficit 4).
     student_specs = [

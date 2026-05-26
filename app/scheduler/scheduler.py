@@ -17,12 +17,12 @@ from app.bot.keyboards import (
 )
 from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
-from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
+from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
-from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
@@ -152,7 +152,10 @@ async def _maybe_send_summary(
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
             return
         summary = await surveys_svc.summarize(s, survey.id)
-        admin_tg_ids = await access_svc.admin_tg_ids_for_group(s, group.id)
+        admin_tg_ids = (
+            await schools_svc.member_tg_ids(s, group.school_id)
+            if group.school_id else []
+        )
         survey_id = survey.id
 
     if not admin_tg_ids:
@@ -188,13 +191,20 @@ def _gender_plural(gender: Gender) -> str:
 async def _maybe_recruit(
     bot: Bot, group: Group, lesson_at: datetime, now: datetime
 ) -> None:
-    """At the cutoff, measure the gender imbalance; if it crosses the threshold,
-    ask the teacher whether to recruit supports. One decision per lesson."""
+    """На отсечке считаем баланс пола; если перекос — спрашиваем owner'а школы
+    «добрать саппортов?». Одно решение на занятие."""
+    if group.school_id is None:
+        return
     async with session_scope() as s:
-        teacher = await s.get(Admin, group.admin_id)
-        if teacher is None:
+        owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
+        if owner_tg is None:
             return
-        if now < lesson_at - timedelta(hours=teacher.support_cutoff_hours):
+        # Берём threshold/cutoff с owner'а школы — они хранятся на самом Admin'е.
+        from app.services import admins as admins_svc
+        owner_row = await admins_svc.get_by_tg_id(s, owner_tg)
+        if owner_row is None:
+            return
+        if now < lesson_at - timedelta(hours=owner_row.support_cutoff_hours):
             return
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
         if survey is None:
@@ -203,7 +213,7 @@ async def _maybe_recruit(
             return  # decision already taken for this lesson
         male, female = await surveys_svc.gender_yes_counts(s, survey.id)
         deficit = abs(male - female)
-        if deficit < teacher.support_threshold:
+        if deficit < owner_row.support_threshold:
             await supports_svc.create_call(
                 s, survey.id, Gender.male, 0, SupportCallStatus.closed
             )
@@ -213,9 +223,9 @@ async def _maybe_recruit(
             s, survey.id, gender_needed, deficit, SupportCallStatus.pending
         )
         call_id = call.id
-        teacher_tg = teacher.tg_user_id
+        teacher_tg = owner_tg
         candidates = await persons_svc.support_candidates(
-            s, group.admin_id, gender_needed, group.id
+            s, group.school_id, gender_needed, group.id
         )
         venue = (
             await venues_svc.get_venue(s, group.venue_id)
@@ -280,7 +290,10 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
             group = await groups_svc.get_group(s, survey.group_id)
             if group is None:
                 continue
-            admin_tgs = await access_svc.admin_tg_ids_for_group(s, group.id)
+            admin_tgs = (
+                await schools_svc.member_tg_ids(s, group.school_id)
+                if group.school_id else []
+            )
             if not admin_tgs:
                 continue
             title = format_group_title(group)

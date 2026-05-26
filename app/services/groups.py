@@ -5,7 +5,7 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Group, GroupAccess, GroupAccessRole
+from app.db.models import Group, SchoolMember
 
 
 def _gen_join_code() -> str:
@@ -14,7 +14,7 @@ def _gen_join_code() -> str:
 
 async def create_group(
     session: AsyncSession,
-    admin_id: int,
+    school_id: int,
     name: str,
     weekdays: str,
     lesson_time: str,
@@ -27,7 +27,7 @@ async def create_group(
     teachers_note: str | None = None,
 ) -> Group:
     group = Group(
-        admin_id=admin_id,
+        school_id=school_id,
         name=name,
         style=style,
         level=level,
@@ -40,12 +40,6 @@ async def create_group(
         join_code=_gen_join_code(),
     )
     session.add(group)
-    await session.flush()
-    # Создатель автоматически получает owner-доступ. Сделано здесь, а не в
-    # хэндлере, чтобы scripts/demo_*.py и тесты тоже всегда давали owner'а.
-    session.add(
-        GroupAccess(group_id=group.id, admin_id=admin_id, role=GroupAccessRole.owner)
-    )
     await session.flush()
     return group
 
@@ -87,11 +81,11 @@ async def update_group(
     await session.flush()
 
 
-async def admin_styles(session: AsyncSession, admin_id: int) -> list[str]:
-    """Distinct non-empty style names the admin has previously used, by recency."""
+async def school_styles(session: AsyncSession, school_id: int) -> list[str]:
+    """Distinct non-empty style names в школе, by recency."""
     stmt = (
         select(Group.style)
-        .where(Group.admin_id == admin_id, Group.style.is_not(None))
+        .where(Group.school_id == school_id, Group.style.is_not(None))
         .order_by(Group.id.desc())
     )
     rows = (await session.execute(stmt)).scalars().all()
@@ -111,14 +105,22 @@ async def get_by_join_code(session: AsyncSession, code: str) -> Group | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def admin_groups(session: AsyncSession, admin_id: int) -> list[Group]:
-    """Все группы, к которым у админа есть доступ (owner ИЛИ co-admin) — owner'ы
-    перечислены через GroupAccess, потому одной выборкой через junction."""
+async def school_groups(session: AsyncSession, school_id: int) -> list[Group]:
+    """Все группы конкретной школы."""
+    stmt = select(Group).where(Group.school_id == school_id).order_by(Group.id)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def admin_visible_groups(
+    session: AsyncSession, admin_id: int
+) -> list[Group]:
+    """Все группы из всех школ, где admin — member (owner или coadmin).
+    Используется в /groups, /today, /stats. Сортировка: по школе, затем id."""
     stmt = (
         select(Group)
-        .join(GroupAccess, GroupAccess.group_id == Group.id)
-        .where(GroupAccess.admin_id == admin_id)
-        .order_by(Group.id)
+        .join(SchoolMember, SchoolMember.school_id == Group.school_id)
+        .where(SchoolMember.admin_id == admin_id)
+        .order_by(Group.school_id, Group.id)
     )
     return list((await session.execute(stmt)).scalars().all())
 

@@ -37,7 +37,7 @@ async def test_teacher_groups_ordered_by_id(db) -> None:
             await groups.create_group(s, t.id, name, "0", "19:00", 18)
         tid = t.id
     async with session_scope() as s:
-        gs = await groups.admin_groups(s, tid)
+        gs = await groups.admin_visible_groups(s, tid)
     assert [g.name for g in gs] == ["Alpha", "Bravo", "Charlie"]
 
 

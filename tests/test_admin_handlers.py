@@ -301,7 +301,7 @@ async def test_wizard_full_flow_creates_group(db, monkeypatch) -> None:
     async with session_scope() as s:
         t = await admins.get_by_tg_id(s, 30)
         assert t is not None
-        gs = await groups.admin_groups(s, t.id)
+        gs = await groups.admin_visible_groups(s, t.id)
     assert len(gs) == 1
     assert gs[0].style == "Сальса"
     assert gs[0].level == 2

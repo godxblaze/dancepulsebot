@@ -1,8 +1,8 @@
-"""CSV-экспорт данных admin'а — чтобы школа могла забрать свои данные обратно.
+"""CSV-экспорт данных школы — чтобы её можно было забрать в любой момент.
 
 Два набора:
-- students.csv — все Person'ы admin'а с метаданными;
-- attendance.csv — все Response'ы по группам admin'а (обещание × факт).
+- students.csv — все Person'ы школы с метаданными;
+- attendance.csv — все Response'ы по группам школы (обещание × факт).
 """
 from __future__ import annotations
 
@@ -24,17 +24,16 @@ def _csv_bytes(rows: list[list[str]], header: list[str]) -> bytes:
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
-async def students_csv(session: AsyncSession, admin_id: int) -> bytes:
-    """Все ученики admin'а: их группы списком через ';'."""
+async def students_csv(session: AsyncSession, school_id: int) -> bytes:
+    """Все ученики школы: их группы списком через ';'."""
     persons_stmt = (
-        select(Person).where(Person.admin_id == admin_id).order_by(Person.full_name)
+        select(Person).where(Person.school_id == school_id).order_by(Person.full_name)
     )
     persons = list((await session.execute(persons_stmt)).scalars().all())
-    # group names per person
     group_stmt = (
         select(Membership.person_id, Group.name)
         .join(Group, Group.id == Membership.group_id)
-        .where(Group.admin_id == admin_id)
+        .where(Group.school_id == school_id)
     )
     groups_map: dict[int, list[str]] = {}
     for pid, name in (await session.execute(group_stmt)).all():
@@ -56,15 +55,15 @@ async def students_csv(session: AsyncSession, admin_id: int) -> bytes:
     return _csv_bytes(rows, header)
 
 
-async def attendance_csv(session: AsyncSession, admin_id: int) -> bytes:
-    """Все Response'ы по всем группам admin'а."""
+async def attendance_csv(session: AsyncSession, school_id: int) -> bytes:
+    """Все Response'ы по всем группам школы."""
     stmt = (
         select(Group.name, Survey.lesson_at, Survey.status,
                Person.full_name, Response.answer, Response.actually_attended)
         .join(Survey, Survey.group_id == Group.id)
         .join(Response, Response.survey_id == Survey.id)
         .join(Person, Person.id == Response.person_id)
-        .where(Group.admin_id == admin_id)
+        .where(Group.school_id == school_id)
         .order_by(Group.name, Survey.lesson_at, Person.full_name)
     )
     rows: list[list[str]] = []

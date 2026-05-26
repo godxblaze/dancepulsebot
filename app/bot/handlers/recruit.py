@@ -11,10 +11,11 @@ from app.bot.keyboards import (
     support_pick_keyboard,
 )
 from app.bot.utils import format_group_title, format_place
-from app.db.models import Admin, Person, SupportCallStatus
+from app.db.models import Person, SupportCallStatus
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
@@ -48,22 +49,23 @@ async def _call_context(session, call_id: int):
 
 @router.callback_query(F.data.startswith("pick:"))
 async def cb_support_pick(call: CallbackQuery) -> None:
-    """Teacher ticks/unticks a pool member in the recruit picker."""
+    """Admin (owner школы) ticks/unticks a pool member in the recruit picker."""
     parts = (call.data or "").split(":")
     call_id, person_id = int(parts[1]), int(parts[2])
     selected = _selected_ids(call.message.reply_markup if call.message else None)
     selected ^= {person_id}  # toggle
     async with session_scope() as s:
         sc, _survey, group = await _call_context(s, call_id)
-        if sc is None or group is None:
+        if sc is None or group is None or group.school_id is None:
             await call.answer()
             return
-        teacher = await s.get(Admin, group.admin_id)
-        if teacher is None or teacher.tg_user_id != call.from_user.id:
+        admin_id = await _admin_id_from_tg(call.from_user.id, s)
+        if admin_id is None or not await schools_svc.is_owner(s, group.school_id, admin_id):
+            # подмена — picker открыт по callback'у; если юзер не owner, тихо игнор
             await call.answer()
             return
         candidates = await persons_svc.support_candidates(
-            s, group.admin_id, sc.gender, group.id
+            s, group.school_id, sc.gender, group.id
         )
     if call.message:
         await call.message.edit_reply_markup(
@@ -72,9 +74,15 @@ async def cb_support_pick(call: CallbackQuery) -> None:
     await call.answer()
 
 
+async def _admin_id_from_tg(tg_id: int, session) -> int | None:
+    from app.services import admins as admins_svc
+    admin = await admins_svc.get_by_tg_id(session, tg_id)
+    return admin.id if admin else None
+
+
 @router.callback_query(F.data.startswith("picksend:"))
 async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
-    """Teacher sends the recruit invites to the ticked pool members."""
+    """Admin шлёт recruit invites выбранным саппортам."""
     call_id = int((call.data or "").split(":")[1])
     selected = _selected_ids(call.message.reply_markup if call.message else None)
     if not selected:
@@ -82,11 +90,11 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
         return
     async with session_scope() as s:
         sc, survey, group = await _call_context(s, call_id)
-        if sc is None or survey is None or group is None:
+        if sc is None or survey is None or group is None or group.school_id is None:
             await call.answer("Уже обработано", show_alert=True)
             return
-        teacher = await s.get(Admin, group.admin_id)
-        if teacher is None or teacher.tg_user_id != call.from_user.id:
+        admin_id = await _admin_id_from_tg(call.from_user.id, s)
+        if admin_id is None or not await schools_svc.is_owner(s, group.school_id, admin_id):
             await call.answer()
             return
         if sc.status == SupportCallStatus.closed:
@@ -147,16 +155,15 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             return
         survey = await surveys_svc.get_survey(s, sc.survey_id)
         group = await groups_svc.get_group(s, survey.group_id) if survey else None
-        if group is None:
+        if group is None or group.school_id is None:
             await call.answer()
             return
-        person = await persons_svc.get_person(s, group.admin_id, call.from_user.id)
+        person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
         if person is None:
             await call.answer()
             return
         accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
-        teacher = await s.get(Admin, group.admin_id)
-        teacher_tg = teacher.tg_user_id if teacher else None
+        owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
         person_name = person.full_name
         title = format_group_title(group)
         group_name = group.name
@@ -164,8 +171,6 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
 
     when = f"{lesson_at:%d.%m в %H:%M}"
     if not accepted:
-        # already-claimed branch covers the flip-to-yes case when the call is
-        # full or the user is already on the list — same outcome either way.
         existing = await _is_already_claimed(call_id, person.id)
         if existing:
             if call.message:
@@ -191,11 +196,11 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             reply_markup=support_flip_keyboard(call_id, "join"),
         )
     await call.answer("Записал!")
-    if teacher_tg is not None:
+    if owner_tg is not None:
         done = "  Набор закрыт ✅" if filled >= needed else ""
         try:
             await bot.send_message(
-                teacher_tg,
+                owner_tg,
                 f"🆘 {person_name} придёт выручить «{group_name}» — "
                 f"{filled}/{needed}.{done}",
             )
@@ -208,7 +213,7 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
     call_id = int((call.data or "").split(":")[2])
     reverted_name: str | None = None
     filled = needed = 0
-    teacher_tg: int | None = None
+    owner_tg: int | None = None
     title = "занятие"
     when = ""
     group_name = ""
@@ -218,20 +223,19 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
         group = (
             await groups_svc.get_group(s, survey.group_id) if survey else None
         )
-        if group is not None and survey is not None:
+        if group is not None and survey is not None and group.school_id is not None:
             title = format_group_title(group)
             when = f"{survey.lesson_at:%d.%m в %H:%M}"
             group_name = group.name
             person = await persons_svc.get_person(
-                s, group.admin_id, call.from_user.id
+                s, group.school_id, call.from_user.id
             )
             if person is not None and sc is not None:
                 if await supports_svc.unclaim(s, call_id, person.id):
                     reverted_name = person.full_name
                     filled = await supports_svc.count_claims(s, call_id)
                     needed = sc.needed
-                    teacher = await s.get(Admin, group.admin_id)
-                    teacher_tg = teacher.tg_user_id if teacher else None
+                    owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
 
     if call.message:
         text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
@@ -240,11 +244,10 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
         )
     await call.answer()
 
-    # If this was a flip-from-yes — tell the teacher the slot opened up again.
-    if reverted_name is not None and teacher_tg is not None:
+    if reverted_name is not None and owner_tg is not None:
         try:
             await bot.send_message(
-                teacher_tg,
+                owner_tg,
                 f"↩️ {reverted_name} передумал — снова «{group_name}» "
                 f"{filled}/{needed}.",
             )

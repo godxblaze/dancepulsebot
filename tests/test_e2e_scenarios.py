@@ -135,7 +135,7 @@ async def _create_group_via_wizard(
     async with session_scope() as s:
         t = await admins_svc.get_by_tg_id(s, teacher_tg)
         assert t is not None
-        gs = await groups_svc.admin_groups(s, t.id)
+        gs = await groups_svc.admin_visible_groups(s, t.id)
         # newest group is the last one
         return gs[-1].id
 
@@ -187,7 +187,7 @@ async def test_group_lifecycle(db, monkeypatch) -> None:
     async with session_scope() as s:
         assert await groups_svc.get_group(s, g1_id) is None
         t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
-        gs = await groups_svc.admin_groups(s, t.id)
+        gs = await groups_svc.admin_visible_groups(s, t.id)
         assert len(gs) == 1 and gs[0].id == g2_id
         live_code = gs[0].join_code
 
@@ -215,7 +215,7 @@ async def test_onboarding_suggested_name(db, monkeypatch) -> None:
     async with session_scope() as s:
         g = await groups_svc.get_group(s, gid)
         code = g.join_code
-        tid = g.admin_id
+        tid = g.school_id
 
     student = fake_user(501, full_name="Аня Иванова", username="anya")
     fsm = FakeFSM()
@@ -353,7 +353,7 @@ async def test_newgroup_wizard_validation(db, monkeypatch) -> None:
     async with session_scope() as s:
         t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
-        gs = await groups_svc.admin_groups(s, t.id)
+        gs = await groups_svc.admin_visible_groups(s, t.id)
         assert len(gs) == 1
         assert gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
 
@@ -578,7 +578,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
         code = group.join_code
-        admin_id = group.admin_id
+        admin_id = group.school_id
 
     specs = [
         (901, "M1", Gender.male),
@@ -652,7 +652,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
     group_id = await _create_group_via_wizard(bot, monkeypatch)
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        admin_id = group.admin_id
+        admin_id = group.school_id
         code = group.join_code
 
     # 1 male, 3 female → deficit 2
@@ -854,7 +854,7 @@ async def test_full_tick(db, monkeypatch) -> None:
     group_id = await _create_group_via_wizard(bot, monkeypatch)
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        admin_id = group.admin_id
+        admin_id = group.school_id
         code = group.join_code
 
     # 1 male + 4 female yes → imbalance 3, threshold 2

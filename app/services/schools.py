@@ -202,6 +202,22 @@ async def coadmins_of(session: AsyncSession, school_id: int) -> list[Admin]:
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def get_owner_tg_id(
+    session: AsyncSession, school_id: int
+) -> int | None:
+    """tg_user_id владельца школы. None если owner-membership отсутствует."""
+    stmt = (
+        select(Admin.tg_user_id)
+        .join(SchoolMember, SchoolMember.admin_id == Admin.id)
+        .where(
+            SchoolMember.school_id == school_id,
+            SchoolMember.role == SchoolMemberRole.owner,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def member_tg_ids(session: AsyncSession, school_id: int) -> list[int]:
     """tg_user_id всех member'ов школы — для fan-out рассылок."""
     stmt = (

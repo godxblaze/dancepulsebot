@@ -16,6 +16,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="today", description="Сводка на сегодня"),
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="pool", description="Пул саппортов"),
+    BotCommand(command="export", description="Экспорт в CSV"),
     BotCommand(command="name", description="Изменить моё имя"),
     BotCommand(command="help", description="Справка"),
 ]

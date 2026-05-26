@@ -59,6 +59,7 @@ from app.db.models import Answer, Gender, Group, Person, SupportCallStatus, Surv
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import cancellations as cancellations_svc
+from app.services import exports as exports_svc
 from app.services import group_access as access_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -86,8 +87,9 @@ _HELP_ADMIN = (
     "/newgroup — создать группу\n"
     "/groups — мои группы\n"
     "/today — сводка по ближайшим занятиям\n"
-    "/stats — посещаемость за последние занятия\n"
+    "/stats — посещаемость, топ саппортов, давно не приходили\n"
     "/pool — пул саппортов на подмену\n"
+    "/export — выгрузить учеников и посещаемость CSV-ками\n"
     "/name — изменить, как тебя показывать\n"
     "/help — эта справка"
 )
@@ -236,6 +238,29 @@ async def cmd_today(message: Message) -> None:
         "\n\n".join(blocks),
         parse_mode=ParseMode.HTML,
         reply_markup=today_ping_keyboard(pending_by_group),
+    )
+
+
+@router.message(Command("export"))
+async def cmd_export(message: Message, bot: Bot) -> None:
+    """CSV-выгрузка учеников и посещаемости. Без аргументов — два файла одним
+    диалогом. Сами файлы лежат в памяти, ничего не сохраняется на диск."""
+    tg = message.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
+        if teacher is None:
+            return  # not an admin — silent
+        students_data = await exports_svc.students_csv(s, teacher.id)
+        attendance_data = await exports_svc.attendance_csv(s, teacher.id)
+    await message.answer_document(
+        BufferedInputFile(students_data, "students.csv"),
+        caption="📥 Ученики и пул саппортов (UTF-8 + BOM, открывается Excel'ем).",
+    )
+    await message.answer_document(
+        BufferedInputFile(attendance_data, "attendance.csv"),
+        caption="📥 Посещаемость по всем занятиям: обещание vs реально.",
     )
 
 

@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.keyboards import (
@@ -73,6 +74,32 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
                 reply_markup=attendance_keyboard(survey_id),
                 parse_mode=ParseMode.HTML,
             )
+        except (TelegramForbiddenError, TelegramNotFound) as e:
+            # Terminal: пользователь заблокировал бота или чат недоступен.
+            # Помечаем -1, чтобы persons_without_message больше его не возвращал.
+            log.info(
+                "survey=%s person=%s tg=%s — terminal delivery failure (%s); marking as undeliverable",
+                survey_id, p.id, p.tg_user_id, type(e).__name__,
+            )
+            async with session_scope() as s:
+                await surveys_svc.set_message_id(s, survey_id, p.id, -1)
+            continue
+        except TelegramBadRequest as e:
+            # «chat not found» / «user is deactivated» прилетают сюда — тоже terminal.
+            msg_l = str(e).lower()
+            if any(k in msg_l for k in ("not found", "deactivated", "blocked")):
+                log.info(
+                    "survey=%s person=%s tg=%s — terminal (%s); marking as undeliverable",
+                    survey_id, p.id, p.tg_user_id, e,
+                )
+                async with session_scope() as s:
+                    await surveys_svc.set_message_id(s, survey_id, p.id, -1)
+                continue
+            log.warning(
+                "survey=%s person=%s tg=%s — BadRequest (transient?), will retry: %s",
+                survey_id, p.id, p.tg_user_id, e,
+            )
+            continue
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "survey=%s person=%s tg=%s — send failed, will retry: %s",
@@ -131,14 +158,19 @@ async def _maybe_send_summary(
     text = _format_summary(group, lesson_at, summary)
     markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
     delivered = 0
+    terminal = 0
     for tg in admin_tg_ids:
         try:
             await bot.send_message(tg, text, parse_mode=ParseMode.HTML, reply_markup=markup)
             delivered += 1
+        except (TelegramForbiddenError, TelegramNotFound):
+            log.info("Admin tg=%s заблокировал бота — auto-summary skipped", tg)
+            terminal += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to send auto-summary to admin %s: %s", tg, e)
-    if delivered == 0:
-        return  # ничего не доехало — попробуем на следующем tick
+    if delivered == 0 and terminal == 0:
+        return  # все попытки транзиентно упали — попробуем на следующем tick
+    # Хотя бы один админ получил, или все заблокировали бота — больше нет смысла пытаться.
     async with session_scope() as s:
         await surveys_svc.mark_summary_sent(s, survey_id)
     log.info(

@@ -87,6 +87,29 @@ async def test_tick_polls_new_member_on_next_tick(db, freeze) -> None:
     assert [m.chat_id for m in bot.sent] == [200, 201, 300]
 
 
+async def test_tick_marks_blocker_as_undeliverable(db, freeze) -> None:
+    """TelegramForbiddenError — пользователь заблокировал бота. Помечаем -1,
+    больше не пытаемся, никакого спама логов."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))
+
+    class BlockerBot(FakeBot):
+        async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+            if chat_id == 201:
+                raise TelegramForbiddenError(method=None, message="bot was blocked by the user")
+            return await super().send_message(chat_id, text, reply_markup, **kwargs)
+
+    bot = BlockerBot()
+    await sched.tick(bot)
+    assert [m.chat_id for m in bot.sent] == [200]
+
+    # На следующем tick: 201 НЕ пересылается (помечен как undeliverable).
+    await sched.tick(bot)
+    assert [m.chat_id for m in bot.sent] == [200]
+
+
 async def test_tick_retries_failed_send_next_tick(db, freeze) -> None:
     """If send_message fails, next tick must retry for that person (no tg_message_id stored)."""
     await _make_group(n_students=2)

@@ -42,7 +42,7 @@ from app.bot.keyboards import (
     venue_picker_keyboard,
     weekdays_keyboard,
 )
-from app.bot.states import EditGroup, EditName, NewGroup
+from app.bot.states import Broadcast, EditGroup, EditName, NewGroup
 from app.bot.utils import (
     bar,
     derive_group_name,
@@ -1441,6 +1441,76 @@ async def cb_group_delete(call: CallbackQuery) -> None:
         await groups_svc.delete_group(s, group)
     await call.message.edit_text(f"🗑 Группа «{name}» удалена.")
     await call.answer()
+
+
+# ── broadcast to group ──────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("grpbcast:"))
+async def cb_broadcast_start(call: CallbackQuery, state: FSMContext) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        count = await persons_svc.count_members(s, group_id)
+        title = format_group_title(group)
+    await state.set_state(Broadcast.text)
+    await state.update_data(group_id=group_id)
+    await call.message.answer(
+        f"📢 Напиши сообщение, которое отправлю всем ученикам «{title}» ({count} чел.). "
+        f"Чтобы передумать — пришли /cancel."
+    )
+    await call.answer()
+
+
+@router.message(Command("cancel"), Broadcast.text)
+async def broadcast_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменил, ничего не рассылаю.")
+
+
+@router.message(Broadcast.text, F.text, ~F.text.in_(MENU_TEXTS))
+async def broadcast_send(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    group_id = data.get("group_id")
+    await state.clear()
+    if group_id is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустое сообщение — отменяю.")
+        return
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, message.from_user.id)
+        if group is None:
+            await message.answer("Группа не найдена.")
+            return
+        members = await persons_svc.group_members(s, group_id)
+        title = format_group_title(group)
+        sender_name = message.from_user.full_name or message.from_user.username or "препод"
+    if not members:
+        await message.answer("В группе нет учеников — рассылать некому.")
+        return
+    body = f"📢 «{escape(title)}» — сообщение от {escape(sender_name)}:\n\n{escape(text)}"
+    sent = blocked = failed = 0
+    from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+    for p in members:
+        try:
+            await bot.send_message(p.tg_user_id, body, parse_mode=ParseMode.HTML)
+            sent += 1
+        except (TelegramForbiddenError, TelegramNotFound):
+            blocked += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("broadcast to %s failed: %s", p.tg_user_id, e)
+            failed += 1
+    parts = [f"📢 Отправлено: {sent}/{len(members)}"]
+    if blocked:
+        parts.append(f"заблокировали бота: {blocked}")
+    if failed:
+        parts.append(f"не доехало: {failed}")
+    await message.answer(" · ".join(parts))
 
 
 # ── cancel single lesson ────────────────────────────────────────────

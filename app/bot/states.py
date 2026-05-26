@@ -36,3 +36,10 @@ class JoinFlow(StatesGroup):
 
 class EditName(StatesGroup):
     waiting = State()
+
+
+class Broadcast(StatesGroup):
+    """Препод хочет разослать одно сообщение всем ученикам группы.
+    group_id живёт в FSM data."""
+
+    text = State()

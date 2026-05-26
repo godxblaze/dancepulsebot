@@ -49,3 +49,9 @@ class RenameSchool(StatesGroup):
     """Owner переименовывает школу. school_id в FSM data."""
 
     name = State()
+
+
+class CreateSchool(StatesGroup):
+    """Свежий admin без школ — первый шаг это назвать свою школу."""
+
+    name = State()

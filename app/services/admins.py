@@ -21,15 +21,14 @@ async def get_or_create(
     tg_username: str | None,
     full_name: str,
 ) -> Admin:
-    """Создаёт Admin'а и сразу гарантирует ему собственную школу. Идемпотентно."""
+    """Создаёт или возвращает Admin'а. Школу автоматически НЕ создаёт —
+    дальше идёт через явный flow: developer /start → CreateSchool FSM
+    с вводом имени; co-admin приглашение → школа берётся из invite'а."""
     admin = await get_by_tg_id(session, tg_user_id)
     if admin is None:
         admin = Admin(tg_user_id=tg_user_id, tg_username=tg_username, full_name=full_name)
         session.add(admin)
         await session.flush()
-    # Локальный импорт чтобы не плодить циклы (schools тоже импортирует admins).
-    from app.services import schools as schools_svc
-    await schools_svc.get_or_create_owned_school(session, admin.id)
     return admin
 
 

@@ -5,7 +5,7 @@ import logging
 import signal
 
 from app.bot.bot import build_bot, build_dispatcher
-from app.bot.commands import grant_admin_commands, set_default_commands
+from app.bot.commands import apply_bot_profile, grant_admin_commands, set_default_commands
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, session_scope
@@ -22,6 +22,7 @@ async def run() -> None:
     log.info("Database ready (db=%s)", settings.db_path)
 
     bot = build_bot()
+    await apply_bot_profile(bot)
     await set_default_commands(bot)
     async with session_scope() as s:
         for a in await admins_svc.list_all(s):

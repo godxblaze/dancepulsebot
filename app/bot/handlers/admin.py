@@ -11,7 +11,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from app.bot.commands import grant_admin_commands
+from app.bot.commands import grant_admin_commands, revoke_admin_commands
 from app.bot.handlers.student import show_student_home, show_student_today
 from app.bot.keyboards import (
     MENU_EXPORT,
@@ -44,6 +44,7 @@ from app.bot.keyboards import (
     school_card_keyboard,
     school_picker_keyboard,
     skip_keyboard,
+    student_menu_keyboard,
     students_keyboard,
     style_picker_keyboard,
     style_typing_keyboard,
@@ -52,7 +53,14 @@ from app.bot.keyboards import (
     walk_in_picker_keyboard,
     weekdays_keyboard,
 )
-from app.bot.states import Broadcast, EditGroup, EditName, NewGroup, RenameSchool
+from app.bot.states import (
+    Broadcast,
+    CreateSchool,
+    EditGroup,
+    EditName,
+    NewGroup,
+    RenameSchool,
+)
 from app.bot.utils import (
     bar,
     derive_group_name,
@@ -61,7 +69,7 @@ from app.bot.utils import (
     qr_png,
 )
 from app.core.config import settings
-from app.db.models import Answer, Gender, Group, Person, SupportCallStatus, SurveyStatus
+from app.db.models import Admin, Answer, Gender, Group, Person, SupportCallStatus, SurveyStatus
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import cancellations as cancellations_svc
@@ -173,11 +181,35 @@ async def _attendance_csv_for(session, admin) -> bytes:
     return await exports_svc.attendance_csv(session, school.id)
 
 
+async def _demote_to_student_if_empty(bot: Bot, admin_id: int, tg_id: int) -> None:
+    """Если у admin'а не осталось школ — снимаем admin-меню и пушим student'а.
+
+    Admin-объект в БД остаётся: если человека снова пригласят, его не нужно
+    регистрировать заново."""
+    async with session_scope() as s:
+        schools = await schools_svc.admin_schools(s, admin_id)
+    if schools:
+        return
+    try:
+        await revoke_admin_commands(bot, tg_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("revoke admin cmds for %s failed: %s", tg_id, e)
+    try:
+        await bot.send_message(
+            tg_id,
+            "Ты больше не админ ни в одной школе — возвращаю обычное меню. "
+            "Если тебя снова пригласят, открой ссылку и нажми «✅ Принять».",
+            reply_markup=student_menu_keyboard(),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("push student menu to %s failed: %s", tg_id, e)
+
+
 # ── registration & help ──────────────────────────────────────────────
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
     tg = message.from_user
     if not tg:
         return
@@ -187,15 +219,70 @@ async def cmd_start(message: Message) -> None:
             teacher = await admins_svc.get_or_create(
                 s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
             )
+        admin_schools: list = []
+        if teacher is not None:
+            admin_schools = await schools_svc.admin_schools(s, teacher.id)
     if teacher is None:
         # everyone is a student by default — teacher status is granted via /grant
         await show_student_home(message)
+        return
+    if not admin_schools:
+        # Свежий admin (или старый кого вынесли из всех школ) — первый
+        # шаг это назвать собственную школу.
+        if state is not None:
+            await state.set_state(CreateSchool.name)
+        await message.answer(
+            "💓 Dance Pulse\n\n"
+            "Ты получил статус админа — поздравляю! Дай название своей школе "
+            "(контейнер, в котором будут жить твои группы и ученики). "
+            "Например: «Wave Dance» или «Школа Маши».\n\n"
+            "Чтобы передумать — /cancel."
+        )
         return
     await message.answer(
         "💓 Dance Pulse\n\n"
         "Я опрашиваю учеников перед каждым занятием и сам собираю саппортов, "
         "когда в паре перекос.\n\n"
         "Всё — кнопками меню снизу 👇",
+        reply_markup=admin_menu_keyboard(),
+    )
+
+
+@router.message(Command("cancel"), CreateSchool.name)
+async def create_school_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Отменил. Когда передумаешь — напиши /start, и я снова попрошу "
+        "название школы."
+    )
+
+
+@router.message(CreateSchool.name, F.text, ~F.text.in_(MENU_TEXTS))
+async def create_school_name_typed(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Пустое название — давай ещё раз.")
+        return
+    if len(name) > 120:
+        await message.answer("Слишком длинное название (максимум 120 символов).")
+        return
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, message.from_user.id)
+        if admin is None:
+            await state.clear()
+            return
+        existing = await schools_svc.get_owned_school(s, admin.id)
+        if existing is not None:
+            # На всякий случай — гонка / повторный вход; молча используем существующую.
+            school = existing
+        else:
+            school = await schools_svc.create_school(s, admin.id, name)
+    await state.clear()
+    await message.answer(
+        f"✅ Школа «{escape(school.name)}» создана.\n\n"
+        f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
+        f"в карточке школы можно пригласить co-админа.",
+        parse_mode=ParseMode.HTML,
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -241,12 +328,12 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
     try:
         await bot.send_message(
             target_id,
-            "✅ Тебе выдан статус преподавателя. "
-            "Меню снизу 👇 — оттуда создаёшь группы и управляешь школой.",
-            reply_markup=admin_menu_keyboard(),
+            "✅ Тебе выдан статус админа.\n\n"
+            "Открой бот командой /start — я попрошу тебя дать название "
+            "твоей школе, и можно работать.",
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("Could not notify new teacher %s: %s", target_id, e)
+        log.warning("Could not notify new admin %s: %s", target_id, e)
 
 
 @router.message(Command("today"))
@@ -2206,7 +2293,7 @@ async def cb_school_invite_link(call: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data.startswith("schrem:"))
-async def cb_school_remove_member(call: CallbackQuery) -> None:
+async def cb_school_remove_member(call: CallbackQuery, bot: Bot) -> None:
     parts = (call.data or "").split(":")
     school_id, admin_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
@@ -2214,9 +2301,13 @@ async def cb_school_remove_member(call: CallbackQuery) -> None:
         if me is None or not await schools_svc.is_owner(s, school_id, me.id):
             await call.answer("Только owner может убирать", show_alert=True)
             return
+        removed_admin = await s.get(Admin, admin_id)
+        removed_tg = removed_admin.tg_user_id if removed_admin else None
         removed = await schools_svc.remove_coadmin(s, school_id, admin_id)
     if removed:
         await call.answer("Убран")
+        if removed_tg is not None:
+            await _demote_to_student_if_empty(bot, admin_id, removed_tg)
     else:
         await call.answer("Уже не co-admin", show_alert=True)
     if call.message is not None:
@@ -2287,8 +2378,9 @@ async def cb_school_delete_confirm(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("schdelok:"))
-async def cb_school_delete(call: CallbackQuery) -> None:
+async def cb_school_delete(call: CallbackQuery, bot: Bot) -> None:
     school_id = int(call.data.split(":", 1)[1])
+    affected_tgs: list[tuple[int, int]] = []  # (admin_id, tg_id) бывших members
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
         if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
@@ -2299,9 +2391,14 @@ async def cb_school_delete(call: CallbackQuery) -> None:
             await call.answer("Уже удалена", show_alert=True)
             return
         name = school.name
+        members = await schools_svc.members_of(s, school_id)
+        affected_tgs = [(a.id, a.tg_user_id) for a, _ in members]
         await schools_svc.delete_school(s, school)
     await call.message.edit_text(f"🗑 Школа «{escape(name)}» удалена.")
     await call.answer()
+    # Все бывшие members могли потерять последнюю школу — переключаем им меню.
+    for admin_id, tg_id in affected_tgs:
+        await _demote_to_student_if_empty(bot, admin_id, tg_id)
 
 
 @router.callback_query(F.data.startswith("schleave:"))
@@ -2323,8 +2420,10 @@ async def cb_school_leave_confirm(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("schleaveok:"))
-async def cb_school_leave(call: CallbackQuery) -> None:
+async def cb_school_leave(call: CallbackQuery, bot: Bot) -> None:
     school_id = int(call.data.split(":", 1)[1])
+    admin_id_to_demote: int | None = None
+    tg_to_demote: int | None = None
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
         if admin is None:
@@ -2342,7 +2441,11 @@ async def cb_school_leave(call: CallbackQuery) -> None:
         await schools_svc.remove_coadmin(s, school_id, admin.id)
         school = await schools_svc.get_school(s, school_id)
         name = school.name if school else "—"
+        admin_id_to_demote = admin.id
+        tg_to_demote = call.from_user.id
     await call.message.edit_text(f"↩ Вышел из школы «{escape(name)}».")
+    if admin_id_to_demote is not None and tg_to_demote is not None:
+        await _demote_to_student_if_empty(bot, admin_id_to_demote, tg_to_demote)
     await call.answer()
 
 

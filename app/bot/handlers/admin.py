@@ -43,6 +43,7 @@ from app.bot.keyboards import (
     style_typing_keyboard,
     today_ping_keyboard,
     venue_picker_keyboard,
+    walk_in_picker_keyboard,
     weekdays_keyboard,
 )
 from app.bot.states import Broadcast, EditGroup, EditName, NewGroup
@@ -1643,6 +1644,65 @@ async def cb_attendance_open_lesson(call: CallbackQuery) -> None:
     survey_id, group_id = int(parts[1]), int(parts[2])
     await _render_attendance_roster(call, survey_id, group_id)
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("atnwk:"))
+async def cb_walk_in_pick(call: CallbackQuery) -> None:
+    """Показываем persons преподавателя, которых ЕЩЁ нет в этом опросе."""
+    parts = (call.data or "").split(":")
+    survey_id, group_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        survey = await surveys_svc.get_survey(s, survey_id)
+        if survey is None or survey.group_id != group_id:
+            await call.answer("Опрос не найден", show_alert=True)
+            return
+        roster = await surveys_svc.attendance_roster(s, survey_id)
+        roster_ids = {p.id for p, _ in roster}
+        all_persons = await persons_svc.list_persons(s, group.admin_id)
+        candidates = [p for p in all_persons if p.id not in roster_ids]
+    if not candidates:
+        await call.answer(
+            "Все известные ученики уже в ростере. "
+            "Запиши нового человека через ссылку-приглашение.",
+            show_alert=True,
+        )
+        return
+    await call.message.edit_text(
+        "➕ Кого добавить как «был на занятии»?\n"
+        "Здесь только люди, которых ты уже видел в других группах.",
+        reply_markup=walk_in_picker_keyboard(survey_id, group_id, candidates),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("atnwkpick:"))
+async def cb_walk_in_add(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    survey_id, person_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        survey = await surveys_svc.get_survey(s, survey_id)
+        if survey is None:
+            await call.answer("Опрос не найден", show_alert=True)
+            return
+        group = await _accessible_group(s, survey.group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        person = await s.get(Person, person_id)
+        if person is None or person.admin_id != group.admin_id:
+            await call.answer("Не найдено", show_alert=True)
+            return
+        await persons_svc.add_to_group(
+            s, group, person.tg_user_id, person.tg_username, person.full_name,
+        )
+        await surveys_svc.add_walk_in(s, survey_id, person_id)
+        group_id = group.id
+    await _render_attendance_roster(call, survey_id, group_id)
+    await call.answer("Добавил")
 
 
 @router.callback_query(F.data.startswith("atntog:"))

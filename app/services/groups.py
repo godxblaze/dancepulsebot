@@ -131,3 +131,10 @@ async def active_groups(session: AsyncSession) -> list[Group]:
 async def delete_group(session: AsyncSession, group: Group) -> None:
     await session.delete(group)
     await session.flush()
+
+
+async def set_active(session: AsyncSession, group: Group, active: bool) -> None:
+    """Пауза/возобновление группы. На паузе scheduler не создаёт опросов и
+    не делает recruit; уже разосланные опросы продолжают жить до lesson_at."""
+    group.active = active
+    await session.flush()

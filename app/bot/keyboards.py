@@ -34,7 +34,9 @@ def groups_keyboard(groups: list[Group]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarkup:
+def group_actions_keyboard(
+    group_id: int, is_owner: bool, is_active: bool = True
+) -> InlineKeyboardMarkup:
     """Кнопки в карточке группы. Owner видит больше (изменить, co-админы, удалить);
     co-admin — только то, что ему доступно."""
     rows: list[list[InlineKeyboardButton]] = [
@@ -62,6 +64,14 @@ def group_actions_keyboard(group_id: int, is_owner: bool) -> InlineKeyboardMarku
         rows.append(
             [InlineKeyboardButton(text="🛠 Со-админы", callback_data=f"grpcoa:{group_id}")]
         )
+        if is_active:
+            rows.append([InlineKeyboardButton(
+                text="⏸ Пауза группы", callback_data=f"grppause:{group_id}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                text="▶️ Возобновить группу", callback_data=f"grpresume:{group_id}",
+            )])
         rows.append(
             [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"grpdel:{group_id}")]
         )
@@ -114,13 +124,29 @@ def closed_surveys_keyboard(
     return kb.as_markup()
 
 
-def confirm_cancel_lesson_keyboard(group_id: int) -> InlineKeyboardMarkup:
+def pick_lesson_to_cancel_keyboard(
+    group_id: int, lessons: list[tuple[int, str, bool]]
+) -> InlineKeyboardMarkup:
+    """Список ближайших дат занятий с пометкой «уже отменено». Каждая дата —
+    кнопка `grpcanceldt:<gid>:<ts>` или disabled-callback для уже отменённых."""
+    kb = InlineKeyboardBuilder()
+    for ts, label, already_cancelled in lessons:
+        if already_cancelled:
+            kb.button(text=f"🚫 {label} (уже отменено)", callback_data="noop")
+        else:
+            kb.button(text=label, callback_data=f"grpcanceldt:{group_id}:{ts}")
+    kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def confirm_cancel_lesson_keyboard(group_id: int, ts: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grp:{group_id}")],
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grpcancel:{group_id}")],
             [InlineKeyboardButton(
                 text="🚫 Да, отменить занятие",
-                callback_data=f"grpcancelok:{group_id}",
+                callback_data=f"grpcancelok:{group_id}:{ts}",
             )],
         ]
     )

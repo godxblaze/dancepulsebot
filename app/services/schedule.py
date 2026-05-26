@@ -40,3 +40,25 @@ def next_lesson_at(weekdays: str, lesson_time: str, now: datetime) -> datetime |
         if candidate > now:
             return candidate
     return None
+
+
+def upcoming_lessons(
+    weekdays: str, lesson_time: str, now: datetime, n: int = 5, horizon_days: int = 60
+) -> list[datetime]:
+    """До `n` ближайших дат занятий, начиная со следующего после `now`. Пустой
+    список — если weekdays пустой или дни не попадают в горизонт."""
+    days = parse_weekdays(weekdays)
+    if not days:
+        return []
+    hour, minute = (int(x) for x in lesson_time.split(":"))
+    result: list[datetime] = []
+    for offset in range(0, horizon_days + 1):
+        day = (now + timedelta(days=offset)).date()
+        if day.weekday() not in days:
+            continue
+        candidate = datetime(day.year, day.month, day.day, hour, minute)
+        if candidate > now:
+            result.append(candidate)
+            if len(result) >= n:
+                break
+    return result

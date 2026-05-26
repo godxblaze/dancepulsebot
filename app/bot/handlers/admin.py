@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -35,6 +35,7 @@ from app.bot.keyboards import (
     groups_keyboard,
     level_picker_keyboard,
     person_card_keyboard,
+    pick_lesson_to_cancel_keyboard,
     pool_keyboard,
     skip_keyboard,
     students_keyboard,
@@ -63,7 +64,12 @@ from app.services import persons as persons_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
-from app.services.schedule import format_weekdays, local_now, next_lesson_at
+from app.services.schedule import (
+    format_weekdays,
+    local_now,
+    next_lesson_at,
+    upcoming_lessons,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -1161,13 +1167,19 @@ async def cb_group_card(call: CallbackQuery) -> None:
         count = await persons_svc.count_members(s, group_id)
         summary = await _format_group_summary(s, group)
         title = format_group_title(group)
+        is_active = group.active
+        paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
         text = (
             f"📋 «{title}»\n"
-            f"{summary}\n"
+            f"{summary}{paused_line}\n"
             f"Опрос приходит за {group.lead_hours} ч до занятия\n"
             f"Учеников: {count}"
         )
-    await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
+    await call.message.edit_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=group_actions_keyboard(group_id, is_owner, is_active),
+    )
     await call.answer()
 
 
@@ -1448,6 +1460,60 @@ async def cb_group_delete(call: CallbackQuery) -> None:
     await call.answer()
 
 
+# ── pause / resume group ────────────────────────────────────────────
+
+
+async def _set_group_active(call: CallbackQuery, group_id: int, active: bool) -> None:
+    async with session_scope() as s:
+        group = await _owned_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Только owner может ставить группу на паузу", show_alert=True)
+            return
+        await groups_svc.set_active(s, group, active)
+    if active:
+        await call.answer("Группа снова в работе")
+    else:
+        await call.answer("Группа на паузе")
+    # Перерисовать карточку группы
+    async with session_scope() as s:
+        group = await groups_svc.get_group(s, group_id)
+        if group is None:
+            return
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        is_owner = teacher is not None and await access_svc.is_owner(
+            s, group.id, teacher.id
+        )
+        count = await persons_svc.count_members(s, group_id)
+        summary = await _format_group_summary(s, group)
+        title = format_group_title(group)
+        is_active = group.active
+        paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
+        text = (
+            f"📋 «{title}»\n"
+            f"{summary}{paused_line}\n"
+            f"Опрос приходит за {group.lead_hours} ч до занятия\n"
+            f"Учеников: {count}"
+        )
+    if call.message:
+        await call.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=group_actions_keyboard(group_id, is_owner, is_active),
+        )
+
+
+@router.callback_query(F.data.startswith("grppause:"))
+async def cb_group_pause(call: CallbackQuery) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    await _set_group_active(call, group_id, active=False)
+
+
+@router.callback_query(F.data.startswith("grpresume:"))
+async def cb_group_resume(call: CallbackQuery) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    await _set_group_active(call, group_id, active=True)
+
+
 # ── broadcast to group ──────────────────────────────────────────────
 
 
@@ -1614,17 +1680,45 @@ async def cb_attendance_toggle(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("grpcancel:"))
-async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
-    """Шаг 1: показываем confirmation с датой ближайшего занятия."""
+async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
+    """Шаг 1: показываем список 5 ближайших занятий — preпод выбирает какое отменить."""
     group_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
         group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, local_now())
-        if lesson_at is None:
+        upcoming = upcoming_lessons(group.weekdays, group.lesson_time, local_now(), n=5)
+        if not upcoming:
             await call.answer("Нет ближайших занятий", show_alert=True)
+            return
+        items: list[tuple[int, str, bool]] = []
+        for dt in upcoming:
+            cancelled = await cancellations_svc.is_cancelled(s, group.id, dt)
+            items.append((int(dt.timestamp()), f"{dt:%d.%m (%a) в %H:%M}", cancelled))
+        title = format_group_title(group)
+    await call.message.edit_text(
+        f"Отменить какое занятие «{title}»?",
+        reply_markup=pick_lesson_to_cancel_keyboard(group_id, items),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(call: CallbackQuery) -> None:
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpcanceldt:"))
+async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
+    """Шаг 2: confirmation выбранной даты."""
+    parts = (call.data or "").split(":")
+    group_id, ts = int(parts[1]), int(parts[2])
+    lesson_at = datetime.fromtimestamp(ts)
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
             return
         if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
             await call.answer("Это занятие уже отменено", show_alert=True)
@@ -1634,27 +1728,24 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
         f"Отменить занятие «{title}» {lesson_at:%d.%m в %H:%M}?\n\n"
         f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
         f"уйдёт уведомление об отмене.",
-        reply_markup=confirm_cancel_lesson_keyboard(group_id),
+        reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
     )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("grpcancelok:"))
 async def cb_lesson_cancel(call: CallbackQuery, bot: Bot) -> None:
-    """Шаг 2: пишем cancellation, закрываем survey/support, шлём уведомления."""
-    group_id = int(call.data.split(":", 1)[1])
+    """Шаг 3: пишем cancellation, закрываем survey/support, шлём уведомления."""
+    parts = (call.data or "").split(":")
+    group_id, ts = int(parts[1]), int(parts[2])
+    lesson_at = datetime.fromtimestamp(ts)
     yes_tg_ids: list[int] = []
     support_tg_ids: list[int] = []
     title = ""
-    lesson_at = None
     async with session_scope() as s:
         group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
-            return
-        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, local_now())
-        if lesson_at is None:
-            await call.answer("Нет ближайших занятий", show_alert=True)
             return
         title = format_group_title(group)
         await cancellations_svc.cancel(s, group.id, lesson_at)

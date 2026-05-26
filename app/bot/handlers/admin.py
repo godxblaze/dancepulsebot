@@ -240,7 +240,10 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
     await message.answer(f"✅ id {target_id} теперь преподаватель.")
     try:
         await bot.send_message(
-            target_id, "✅ Тебе выдан статус преподавателя! Нажми /start."
+            target_id,
+            "✅ Тебе выдан статус преподавателя. "
+            "Меню снизу 👇 — оттуда создаёшь группы и управляешь школой.",
+            reply_markup=admin_menu_keyboard(),
         )
     except Exception as e:  # noqa: BLE001
         log.warning("Could not notify new teacher %s: %s", target_id, e)

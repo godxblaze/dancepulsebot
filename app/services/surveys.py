@@ -235,6 +235,49 @@ async def persons_without_message(
     return list((await session.execute(stmt)).scalars().all())
 
 
+def _reminded_column(window: str):
+    if window == "1h":
+        return Response.reminded_1h
+    if window == "4h":
+        return Response.reminded_4h
+    raise ValueError(f"unknown reminder window: {window!r}")
+
+
+async def persons_to_remind(
+    session: AsyncSession, survey_id: int, window: str
+) -> list[Person]:
+    """Persons due for a reminder ping in this window ('4h' or '1h').
+
+    Возвращает тех, кто: уже получил первоначальный опрос (tg_message_id≠None и ≠-1),
+    ещё не ответил, и в этом окне напоминание ещё не отсылали."""
+    column = _reminded_column(window)
+    stmt = (
+        select(Person)
+        .join(Response, Response.person_id == Person.id)
+        .where(
+            Response.survey_id == survey_id,
+            Response.answer.is_(None),
+            Response.tg_message_id.is_not(None),
+            Response.tg_message_id != -1,
+            column.is_(False),
+        )
+        .order_by(Person.full_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_reminded(
+    session: AsyncSession, survey_id: int, person_id: int, window: str
+) -> None:
+    """Помечает Response.reminded_<window>=True. Идемпотентно."""
+    column = _reminded_column(window)
+    await session.execute(
+        update(Response)
+        .where(Response.survey_id == survey_id, Response.person_id == person_id)
+        .values({column.key: True})
+    )
+
+
 async def gender_yes_counts(session: AsyncSession, survey_id: int) -> tuple[int, int]:
     """(male, female) — how many of each gender answered 'yes' to the survey."""
     stmt = (

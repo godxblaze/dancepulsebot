@@ -31,12 +31,16 @@ from app.services.schedule import local_now, next_lesson_at
 log = logging.getLogger(__name__)
 
 
-async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
+async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime) -> None:
     """Ensure the survey exists, then message everyone who hasn't been polled yet.
 
     Идемпотентно по пере-tick'у: tg_message_id на Response отмечает «опрос отправлен»,
     поэтому следующий tick не повторит отправку тем, кто уже получил, но дошлёт
-    тем, кому не успели (новые члены / упавший send в прошлый раз)."""
+    тем, кому не успели (новые члены / упавший send в прошлый раз).
+
+    Если первая рассылка попадает уже внутрь 4h/1h reminder-окна — сразу метим
+    reminded_*=True, чтобы _maybe_remind не пингнул того же человека повторно
+    тем же tick'ом."""
     async with session_scope() as s:
         survey, _ = await surveys_svc.get_or_create_survey(
             s, group.id, SurveyKind.attendance, lesson_at
@@ -111,6 +115,13 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime) -> None:
         try:
             async with session_scope() as s:
                 await surveys_svc.set_message_id(s, survey_id, p.id, msg.message_id)
+                # Первая доставка уже внутри reminder-окна — заранее метим
+                # соответствующие флаги, чтобы _maybe_remind не дублировал.
+                until = lesson_at - now
+                if until <= timedelta(hours=4):
+                    await surveys_svc.mark_reminded(s, survey_id, p.id, "4h")
+                if until <= timedelta(hours=1):
+                    await surveys_svc.mark_reminded(s, survey_id, p.id, "1h")
         except Exception as e:  # noqa: BLE001
             log.error(
                 "survey=%s person=%s tg=%s — message sent (mid=%s) but message_id "
@@ -266,6 +277,77 @@ async def _maybe_recruit(
         log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)
 
 
+async def _maybe_remind(
+    bot: Bot, group: Group, lesson_at: datetime, now: datetime
+) -> None:
+    """Auto-reminder не-ответившим: за 4ч и за 1ч до занятия отдельные пинги.
+
+    Окна не перекрываются: 4h-окно — (1ч, 4ч], 1h-окно — (0, 1ч]. Идемпотентность
+    через Response.reminded_4h / reminded_1h."""
+    until = lesson_at - now
+    if timedelta() < until <= timedelta(hours=1):
+        window = "1h"
+    elif timedelta(hours=1) < until <= timedelta(hours=4):
+        window = "4h"
+    else:
+        return
+
+    async with session_scope() as s:
+        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
+        if survey is None or survey.status != SurveyStatus.open:
+            return
+        to_remind = await surveys_svc.persons_to_remind(s, survey.id, window)
+        survey_id = survey.id
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
+
+    if not to_remind:
+        return
+
+    place = format_place(group, venue)
+    lines = [
+        f"⏰ <b>{escape(format_group_title(group))}</b>",
+        f"Напоминаю: занятие {lesson_at:%d.%m} в {group.lesson_time}.",
+    ]
+    if place:
+        lines.append(f"📍 {escape(place)}")
+    if group.teachers_note:
+        lines.append(f"👤 {escape(group.teachers_note)}")
+    lines.append("")
+    lines.append("Придёшь?")
+    text = "\n".join(lines)
+
+    sent = 0
+    for p in to_remind:
+        try:
+            await bot.send_message(
+                p.tg_user_id,
+                text,
+                reply_markup=attendance_keyboard(survey_id),
+                parse_mode=ParseMode.HTML,
+            )
+        except (TelegramForbiddenError, TelegramNotFound):
+            # Заблокировал бота / удалил аккаунт — метим как «напомнили»,
+            # чтобы не долбить логи каждым tick'ом.
+            async with session_scope() as s:
+                await surveys_svc.mark_reminded(s, survey_id, p.id, window)
+            continue
+        except Exception as e:  # noqa: BLE001
+            log.warning("remind: send to %s failed, will retry: %s", p.tg_user_id, e)
+            continue
+        async with session_scope() as s:
+            await surveys_svc.mark_reminded(s, survey_id, p.id, window)
+        sent += 1
+    if sent:
+        log.info(
+            "Survey %s: %s-reminder delivered %d/%d to silent members",
+            survey_id, window, sent, len(to_remind),
+        )
+
+
 SUPPORT_NO_REPLY_AFTER = timedelta(hours=1)
 
 
@@ -335,8 +417,9 @@ async def tick(bot: Bot) -> None:
             async with session_scope() as s:
                 if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                     continue
-            await _poll_group(bot, group, lesson_at)
+            await _poll_group(bot, group, lesson_at, now)
             await _maybe_send_summary(bot, group, lesson_at, now)
+            await _maybe_remind(bot, group, lesson_at, now)
             await _maybe_recruit(bot, group, lesson_at, now)
 
 

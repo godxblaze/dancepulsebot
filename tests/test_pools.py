@@ -1,7 +1,7 @@
 """Tests for the teacher's support pool with skill levels."""
 from types import SimpleNamespace
 
-from app.bot.handlers.admin import cb_pool_toggle, cmd_pool
+from app.bot.handlers.pool import cb_pool_toggle, cmd_pool
 from app.db.models import Person
 from app.db.session import session_scope
 from app.services import admins, groups, persons

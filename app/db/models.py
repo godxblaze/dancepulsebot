@@ -134,11 +134,6 @@ class Venue(Base):
     __tablename__ = "venues"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # legacy: admin_id остался от прошлой модели. Удалить вместе с цепочкой
-    # на этапе 5; пока nullable, новый код пишет только school_id.
-    admin_id: Mapped[int | None] = mapped_column(
-        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
-    )
     school_id: Mapped[int | None] = mapped_column(
         ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
     )
@@ -151,10 +146,6 @@ class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # legacy admin_id оставлен на время рефактора. Новый код использует school_id.
-    admin_id: Mapped[int | None] = mapped_column(
-        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
-    )
     school_id: Mapped[int | None] = mapped_column(
         ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
     )
@@ -196,15 +187,10 @@ class Person(Base):
 
     __tablename__ = "persons"
     __table_args__ = (
-        # legacy unique для совместимости со старой схемой; новый — на school_id.
-        UniqueConstraint("admin_id", "tg_user_id", name="uq_persons_admin_tg"),
         UniqueConstraint("school_id", "tg_user_id", name="uq_persons_school_tg"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    admin_id: Mapped[int | None] = mapped_column(
-        ForeignKey("admins.id", ondelete="CASCADE"), nullable=True
-    )
     school_id: Mapped[int | None] = mapped_column(
         ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
     )
@@ -265,6 +251,10 @@ class Response(Base):
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Auto-reminder флаги: scheduler ставит True после отправки напоминания
+    # «придёшь?» в соответствующем окне. Идемпотентность ретраев.
+    reminded_4h: Mapped[bool] = mapped_column(Boolean, default=False)
+    reminded_1h: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class SupportCall(Base):

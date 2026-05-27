@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram_dialog import DialogManager
 
 from app.bot.commands import grant_admin_commands, revoke_admin_commands
+from app.bot.handlers._access import (
+    accessible_group as _accessible_group,
+)
+from app.bot.handlers._access import (
+    group_card_extras as _group_card_extras,
+)
+from app.bot.handlers._access import (
+    is_owner_of_group_id as _is_owner_of_group_id,
+)
+from app.bot.handlers._access import (
+    owned_group as _owned_group,
+)
 from app.bot.handlers.student import show_student_home, show_student_today
 from app.bot.keyboards import (
     MENU_EXPORT,
@@ -19,72 +31,40 @@ from app.bot.keyboards import (
     MENU_HELP,
     MENU_NAME,
     MENU_NEWGROUP,
-    MENU_POOL,
-    MENU_SCHOOL,
     MENU_STATS,
-    MENU_TEXTS,
     MENU_TODAY,
     admin_menu_keyboard,
     attendance_keyboard,
-    attendance_mark_keyboard,
-    closed_surveys_keyboard,
-    confirm_cancel_lesson_keyboard,
     confirm_delete_keyboard,
     confirm_remove_from_group_keyboard,
-    confirm_school_delete_keyboard,
-    confirm_school_leave_keyboard,
+    gender_from_code,
     group_actions_keyboard,
-    group_edit_menu_keyboard,
     groups_keyboard,
-    level_picker_keyboard,
+    lvl_from_code,
     person_card_keyboard,
-    pick_lesson_to_cancel_keyboard,
-    pool_keyboard,
-    school_accept_keyboard,
-    school_card_keyboard,
-    school_picker_keyboard,
-    skip_keyboard,
-    student_menu_keyboard,
     students_keyboard,
-    style_picker_keyboard,
-    style_typing_keyboard,
     today_ping_keyboard,
-    venue_picker_keyboard,
-    walk_in_picker_keyboard,
-    weekdays_keyboard,
-)
-from app.bot.states import (
-    Broadcast,
-    CreateSchool,
-    EditGroup,
-    EditName,
-    NewGroup,
-    RenameSchool,
 )
 from app.bot.utils import (
     bar,
-    derive_group_name,
     format_group_title,
     get_bot_username,
     qr_png,
 )
 from app.core.config import settings
-from app.db.models import Admin, Answer, Gender, Group, Person, SupportCallStatus, SurveyStatus
+from app.db.models import Gender, Group, Person, SurveyStatus
 from app.db.session import session_scope
 from app.services import admins as admins_svc
-from app.services import cancellations as cancellations_svc
 from app.services import exports as exports_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
-from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
 from app.services.schedule import (
     format_weekdays,
     local_now,
     next_lesson_at,
-    upcoming_lessons,
 )
 
 log = logging.getLogger(__name__)
@@ -126,14 +106,6 @@ async def _join_link(bot: Bot, code: str) -> str:
 async def _partner_link(bot: Bot, code: str) -> str:
     username = await get_bot_username(bot)
     return f"https://t.me/{username}?start=partner_{code}"
-
-
-async def _is_owner_of_group_id(session, group_id: int, admin_id: int) -> bool:
-    """Helper для проверок «admin владеет школой этой группы»."""
-    group = await groups_svc.get_group(session, group_id)
-    if group is None or group.school_id is None:
-        return False
-    return await schools_svc.is_owner(session, group.school_id, admin_id)
 
 
 async def _styles_for(session, admin) -> list[str]:
@@ -181,38 +153,11 @@ async def _attendance_csv_for(session, admin) -> bytes:
     return await exports_svc.attendance_csv(session, school.id)
 
 
-async def _demote_to_student_if_empty(bot: Bot, admin_id: int, tg_id: int) -> None:
-    """Если у admin'а не осталось школ — полностью снимаем роль:
-    удаляем Admin-запись, revoke slash-меню и пушим student reply-меню.
-
-    Удаляем полностью, чтобы при повторном /grant или partner-invite
-    человек проходил онбординг заново как новенький, а не «оживал» со
-    старым именем и поднятым has_completed_setup."""
-    async with session_scope() as s:
-        schools = await schools_svc.admin_schools(s, admin_id)
-        if schools:
-            return
-        await admins_svc.delete_admin(s, admin_id)
-    try:
-        await revoke_admin_commands(bot, tg_id)
-    except Exception as e:  # noqa: BLE001
-        log.warning("revoke admin cmds for %s failed: %s", tg_id, e)
-    try:
-        await bot.send_message(
-            tg_id,
-            "Ты больше не админ ни в одной школе — возвращаю обычное меню. "
-            "Если тебя снова пригласят, открой ссылку и нажми «✅ Принять».",
-            reply_markup=student_menu_keyboard(),
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("push student menu to %s failed: %s", tg_id, e)
-
-
 # ── registration & help ──────────────────────────────────────────────
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
+async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
     tg = message.from_user
     if not tg:
         return
@@ -232,17 +177,12 @@ async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
         await show_student_home(message)
         return
     if not admin_schools and not completed_setup:
-        # Свежий admin: только что получил /grant или это первый /start
-        # developer'а. Первый шаг — назвать собственную школу.
-        if state is not None:
-            await state.set_state(CreateSchool.name)
-        await message.answer(
-            "💓 Dance Pulse\n\n"
-            "Ты получил статус админа — поздравляю! Дай название своей школе "
-            "(контейнер, в котором будут жить твои группы и ученики). "
-            "Например: «Wave Dance» или «Школа Маши».\n\n"
-            "Чтобы передумать — /cancel."
-        )
+        # Свежий admin: только что получил /grant или первый /start developer'а.
+        # Первый шаг — назвать собственную школу через CreateSchool dialog.
+        from aiogram_dialog import StartMode
+
+        from app.bot.dialogs import CreateSchoolSG
+        await dialog_manager.start(CreateSchoolSG.name, mode=StartMode.RESET_STACK)
         return
     if not admin_schools:
         # Бывший co-admin кого выгнали (или сам вышел) из всех школ. Чистим
@@ -261,47 +201,6 @@ async def cmd_start(message: Message, state: FSMContext | None = None) -> None:
         "Я опрашиваю учеников перед каждым занятием и сам собираю саппортов, "
         "когда в паре перекос.\n\n"
         "Всё — кнопками меню снизу 👇",
-        reply_markup=admin_menu_keyboard(),
-    )
-
-
-@router.message(Command("cancel"), CreateSchool.name)
-async def create_school_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(
-        "Отменил. Когда передумаешь — напиши /start, и я снова попрошу "
-        "название школы."
-    )
-
-
-@router.message(CreateSchool.name, F.text, ~F.text.in_(MENU_TEXTS))
-async def create_school_name_typed(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer("Пустое название — давай ещё раз.")
-        return
-    if len(name) > 120:
-        await message.answer("Слишком длинное название (максимум 120 символов).")
-        return
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, message.from_user.id)
-        if admin is None:
-            await state.clear()
-            return
-        existing = await schools_svc.get_owned_school(s, admin.id)
-        if existing is not None:
-            # На всякий случай — гонка / повторный вход; молча используем существующую.
-            school = existing
-        else:
-            school = await schools_svc.create_school(s, admin.id, name)
-        admin.has_completed_setup = True
-        await s.flush()
-    await state.clear()
-    await message.answer(
-        f"✅ Школа «{escape(school.name)}» создана.\n\n"
-        f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
-        f"в карточке школы можно пригласить co-админа.",
-        parse_mode=ParseMode.HTML,
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -366,19 +265,49 @@ async def cmd_today(message: Message) -> None:
     if teacher is None:
         await show_student_today(message)
         return
+    text, markup = await _build_today_view(teacher.id, span="day")
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("today:"))
+async def cb_today_switch(call: CallbackQuery) -> None:
+    """Переключение между «сегодня+завтра» и «на неделю» для /today."""
+    span = (call.data or "").split(":", 1)[1]
+    if span not in ("day", "week"):
+        await call.answer()
+        return
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+    if teacher is None:
+        await call.answer()
+        return
+    text, markup = await _build_today_view(teacher.id, span=span)
+    if call.message:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    await call.answer()
+
+
+async def _build_today_view(teacher_id: int, span: str):
+    """Возвращает (text, markup) для /today. span ∈ {'day', 'week'}."""
     now = local_now()
     today = now.date()
-    tomorrow = today + timedelta(days=1)
+    horizon_days = 7 if span == "week" else 2  # day → today+tomorrow, week → 7 дней вперёд
+    horizon_dates = {(today + timedelta(days=i)) for i in range(horizon_days)}
     blocks: list[str] = []
-    pending_by_group: list[tuple[str, int, int]] = []  # name, survey_id, pending
+    pending_by_group: list[tuple[str, int, int]] = []
 
     async with session_scope() as s:
-        groups = await groups_svc.admin_visible_groups(s, teacher.id)
+        groups = await groups_svc.admin_visible_groups(s, teacher_id)
         for g in groups:
             lesson_at = next_lesson_at(g.weekdays, g.lesson_time, now)
-            if lesson_at is None or lesson_at.date() not in (today, tomorrow):
+            if lesson_at is None or lesson_at.date() not in horizon_dates:
                 continue
-            when = "сегодня" if lesson_at.date() == today else "завтра"
+            if lesson_at.date() == today:
+                when = "сегодня"
+            elif lesson_at.date() == today + timedelta(days=1):
+                when = "завтра"
+            else:
+                when = f"{lesson_at:%d.%m (%a)}"
             survey = await surveys_svc.find_attendance_survey(s, g.id, lesson_at)
             if survey is None:
                 blocks.append(
@@ -387,9 +316,10 @@ async def cmd_today(message: Message) -> None:
                 )
                 continue
             summary = await surveys_svc.summarize(s, survey.id)
+            pct = round(100 * summary.yes / summary.total) if summary.total else 0
             lines = [
                 f"👯 <b>{escape(format_group_title(g))}</b> · {when} {g.lesson_time}",
-                f"придут <b>{summary.yes}/{summary.total}</b>  "
+                f"придут <b>{summary.yes}/{summary.total}</b> ({pct}%)  "
                 f"{bar(summary.yes, summary.total)}",
             ]
             if summary.no_names:
@@ -401,13 +331,9 @@ async def cmd_today(message: Message) -> None:
                 pending_by_group.append((g.name, survey.id, summary.pending))
 
     if not blocks:
-        await message.answer("На сегодня и завтра занятий нет.")
-        return
-    await message.answer(
-        "\n\n".join(blocks),
-        parse_mode=ParseMode.HTML,
-        reply_markup=today_ping_keyboard(pending_by_group),
-    )
+        empty = "На неделе занятий нет." if span == "week" else "На сегодня и завтра занятий нет."
+        return empty, today_ping_keyboard([], span=span)
+    return "\n\n".join(blocks), today_ping_keyboard(pending_by_group, span=span)
 
 
 @router.message(Command("export"))
@@ -465,20 +391,33 @@ async def cmd_stats(message: Message) -> None:
                 f"последние {len(closed)} занятий:"
             ]
             total_yes = total_all = 0
+            total_actual_attended = total_actual_marked = 0
             for survey in reversed(closed):  # oldest first
                 summary = await surveys_svc.summarize(s, survey.id)
                 total_yes += summary.yes
                 total_all += summary.total
                 line = (
                     f"{bar(summary.yes, summary.total)}  "
-                    f"{survey.lesson_at:%d.%m} · {summary.yes}/{summary.total}"
+                    f"{survey.lesson_at:%d.%m} · обещали {summary.yes}/{summary.total}"
                 )
                 if summary.actual_attended is not None:
-                    line += f" · реально пришло {summary.actual_attended}"
+                    # «обещали M → пришли N (no-show: K)»
+                    no_show = max(0, summary.yes - summary.actual_attended)
+                    line += f" → пришли {summary.actual_attended}"
+                    if no_show:
+                        line += f" (no-show: {no_show})"
+                    total_actual_attended += summary.actual_attended
+                    total_actual_marked += summary.actual_marked
                 lines.append(line)
             if total_all:
-                pct = round(100 * total_yes / total_all)
-                lines.append(f"средний отклик: <b>{pct}%</b>")
+                pct_promised = round(100 * total_yes / total_all)
+                lines.append(f"средний отклик (обещали): <b>{pct_promised}%</b>")
+                if total_actual_marked:
+                    pct_actual = round(100 * total_actual_attended / total_actual_marked)
+                    lines.append(
+                        f"реальная посещаемость: <b>{pct_actual}%</b> "
+                        f"(по {total_actual_marked} отмеченным)"
+                    )
             blocks.append("\n".join(lines))
 
     if top_helpers:
@@ -501,344 +440,24 @@ async def cmd_stats(message: Message) -> None:
 
 # ── new group wizard ─────────────────────────────────────────────────
 #
-# Order: style → level → weekdays → lesson_time → venue → room → teachers_note.
-# No separate display-name step — Group.name is auto-derived from style + level.
+# Реализация на aiogram-dialog: см. [app/bot/dialogs/new_group.py](../dialogs/new_group.py).
+# Здесь только entry-point, который стартует dialog.
 
 
 @router.message(Command("newgroup"))
 @router.message(F.text == MENU_NEWGROUP)
-async def newgroup_start(message: Message, state: FSMContext) -> None:
+async def newgroup_start(message: Message, dialog_manager: DialogManager) -> None:
     tg = message.from_user
-    assert tg is not None
+    if tg is None:
+        return
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        suggestions = (
-            await _styles_for(s, teacher) if teacher else []
-        )
     if teacher is None:
         return
-    await state.set_state(NewGroup.style)
-    await state.update_data(weekdays=[])
-    await message.answer(
-        "Какое направление? (например: Бачата, Сальса, Хип-хоп)",
-        reply_markup=style_picker_keyboard(suggestions),
-    )
+    from aiogram_dialog import StartMode
 
-
-@router.callback_query(NewGroup.style, F.data.startswith("ngst:"))
-async def newgroup_style_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    if action == "skip":
-        await state.update_data(style=None)
-        await _advance_to_level(call.message, state)
-        await call.answer()
-        return
-    if action == "type":
-        await state.set_state(NewGroup.style_typing)
-        await call.message.edit_text(
-            "Напиши направление одной строкой:",
-            reply_markup=style_typing_keyboard(),
-        )
-        await call.answer()
-        return
-    if action.startswith("pick:"):
-        idx = int(action.split(":", 1)[1])
-        tg = call.from_user
-        async with session_scope() as s:
-            teacher = await admins_svc.get_by_tg_id(s, tg.id)
-            suggestions = (
-                await _styles_for(s, teacher) if teacher else []
-            )
-        if not (0 <= idx < len(suggestions)):
-            await call.answer()
-            return
-        await state.update_data(style=suggestions[idx])
-        await _advance_to_level(call.message, state)
-        await call.answer()
-
-
-@router.callback_query(NewGroup.style_typing, F.data == "ngst:skip")
-async def newgroup_style_typing_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(style=None)
-    await _advance_to_level(call.message, state)
-    await call.answer()
-
-
-@router.message(NewGroup.style_typing, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_style_typed(message: Message, state: FSMContext) -> None:
-    style = (message.text or "").strip()
-    if not style:
-        await message.answer(
-            "Пустое направление — напиши ещё раз или нажми «Пропустить»."
-        )
-        return
-    await state.update_data(style=style)
-    await _advance_to_level(message, state)
-
-
-async def _advance_to_level(target: Message, state: FSMContext) -> None:
-    await state.set_state(NewGroup.level)
-    await target.answer(
-        "Какой уровень? (0–4 от новичков до продвинутых)",
-        reply_markup=level_picker_keyboard("nglv"),
-    )
-
-
-@router.callback_query(NewGroup.level, F.data.startswith("nglv:"))
-async def newgroup_level_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    if action == "skip":
-        await state.update_data(level=None)
-        await _advance_to_weekdays(call.message, state)
-        await call.answer()
-        return
-    if action.startswith("pick:"):
-        level = int(action.split(":", 1)[1])
-        if not 0 <= level <= 4:
-            await call.answer()
-            return
-        await state.update_data(level=level)
-        await _advance_to_weekdays(call.message, state)
-        await call.answer()
-
-
-async def _advance_to_weekdays(target: Message, state: FSMContext) -> None:
-    await state.set_state(NewGroup.weekdays)
-    await target.answer(
-        "В какие дни занятия? Отметь дни и нажми «Готово».",
-        reply_markup=weekdays_keyboard(set()),
-    )
-
-
-@router.callback_query(NewGroup.weekdays, F.data.startswith("wd:"))
-async def newgroup_weekdays(call: CallbackQuery, state: FSMContext) -> None:
-    action = call.data.split(":", 1)[1]
-    data = await state.get_data()
-    selected: list[int] = list(data.get("weekdays", []))
-
-    if action == "done":
-        if not selected:
-            await call.answer("Выбери хотя бы один день", show_alert=True)
-            return
-        await state.update_data(weekdays=sorted(selected))
-        await state.set_state(NewGroup.lesson_time)
-        await call.message.edit_text(
-            "Во сколько начинается занятие? Формат ЧЧ:ММ, например 19:00"
-        )
-        await call.answer()
-        return
-
-    idx = int(action)
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.append(idx)
-    await state.update_data(weekdays=selected)
-    await call.message.edit_reply_markup(reply_markup=weekdays_keyboard(set(selected)))
-    await call.answer()
-
-
-@router.message(NewGroup.lesson_time, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_time(message: Message, state: FSMContext, bot: Bot) -> None:
-    raw = (message.text or "").strip()
-    m = _TIME_RE.match(raw)
-    if not m:
-        await message.answer("Не похоже на время. Нужен формат ЧЧ:ММ, например 19:00")
-        return
-    lesson_time = f"{int(m.group(1)):02d}:{m.group(2)}"
-    await state.update_data(lesson_time=lesson_time)
-
-    tg = message.from_user
-    assert tg is not None
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is None:
-            await state.clear()
-            return
-        venues = await _venues_for(s, teacher)
-
-    await state.set_state(NewGroup.venue)
-    await message.answer(
-        "Где проходят занятия?",
-        reply_markup=venue_picker_keyboard(venues),
-    )
-
-
-@router.callback_query(NewGroup.venue, F.data.startswith("ngvn:"))
-async def newgroup_venue_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    if action == "skip":
-        await state.update_data(venue_id=None)
-        await _advance_to_room(call.message, state)
-        await call.answer()
-        return
-    if action == "new":
-        await state.set_state(NewGroup.venue_new_name)
-        await call.message.edit_text(
-            "Название площадки одной строкой "
-            "(например: «Шлюзовая 8с2» или «Студия Полевик»):"
-        )
-        await call.answer()
-        return
-    if action.startswith("pick:"):
-        venue_id = int(action.split(":", 1)[1])
-        tg = call.from_user
-        async with session_scope() as s:
-            teacher = await admins_svc.get_by_tg_id(s, tg.id)
-            venue = await venues_svc.get_venue(s, venue_id)
-            owned = await schools_svc.get_owned_school(s, teacher.id) if teacher else None
-            if (
-                teacher is None
-                or venue is None
-                or owned is None
-                or venue.school_id != owned.id
-            ):
-                await call.answer()
-                return
-        await state.update_data(venue_id=venue_id)
-        await _advance_to_room(call.message, state)
-        await call.answer()
-
-
-@router.message(NewGroup.venue_new_name, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_venue_new_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer("Пустое название — введи ещё раз.")
-        return
-    await state.update_data(venue_new_name=name)
-    await state.set_state(NewGroup.venue_new_address)
-    await message.answer(
-        "Адрес (если хочешь). Можно пропустить:",
-        reply_markup=skip_keyboard("ngvn:addrskip"),
-    )
-
-
-@router.callback_query(NewGroup.venue_new_address, F.data == "ngvn:addrskip")
-async def newgroup_venue_new_address_skip(
-    call: CallbackQuery, state: FSMContext
-) -> None:
-    await _save_new_venue(call.from_user.id, state, address=None)
-    await _advance_to_room(call.message, state)
-    await call.answer()
-
-
-@router.message(NewGroup.venue_new_address, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_venue_new_address_typed(
-    message: Message, state: FSMContext
-) -> None:
-    address = (message.text or "").strip() or None
-    await _save_new_venue(message.from_user.id, state, address=address)
-    await _advance_to_room(message, state)
-
-
-async def _save_new_venue(
-    tg_user_id: int, state: FSMContext, address: str | None
-) -> None:
-    data = await state.get_data()
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
-        if teacher is None:
-            return
-        school = await schools_svc.get_or_create_owned_school(s, teacher.id)
-        venue = await venues_svc.create_venue(
-            s, school.id, data["venue_new_name"], address
-        )
-        await state.update_data(venue_id=venue.id)
-
-
-async def _advance_to_room(target: Message, state: FSMContext) -> None:
-    await state.set_state(NewGroup.room)
-    await target.answer(
-        "В каком зале проходит занятие? (например: «зал 38»). Можно пропустить:",
-        reply_markup=skip_keyboard("ngrm:skip"),
-    )
-
-
-@router.callback_query(NewGroup.room, F.data == "ngrm:skip")
-async def newgroup_room_skip(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(room=None)
-    await _advance_to_teachers(call.message, state)
-    await call.answer()
-
-
-@router.message(NewGroup.room, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_room_typed(message: Message, state: FSMContext) -> None:
-    room = (message.text or "").strip() or None
-    await state.update_data(room=room)
-    await _advance_to_teachers(message, state)
-
-
-async def _advance_to_teachers(target: Message, state: FSMContext) -> None:
-    await state.set_state(NewGroup.teachers_note)
-    await target.answer(
-        "Кто ведёт? Свободной строкой — например, «Маша + Петя». Можно пропустить:",
-        reply_markup=skip_keyboard("ngtn:skip"),
-    )
-
-
-@router.callback_query(NewGroup.teachers_note, F.data == "ngtn:skip")
-async def newgroup_teachers_skip(
-    call: CallbackQuery, state: FSMContext, bot: Bot
-) -> None:
-    await _finish_new_group(
-        call.message,
-        state,
-        bot,
-        tg_user_id=call.from_user.id,
-        teachers_note=None,
-    )
-    await call.answer()
-
-
-@router.message(NewGroup.teachers_note, F.text, ~F.text.in_(MENU_TEXTS))
-async def newgroup_teachers_typed(
-    message: Message, state: FSMContext, bot: Bot
-) -> None:
-    note = (message.text or "").strip() or None
-    await _finish_new_group(
-        message, state, bot, tg_user_id=message.from_user.id, teachers_note=note
-    )
-
-
-async def _finish_new_group(
-    target: Message,
-    state: FSMContext,
-    bot: Bot,
-    tg_user_id: int,
-    teachers_note: str | None,
-) -> None:
-    data = await state.get_data()
-    weekdays = ",".join(str(d) for d in data["weekdays"])
-    style = data.get("style")
-    level = data.get("level")
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
-        if teacher is None:
-            await state.clear()
-            return
-        school = await schools_svc.get_or_create_owned_school(s, teacher.id)
-        group = await groups_svc.create_group(
-            s,
-            school.id,
-            derive_group_name(style, level),
-            weekdays,
-            data["lesson_time"],
-            settings.default_lead_hours,
-            style=style,
-            level=level,
-            venue_id=data.get("venue_id"),
-            room=data.get("room"),
-            teachers_note=teachers_note,
-        )
-        code = group.join_code
-        title = format_group_title(group)
-        summary = await _format_group_summary(s, group)
-
-    await state.clear()
-    link = await _join_link(bot, code)
-    await target.answer(f"✅ Группа «{title}» создана.\n{summary}")
-    await _send_invite(target, title, link)
+    from app.bot.dialogs import NewGroupSG
+    await dialog_manager.start(NewGroupSG.style, mode=StartMode.RESET_STACK)
 
 
 async def _format_group_summary(session, group: Group) -> str:
@@ -867,479 +486,31 @@ async def _format_group_summary(session, group: Group) -> str:
 
 
 # ── edit existing group ──────────────────────────────────────────────
-
-
-async def _show_edit_menu(call: CallbackQuery, group_id: int) -> None:
-    """Render the edit-menu in place of whichever message triggered it."""
-    async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        title = format_group_title(group)
-        summary = await _format_group_summary(s, group)
-    if call.message:
-        await call.message.edit_text(
-            f"✏️ «{title}»\n{summary}\n\nЧто меняем?",
-            reply_markup=group_edit_menu_keyboard(group_id),
-        )
-    await call.answer()
+#
+# Реализация на aiogram-dialog: [app/bot/dialogs/edit_group.py](../dialogs/edit_group.py).
+# Здесь только entry-point — старт dialog через cb_group_edit.
 
 
 @router.callback_query(F.data.startswith("grpedit:"))
-async def cb_group_edit(call: CallbackQuery) -> None:
-    group_id = int(call.data.split(":", 1)[1])
-    await _show_edit_menu(call, group_id)
-
-
-async def _return_to_edit_menu(message: Message, group_id: int) -> None:
-    """After saving a single field, re-show the edit menu via a fresh message."""
-    async with session_scope() as s:
-        group = await groups_svc.get_group(s, group_id)
-        if group is None:
-            return
-        title = format_group_title(group)
-        summary = await _format_group_summary(s, group)
-    await message.answer(
-        f"✅ Сохранил.\n\n✏️ «{title}»\n{summary}\n\nЧто ещё меняем?",
-        reply_markup=group_edit_menu_keyboard(group_id),
-    )
-
-
-async def _edit_menu_in_place(target: Message, group_id: int) -> None:
-    """Re-render the edit menu over the same message used for the prompt."""
-    async with session_scope() as s:
-        group = await groups_svc.get_group(s, group_id)
-        if group is None:
-            return
-        title = format_group_title(group)
-        summary = await _format_group_summary(s, group)
-    await target.edit_text(
-        f"✅ Сохранил.\n\n✏️ «{title}»\n{summary}\n\nЧто ещё меняем?",
-        reply_markup=group_edit_menu_keyboard(group_id),
-    )
-
-
-# Each ge:<field>:<gid> opens the matching mini-flow.
-
-
-@router.callback_query(F.data.startswith("ge:style:"))
-async def cb_edit_style(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
+async def cb_group_edit(call: CallbackQuery, dialog_manager: DialogManager) -> None:
+    group_id = int((call.data or "").split(":", 1)[1])
     async with session_scope() as s:
         group = await _owned_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        suggestions = await _styles_for(s, teacher) if teacher else []
-    await state.set_state(EditGroup.style)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Новое направление?",
-            reply_markup=style_picker_keyboard(suggestions),
-        )
-    await call.answer()
+    from aiogram_dialog import StartMode
 
-
-@router.callback_query(EditGroup.style, F.data.startswith("ngst:"))
-async def edit_style_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    if action == "skip":
-        await _apply_group_edit(gid, style=None)
-        await state.clear()
-        await _edit_menu_in_place(call.message, gid)
-        await call.answer()
-        return
-    if action == "type":
-        await state.set_state(EditGroup.style_typing)
-        await call.message.edit_text(
-            "Напиши новое направление одной строкой:",
-            reply_markup=style_typing_keyboard(),
-        )
-        await call.answer()
-        return
-    if action.startswith("pick:"):
-        idx = int(action.split(":", 1)[1])
-        async with session_scope() as s:
-            teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-            suggestions = (
-                await _styles_for(s, teacher) if teacher else []
-            )
-        if not (0 <= idx < len(suggestions)):
-            await call.answer()
-            return
-        await _apply_group_edit(gid, style=suggestions[idx])
-        await state.clear()
-        await _edit_menu_in_place(call.message, gid)
-        await call.answer()
-
-
-@router.callback_query(EditGroup.style_typing, F.data == "ngst:skip")
-async def edit_style_typing_skip(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, style=None)
-    await state.clear()
-    await _edit_menu_in_place(call.message, gid)
-    await call.answer()
-
-
-@router.message(EditGroup.style_typing, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_style_typed(message: Message, state: FSMContext) -> None:
-    style = (message.text or "").strip()
-    if not style:
-        await message.answer("Пустое направление — напиши ещё раз.")
-        return
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, style=style)
-    await state.clear()
-    await _return_to_edit_menu(message, gid)
-
-
-@router.callback_query(F.data.startswith("ge:level:"))
-async def cb_edit_level(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        if await _owned_group(s, group_id, call.from_user.id) is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-    await state.set_state(EditGroup.level)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Новый уровень?",
-            reply_markup=level_picker_keyboard("nglv"),
-        )
-    await call.answer()
-
-
-@router.callback_query(EditGroup.level, F.data.startswith("nglv:"))
-async def edit_level_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    if action == "skip":
-        await _apply_group_edit(gid, level=None)
-    elif action.startswith("pick:"):
-        level = int(action.split(":", 1)[1])
-        if not 0 <= level <= 4:
-            await call.answer()
-            return
-        await _apply_group_edit(gid, level=level)
-    await state.clear()
-    await _edit_menu_in_place(call.message, gid)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("ge:days:"))
-async def cb_edit_days(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        existing = [int(d) for d in (group.weekdays.split(",") if group.weekdays else []) if d]
-    await state.set_state(EditGroup.weekdays)
-    await state.update_data(edit_gid=group_id, weekdays=existing)
-    if call.message:
-        await call.message.edit_text(
-            "Новые дни? Отметь и нажми «Готово».",
-            reply_markup=weekdays_keyboard(set(existing)),
-        )
-    await call.answer()
-
-
-@router.callback_query(EditGroup.weekdays, F.data.startswith("wd:"))
-async def edit_weekdays(call: CallbackQuery, state: FSMContext) -> None:
-    action = call.data.split(":", 1)[1]
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    selected: list[int] = list(data.get("weekdays", []))
-
-    if action == "done":
-        if not selected:
-            await call.answer("Выбери хотя бы один день", show_alert=True)
-            return
-        await _apply_group_edit(gid, weekdays=",".join(str(d) for d in sorted(selected)))
-        await state.clear()
-        await _edit_menu_in_place(call.message, gid)
-        await call.answer()
-        return
-
-    idx = int(action)
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.append(idx)
-    await state.update_data(weekdays=selected)
-    await call.message.edit_reply_markup(reply_markup=weekdays_keyboard(set(selected)))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("ge:time:"))
-async def cb_edit_time(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        if await _owned_group(s, group_id, call.from_user.id) is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-    await state.set_state(EditGroup.lesson_time)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Новое время? Формат ЧЧ:ММ, например 19:00"
-        )
-    await call.answer()
-
-
-@router.message(EditGroup.lesson_time, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_time_typed(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    m = _TIME_RE.match(raw)
-    if not m:
-        await message.answer("Не похоже на время. Нужен формат ЧЧ:ММ")
-        return
-    lesson_time = f"{int(m.group(1)):02d}:{m.group(2)}"
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, lesson_time=lesson_time)
-    await state.clear()
-    await _return_to_edit_menu(message, gid)
-
-
-@router.callback_query(F.data.startswith("ge:venue:"))
-async def cb_edit_venue(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        group = await _owned_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        venues = await _venues_for(s, teacher) if teacher else []
-    await state.set_state(EditGroup.venue)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Новое место?",
-            reply_markup=venue_picker_keyboard(venues),
-        )
-    await call.answer()
-
-
-@router.callback_query(EditGroup.venue, F.data.startswith("ngvn:"))
-async def edit_venue_pick(call: CallbackQuery, state: FSMContext) -> None:
-    action = (call.data or "").split(":", 1)[1]
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    if action == "skip":
-        await _apply_group_edit(gid, venue_id=None)
-        await state.clear()
-        await _edit_menu_in_place(call.message, gid)
-        await call.answer()
-        return
-    if action == "new":
-        await state.set_state(EditGroup.venue_new_name)
-        await call.message.edit_text(
-            "Название площадки одной строкой:"
-        )
-        await call.answer()
-        return
-    if action.startswith("pick:"):
-        venue_id = int(action.split(":", 1)[1])
-        async with session_scope() as s:
-            teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-            venue = await venues_svc.get_venue(s, venue_id)
-            group = await groups_svc.get_group(s, gid)
-            if (
-                teacher is None
-                or venue is None
-                or group is None
-                or venue.school_id != group.school_id
-            ):
-                await call.answer()
-                return
-        await _apply_group_edit(gid, venue_id=venue_id)
-        await state.clear()
-        await _edit_menu_in_place(call.message, gid)
-        await call.answer()
-
-
-@router.message(EditGroup.venue_new_name, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_venue_new_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer("Пустое название — введи ещё раз.")
-        return
-    await state.update_data(venue_new_name=name)
-    await state.set_state(EditGroup.venue_new_address)
-    await message.answer(
-        "Адрес (если хочешь). Можно пропустить:",
-        reply_markup=skip_keyboard("ngvn:addrskip"),
+    from app.bot.dialogs import EditGroupSG
+    await dialog_manager.start(
+        EditGroupSG.menu,
+        data={"group_id": group_id},
+        mode=StartMode.RESET_STACK,
     )
-
-
-@router.callback_query(EditGroup.venue_new_address, F.data == "ngvn:addrskip")
-async def edit_venue_new_address_skip(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    venue_id = await _save_new_venue_for_edit(call.from_user.id, state, address=None)
-    if venue_id is not None:
-        await _apply_group_edit(gid, venue_id=venue_id)
-    await state.clear()
-    await _edit_menu_in_place(call.message, gid)
     await call.answer()
-
-
-@router.message(EditGroup.venue_new_address, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_venue_new_address_typed(message: Message, state: FSMContext) -> None:
-    address = (message.text or "").strip() or None
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    venue_id = await _save_new_venue_for_edit(message.from_user.id, state, address=address)
-    if venue_id is not None:
-        await _apply_group_edit(gid, venue_id=venue_id)
-    await state.clear()
-    await _return_to_edit_menu(message, gid)
-
-
-async def _save_new_venue_for_edit(
-    tg_user_id: int, state: FSMContext, address: str | None
-) -> int | None:
-    data = await state.get_data()
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
-        if teacher is None:
-            return None
-        school = await schools_svc.get_or_create_owned_school(s, teacher.id)
-        venue = await venues_svc.create_venue(
-            s, school.id, data["venue_new_name"], address
-        )
-        return venue.id
-
-
-@router.callback_query(F.data.startswith("ge:room:"))
-async def cb_edit_room(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        if await _owned_group(s, group_id, call.from_user.id) is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-    await state.set_state(EditGroup.room)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Новый зал? Или нажми «Пропустить», чтобы очистить.",
-            reply_markup=skip_keyboard("ngrm:skip"),
-        )
-    await call.answer()
-
-
-@router.callback_query(EditGroup.room, F.data == "ngrm:skip")
-async def edit_room_skip(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, room=None)
-    await state.clear()
-    await _edit_menu_in_place(call.message, gid)
-    await call.answer()
-
-
-@router.message(EditGroup.room, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_room_typed(message: Message, state: FSMContext) -> None:
-    room = (message.text or "").strip() or None
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, room=room)
-    await state.clear()
-    await _return_to_edit_menu(message, gid)
-
-
-@router.callback_query(F.data.startswith("ge:teachers:"))
-async def cb_edit_teachers(call: CallbackQuery, state: FSMContext) -> None:
-    group_id = int(call.data.split(":")[2])
-    async with session_scope() as s:
-        if await _owned_group(s, group_id, call.from_user.id) is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-    await state.set_state(EditGroup.teachers_note)
-    await state.update_data(edit_gid=group_id)
-    if call.message:
-        await call.message.edit_text(
-            "Кто ведёт? Свободной строкой. Можно пропустить, чтобы очистить.",
-            reply_markup=skip_keyboard("ngtn:skip"),
-        )
-    await call.answer()
-
-
-@router.callback_query(EditGroup.teachers_note, F.data == "ngtn:skip")
-async def edit_teachers_skip(call: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, teachers_note=None)
-    await state.clear()
-    await _edit_menu_in_place(call.message, gid)
-    await call.answer()
-
-
-@router.message(EditGroup.teachers_note, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_teachers_typed(message: Message, state: FSMContext) -> None:
-    note = (message.text or "").strip() or None
-    data = await state.get_data()
-    gid = int(data["edit_gid"])
-    await _apply_group_edit(gid, teachers_note=note)
-    await state.clear()
-    await _return_to_edit_menu(message, gid)
-
-
-async def _apply_group_edit(group_id: int, **fields) -> None:
-    """Persist a single-field edit. Re-derives Group.name whenever style/level changes."""
-    async with session_scope() as s:
-        group = await groups_svc.get_group(s, group_id)
-        if group is None:
-            return
-        await groups_svc.update_group(s, group, **fields)
-        if "style" in fields or "level" in fields:
-            await groups_svc.update_group(
-                s, group, name=derive_group_name(group.style, group.level)
-            )
 
 
 # ── groups list & actions ────────────────────────────────────────────
-
-
-async def _accessible_group(session, group_id: int, tg_user_id: int) -> Group | None:
-    """Return the group if the caller is member of the group's school;
-    None otherwise. Use this for «view» actions: opening card, students roster,
-    ping, /today. Для destructive (delete/edit settings) — _owned_group."""
-    teacher = await admins_svc.get_by_tg_id(session, tg_user_id)
-    if teacher is None:
-        return None
-    group = await groups_svc.get_group(session, group_id)
-    if group is None or group.school_id is None:
-        return None
-    if not await schools_svc.is_member(session, group.school_id, teacher.id):
-        return None
-    return group
-
-
-async def _owned_group(session, group_id: int, tg_user_id: int) -> Group | None:
-    """Только если admin — owner школы группы. Для destructive actions."""
-    teacher = await admins_svc.get_by_tg_id(session, tg_user_id)
-    if teacher is None:
-        return None
-    group = await groups_svc.get_group(session, group_id)
-    if group is None or group.school_id is None:
-        return None
-    if not await schools_svc.is_owner(session, group.school_id, teacher.id):
-        return None
-    return group
 
 
 async def _send_groups_list(target: Message) -> None:
@@ -1396,6 +567,7 @@ async def cb_group_card(call: CallbackQuery) -> None:
         summary = await _format_group_summary(s, group)
         title = format_group_title(group)
         is_active = group.active
+        has_upcoming, has_closed = await _group_card_extras(s, group)
         paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
         text = (
             f"📋 «{title}»\n"
@@ -1406,7 +578,10 @@ async def cb_group_card(call: CallbackQuery) -> None:
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=group_actions_keyboard(group_id, is_owner, is_active),
+        reply_markup=group_actions_keyboard(
+            group_id, is_owner, is_active,
+            has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+        ),
     )
     await call.answer()
 
@@ -1425,13 +600,20 @@ async def cb_group_students(call: CallbackQuery) -> None:
             and await schools_svc.is_owner(s, group.school_id, teacher.id)
         )
         members = await persons_svc.group_members(s, group_id)
+        has_upcoming, has_closed = await _group_card_extras(s, group)
     title = format_group_title(group)
     if members:
         text = f"👥 Ученики «{title}» ({len(members)}). Тап по имени — карточка:"
         await call.message.edit_text(text, reply_markup=students_keyboard(group_id, members))
     else:
         text = f"👥 В группе «{title}» пока нет учеников. Перешли им ссылку-приглашение."
-        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
+        await call.message.edit_text(
+            text,
+            reply_markup=group_actions_keyboard(
+                group_id, is_owner,
+                has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+            ),
+        )
     await call.answer()
 
 
@@ -1446,7 +628,10 @@ def _person_card_text(person: Person, groups: list[Group]) -> str:
         pool = "вне пула"
     else:
         helped = f", помог {person.helped_count}" if person.helped_count else ""
-        pool = f"в пуле, ур. {person.support_level}{helped}"
+        pool = (
+            f"в пуле, ур. {person.support_level} (приоритет в picker'е "
+            f"автодобора: 3 — первый, 1 — последний){helped}"
+        )
     group_lines = "\n".join(f"  • {escape(g.name)}" for g in groups) if groups else "  (нет групп)"
     return (
         f"👤 <b>{escape(person.full_name)}</b>\n"
@@ -1467,42 +652,97 @@ async def cb_person_card(call: CallbackQuery) -> None:
             await call.answer("Не найдено", show_alert=True)
             return
         groups = await persons_svc.person_groups(s, person.id)
+        in_group = group in groups
         text = _person_card_text(person, groups)
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
+        reply_markup=person_card_keyboard(
+            group_id, person_id, person.support_level, person.gender, in_group=in_group,
+        ),
     )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("pcardlvl:"))
 async def cb_person_card_level(call: CallbackQuery) -> None:
-    """Cycle support level 1→2→3→null, then redraw the card."""
+    """Cycle support level 1→2→3→null, then redraw the card. idempotency-guard
+    через expected-уровень в callback_data — двойной тап не перескочит."""
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
+    expected = lvl_from_code(parts[3]) if len(parts) > 3 else None
     async with session_scope() as s:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
             await call.answer("Не найдено", show_alert=True)
             return
-        new_level = None if person.support_level == _MAX_LEVEL else (person.support_level or 0) + 1
-        await persons_svc.set_support_level(s, person_id, new_level)
-        await s.refresh(person)
+        stale = len(parts) > 3 and person.support_level != expected
+        if not stale:
+            new_level = (
+                None if person.support_level == _MAX_LEVEL
+                else (person.support_level or 0) + 1
+            )
+            await persons_svc.set_support_level(s, person_id, new_level)
+            await s.refresh(person)
         groups = await persons_svc.person_groups(s, person.id)
+        in_group = group in groups
         text = _person_card_text(person, groups)
-    await call.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
-    )
-    await call.answer("Уровень обновлён")
+    # Перерисовываем карточку даже при stale — иначе быстрый тап «зависает».
+    try:
+        await call.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=person_card_keyboard(
+                group_id, person_id, person.support_level, person.gender,
+                in_group=in_group,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("pcardlvl edit_text: %s", e)
+    await call.answer("Уже обновлено" if stale else "Уровень обновлён")
 
 
 @router.callback_query(F.data.startswith("pcardgnd:"))
 async def cb_person_gender_toggle(call: CallbackQuery) -> None:
-    """Переключение пола: male ↔ female; если был None — ставим male."""
+    """Переключение пола: male ↔ female; если был None — ставим male.
+    idempotency-guard через expected-gender в callback_data."""
+    parts = (call.data or "").split(":")
+    group_id, person_id = int(parts[1]), int(parts[2])
+    expected = gender_from_code(parts[3]) if len(parts) > 3 else None
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        person = await s.get(Person, person_id)
+        if group is None or person is None or person.school_id != group.school_id:
+            await call.answer("Не найдено", show_alert=True)
+            return
+        stale = len(parts) > 3 and person.gender != expected
+        if not stale:
+            new_gender = (
+                Gender.female if person.gender == Gender.male else Gender.male
+            )
+            await persons_svc.set_gender(s, person_id, new_gender)
+            await s.refresh(person)
+        groups = await persons_svc.person_groups(s, person.id)
+        in_group = group in groups
+        text = _person_card_text(person, groups)
+    try:
+        await call.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=person_card_keyboard(
+                group_id, person_id, person.support_level, person.gender,
+                in_group=in_group,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("pcardgnd edit_text: %s", e)
+    await call.answer("Уже обновлено" if stale else "Пол обновлён")
+
+
+@router.callback_query(F.data.startswith("pcardadd:"))
+async def cb_person_add_to_group(call: CallbackQuery) -> None:
+    """Записать гостя постоянно в группу — обратная кнопка к pcardrem."""
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     async with session_scope() as s:
@@ -1511,17 +751,20 @@ async def cb_person_gender_toggle(call: CallbackQuery) -> None:
         if group is None or person is None or person.school_id != group.school_id:
             await call.answer("Не найдено", show_alert=True)
             return
-        new_gender = Gender.female if person.gender == Gender.male else Gender.male
-        await persons_svc.set_gender(s, person_id, new_gender)
+        await persons_svc.add_to_group(
+            s, group, person.tg_user_id, person.tg_username, person.full_name,
+        )
         await s.refresh(person)
         groups = await persons_svc.person_groups(s, person.id)
         text = _person_card_text(person, groups)
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=person_card_keyboard(group_id, person_id, person.support_level, person.gender),
+        reply_markup=person_card_keyboard(
+            group_id, person_id, person.support_level, person.gender, in_group=True,
+        ),
     )
-    await call.answer("Пол обновлён")
+    await call.answer("Записал постоянно")
 
 
 @router.callback_query(F.data.startswith("pcardrem:"))
@@ -1569,8 +812,18 @@ async def cb_person_remove(call: CallbackQuery) -> None:
         async with session_scope() as s:
             teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
             is_owner = teacher is not None and await _is_owner_of_group_id(s, group_id, teacher.id)
+            group = await groups_svc.get_group(s, group_id)
+            has_upcoming, has_closed = (
+                await _group_card_extras(s, group) if group else (False, False)
+            )
         text = f"👥 В группе «{group_name}» больше никого нет. Перешли ссылку-приглашение."
-        await call.message.edit_text(text, reply_markup=group_actions_keyboard(group_id, is_owner))
+        await call.message.edit_text(
+            text,
+            reply_markup=group_actions_keyboard(
+                group_id, is_owner,
+                has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+            ),
+        )
     await call.answer(f"{name} убран(а)")
 
 
@@ -1715,6 +968,7 @@ async def _set_group_active(call: CallbackQuery, group_id: int, active: bool) ->
         summary = await _format_group_summary(s, group)
         title = format_group_title(group)
         is_active = group.active
+        has_upcoming, has_closed = await _group_card_extras(s, group)
         paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
         text = (
             f"📋 «{title}»\n"
@@ -1726,7 +980,10 @@ async def _set_group_active(call: CallbackQuery, group_id: int, active: bool) ->
         await call.message.edit_text(
             text,
             parse_mode=ParseMode.HTML,
-            reply_markup=group_actions_keyboard(group_id, is_owner, is_active),
+            reply_markup=group_actions_keyboard(
+                group_id, is_owner, is_active,
+                has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+            ),
         )
 
 
@@ -1743,252 +1000,35 @@ async def cb_group_resume(call: CallbackQuery) -> None:
 
 
 # ── broadcast to group ──────────────────────────────────────────────
+# Реализация — [misc_dialogs.broadcast_dialog](../dialogs/misc_dialogs.py).
 
 
 @router.callback_query(F.data.startswith("grpbcast:"))
-async def cb_broadcast_start(call: CallbackQuery, state: FSMContext) -> None:
+async def cb_broadcast_start(call: CallbackQuery, dialog_manager: DialogManager) -> None:
     group_id = int(call.data.split(":", 1)[1])
     async with session_scope() as s:
         group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        count = await persons_svc.count_members(s, group_id)
-        title = format_group_title(group)
-    await state.set_state(Broadcast.text)
-    await state.update_data(group_id=group_id)
-    await call.message.answer(
-        f"📢 Напиши сообщение, которое отправлю всем ученикам «{title}» ({count} чел.). "
-        f"Чтобы передумать — пришли /cancel."
+    from aiogram_dialog import StartMode
+
+    from app.bot.dialogs import BroadcastSG
+    await dialog_manager.start(
+        BroadcastSG.text,
+        data={"group_id": group_id},
+        mode=StartMode.RESET_STACK,
     )
     await call.answer()
-
-
-@router.message(Command("cancel"), Broadcast.text)
-async def broadcast_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Отменил, ничего не рассылаю.")
-
-
-@router.message(Broadcast.text, F.text, ~F.text.in_(MENU_TEXTS))
-async def broadcast_send(message: Message, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    group_id = data.get("group_id")
-    await state.clear()
-    if group_id is None:
-        return
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Пустое сообщение — отменяю.")
-        return
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, message.from_user.id)
-        if group is None:
-            await message.answer("Группа не найдена.")
-            return
-        members = await persons_svc.group_members(s, group_id)
-        title = format_group_title(group)
-        sender_name = message.from_user.full_name or message.from_user.username or "препод"
-    if not members:
-        await message.answer("В группе нет учеников — рассылать некому.")
-        return
-    body = f"📢 «{escape(title)}» — сообщение от {escape(sender_name)}:\n\n{escape(text)}"
-    sent = blocked = failed = 0
-    from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
-    for p in members:
-        try:
-            await bot.send_message(p.tg_user_id, body, parse_mode=ParseMode.HTML)
-            sent += 1
-        except (TelegramForbiddenError, TelegramNotFound):
-            blocked += 1
-        except Exception as e:  # noqa: BLE001
-            log.warning("broadcast to %s failed: %s", p.tg_user_id, e)
-            failed += 1
-    parts = [f"📢 Отправлено: {sent}/{len(members)}"]
-    if blocked:
-        parts.append(f"заблокировали бота: {blocked}")
-    if failed:
-        parts.append(f"не доехало: {failed}")
-    await message.answer(" · ".join(parts))
 
 
 # ── post-lesson attendance mark ─────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("grpattnmark:"))
-async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
-    """Показываем 5 последних закрытых занятий — preпод выбирает какое отмечать."""
-    group_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        surveys = await surveys_svc.recent_closed_surveys(s, group_id, limit=5)
-        title = format_group_title(group)
-    if not surveys:
-        await call.answer("Нет прошедших занятий", show_alert=True)
-        return
-    items = [(s.id, s.lesson_at.strftime("%d.%m в %H:%M")) for s in surveys]
-    await call.message.edit_text(
-        f"✏️ Какое занятие «{title}» отметить?",
-        reply_markup=closed_surveys_keyboard(group_id, items),
-    )
-    await call.answer()
-
-
-async def _render_attendance_roster(
-    call: CallbackQuery, survey_id: int, group_id: int
-) -> None:
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        survey = await surveys_svc.get_survey(s, survey_id)
-        if survey is None or survey.group_id != group_id:
-            await call.answer("Опрос не найден", show_alert=True)
-            return
-        roster = await surveys_svc.attendance_roster(s, survey_id)
-        items = [
-            (p, r.actually_attended, r.answer.value if r.answer else None)
-            for p, r in roster
-        ]
-        title = format_group_title(group)
-    head = (
-        f"✏️ «{title}» — {survey.lesson_at:%d.%m в %H:%M}\n"
-        f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
-        f"В скобках: ✓ обещал, ✗ отказался, — молчал."
-    )
-    await call.message.edit_text(
-        head, reply_markup=attendance_mark_keyboard(survey_id, group_id, items)
-    )
-
-
-@router.callback_query(F.data.startswith("atnlesson:"))
-async def cb_attendance_open_lesson(call: CallbackQuery) -> None:
-    parts = (call.data or "").split(":")
-    survey_id, group_id = int(parts[1]), int(parts[2])
-    await _render_attendance_roster(call, survey_id, group_id)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("atnwk:"))
-async def cb_walk_in_pick(call: CallbackQuery) -> None:
-    """Показываем persons преподавателя, которых ЕЩЁ нет в этом опросе."""
-    parts = (call.data or "").split(":")
-    survey_id, group_id = int(parts[1]), int(parts[2])
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        survey = await surveys_svc.get_survey(s, survey_id)
-        if survey is None or survey.group_id != group_id:
-            await call.answer("Опрос не найден", show_alert=True)
-            return
-        roster = await surveys_svc.attendance_roster(s, survey_id)
-        roster_ids = {p.id for p, _ in roster}
-        all_persons = await persons_svc.list_persons(s, group.school_id)
-        candidates = [p for p in all_persons if p.id not in roster_ids]
-    if not candidates:
-        await call.answer(
-            "Все известные ученики уже в ростере. "
-            "Запиши нового человека через ссылку-приглашение.",
-            show_alert=True,
-        )
-        return
-    await call.message.edit_text(
-        "➕ Кого добавить как «был на занятии»?\n"
-        "Здесь только люди, которых ты уже видел в других группах.",
-        reply_markup=walk_in_picker_keyboard(survey_id, group_id, candidates),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("atnwkpick:"))
-async def cb_walk_in_add(call: CallbackQuery) -> None:
-    parts = (call.data or "").split(":")
-    survey_id, person_id = int(parts[1]), int(parts[2])
-    async with session_scope() as s:
-        survey = await surveys_svc.get_survey(s, survey_id)
-        if survey is None:
-            await call.answer("Опрос не найден", show_alert=True)
-            return
-        group = await _accessible_group(s, survey.group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        person = await s.get(Person, person_id)
-        if person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
-            return
-        await persons_svc.add_to_group(
-            s, group, person.tg_user_id, person.tg_username, person.full_name,
-        )
-        await surveys_svc.add_walk_in(s, survey_id, person_id)
-        group_id = group.id
-    await _render_attendance_roster(call, survey_id, group_id)
-    await call.answer("Добавил")
-
-
-@router.callback_query(F.data.startswith("atntog:"))
-async def cb_attendance_toggle(call: CallbackQuery) -> None:
-    """Переключение состояния: None → True → False → None."""
-    parts = (call.data or "").split(":")
-    survey_id, person_id = int(parts[1]), int(parts[2])
-    async with session_scope() as s:
-        survey = await surveys_svc.get_survey(s, survey_id)
-        if survey is None:
-            await call.answer("Опрос не найден", show_alert=True)
-            return
-        group = await _accessible_group(s, survey.group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        # Найдём текущее состояние
-        from sqlalchemy import select as _sel
-
-        from app.db.models import Response
-        cur = (await s.execute(
-            _sel(Response.actually_attended).where(
-                Response.survey_id == survey_id, Response.person_id == person_id
-            )
-        )).scalar_one_or_none()
-        # None → True → False → None
-        new_value = True if cur is None else (False if cur is True else None)
-        await surveys_svc.set_actual_attendance(s, survey_id, person_id, new_value)
-        group_id = group.id
-    await _render_attendance_roster(call, survey_id, group_id)
-    await call.answer()
+# Реализация — [attendance.py](attendance.py).
 
 
 # ── cancel single lesson ────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("grpcancel:"))
-async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
-    """Шаг 1: показываем список 5 ближайших занятий — preпод выбирает какое отменить."""
-    group_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        upcoming = upcoming_lessons(group.weekdays, group.lesson_time, local_now(), n=5)
-        if not upcoming:
-            await call.answer("Нет ближайших занятий", show_alert=True)
-            return
-        items: list[tuple[int, str, bool]] = []
-        for dt in upcoming:
-            cancelled = await cancellations_svc.is_cancelled(s, group.id, dt)
-            items.append((int(dt.timestamp()), f"{dt:%d.%m (%a) в %H:%M}", cancelled))
-        title = format_group_title(group)
-    await call.message.edit_text(
-        f"Отменить какое занятие «{title}»?",
-        reply_markup=pick_lesson_to_cancel_keyboard(group_id, items),
-    )
-    await call.answer()
+# Реализация — [lesson_cancel.py](lesson_cancel.py). Здесь только общий no-op
+# callback, который ловит "noop" для disabled-кнопок в pick-list.
 
 
 @router.callback_query(F.data == "noop")
@@ -1996,131 +1036,13 @@ async def cb_noop(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("grpcanceldt:"))
-async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
-    """Шаг 2: confirmation выбранной даты."""
-    parts = (call.data or "").split(":")
-    group_id, ts = int(parts[1]), int(parts[2])
-    lesson_at = datetime.fromtimestamp(ts)
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
-            await call.answer("Это занятие уже отменено", show_alert=True)
-            return
-        title = format_group_title(group)
-    await call.message.edit_text(
-        f"Отменить занятие «{title}» {lesson_at:%d.%m в %H:%M}?\n\n"
-        f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
-        f"уйдёт уведомление об отмене.",
-        reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("grpcancelok:"))
-async def cb_lesson_cancel(call: CallbackQuery, bot: Bot) -> None:
-    """Шаг 3: пишем cancellation, закрываем survey/support, шлём уведомления."""
-    parts = (call.data or "").split(":")
-    group_id, ts = int(parts[1]), int(parts[2])
-    lesson_at = datetime.fromtimestamp(ts)
-    yes_tg_ids: list[int] = []
-    support_tg_ids: list[int] = []
-    title = ""
-    async with session_scope() as s:
-        group = await _accessible_group(s, group_id, call.from_user.id)
-        if group is None:
-            await call.answer("Группа не найдена", show_alert=True)
-            return
-        title = format_group_title(group)
-        await cancellations_svc.cancel(s, group.id, lesson_at)
-        # Если survey уже был разослан — закрываем и собираем «приду»-учеников.
-        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
-        if survey is not None:
-            if survey.status == SurveyStatus.open:
-                survey.status = SurveyStatus.closed
-                await s.flush()
-            from sqlalchemy import select as _sel
-
-            from app.db.models import Response
-            rows = (await s.execute(
-                _sel(Person.tg_user_id)
-                .join(Response, Response.person_id == Person.id)
-                .where(Response.survey_id == survey.id, Response.answer == Answer.yes)
-            )).scalars().all()
-            yes_tg_ids = list(rows)
-            # SupportCall на это занятие тоже закрываем и уведомляем согласившихся.
-            sc = await supports_svc.get_call_for_survey(s, survey.id)
-            if sc is not None and sc.status != SupportCallStatus.closed:
-                from app.db.models import SupportClaim
-                sup_rows = (await s.execute(
-                    _sel(Person.tg_user_id)
-                    .join(SupportClaim, SupportClaim.person_id == Person.id)
-                    .where(SupportClaim.support_call_id == sc.id)
-                )).scalars().all()
-                support_tg_ids = list(sup_rows)
-                sc.status = SupportCallStatus.closed
-                await s.flush()
-
-    notice = f"⚠️ Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено."
-    for tg in yes_tg_ids:
-        try:
-            await bot.send_message(tg, notice)
-        except Exception as e:  # noqa: BLE001
-            log.info("cancel-notice to %s failed: %s", tg, e)
-    sup_notice = (
-        f"⚠️ Помощь на занятии «{title}» {lesson_at:%d.%m в %H:%M} "
-        f"больше не нужна — занятие отменено."
-    )
-    for tg in support_tg_ids:
-        try:
-            await bot.send_message(tg, sup_notice)
-        except Exception as e:  # noqa: BLE001
-            log.info("cancel-notice (support) to %s failed: %s", tg, e)
-
-    await call.message.edit_text(
-        f"🚫 Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено. "
-        f"Уведомления отправлены ({len(yes_tg_ids)} ученикам, "
-        f"{len(support_tg_ids)} саппортам)."
-    )
-    await call.answer()
-
-
-# ── support pool ─────────────────────────────────────────────────────
-
-
-@router.message(Command("pool"))
-@router.message(F.text == MENU_POOL)
-async def cmd_pool(message: Message) -> None:
-    tg = message.from_user
-    if not tg:
-        return
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is None:
-            return
-        people = await persons_svc.admin_visible_persons(s, teacher.id)
-    if not people:
-        await message.answer(
-            "Пул саппортов пуст — сюда попадут ученики, когда запишутся. "
-            "Потом тапом задашь, кого и с каким уровнем можно звать на подмену."
-        )
-        return
-    await message.answer(
-        "🆘 Личный пул саппортов. Тап по человеку задаёт уровень "
-        "(1 → 2 → 3 → убрать из пула):",
-        reply_markup=pool_keyboard(people),
-    )
-
-
 # ── edit display name ────────────────────────────────────────────────
+# Реализация — [misc_dialogs.edit_name_dialog](../dialogs/misc_dialogs.py).
 
 
 @router.message(Command("name"))
 @router.message(F.text == MENU_NAME)
-async def cmd_edit_name(message: Message, state: FSMContext) -> None:
+async def cmd_edit_name(message: Message, dialog_manager: DialogManager) -> None:
     tg = message.from_user
     if not tg:
         return
@@ -2133,412 +1055,9 @@ async def cmd_edit_name(message: Message, state: FSMContext) -> None:
             " запомнить, как тебя называть."
         )
         return
-    current = teacher.full_name if teacher else persons_rows[0].full_name
-    await state.set_state(EditName.waiting)
-    await message.answer(
-        f"Как тебя называть в опросах и списках? Напиши имя одной строкой."
-        f"\nСейчас: «{current}»"
-    )
+    from aiogram_dialog import StartMode
+
+    from app.bot.dialogs import EditNameSG
+    await dialog_manager.start(EditNameSG.name, mode=StartMode.RESET_STACK)
 
 
-@router.message(EditName.waiting, F.text, ~F.text.in_(MENU_TEXTS))
-async def edit_name_typed(message: Message, state: FSMContext) -> None:
-    tg = message.from_user
-    if not tg:
-        return
-    new_name = (message.text or "").strip()
-    if not new_name:
-        await message.answer("Пустое имя — напиши ещё раз.")
-        return
-    if len(new_name) > 200:
-        new_name = new_name[:200]
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is not None:
-            await admins_svc.set_name(s, teacher.id, new_name)
-        touched = await persons_svc.set_name_everywhere(s, tg.id, new_name)
-    await state.clear()
-    if teacher is not None and touched == 0:
-        await message.answer(f"✅ Записал: тебя зовут «{new_name}».")
-    elif teacher is not None:
-        await message.answer(
-            f"✅ Записал: тебя зовут «{new_name}». Обновил в {touched} карточке(ах)."
-        )
-    else:
-        await message.answer(
-            f"✅ Записал: тебя зовут «{new_name}». Преподаватели увидят это имя."
-        )
-
-
-# ── support pool ─────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("tpool:"))
-async def cb_pool_toggle(call: CallbackQuery) -> None:
-    person_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        person = await s.get(Person, person_id)
-        if teacher is None or person is None or person.school_id is None:
-            await call.answer("Не найдено", show_alert=True)
-            return
-        # Тыкать в пул можно только тех, кто в одной из доступных школ admin'а.
-        if not await schools_svc.is_member(s, person.school_id, teacher.id):
-            await call.answer("Не найдено", show_alert=True)
-            return
-        current = person.support_level
-        new_level = None if current == _MAX_LEVEL else (current or 0) + 1
-        await persons_svc.set_support_level(s, person_id, new_level)
-        people = await persons_svc.admin_visible_persons(s, teacher.id)
-    if call.message:
-        await call.message.edit_reply_markup(reply_markup=pool_keyboard(people))
-    await call.answer()
-# Школьные handlers — append to admin.py
-
-
-# ── school management ────────────────────────────────────────────────
-
-
-async def _render_school_card(
-    target: Message, school_id: int, admin_id: int, *, edit: bool = True
-) -> None:
-    """Карточка школы. edit=True — отредактировать существующее сообщение
-    (для callback'ов с inline-keyboard). edit=False — отправить новым
-    (для /school и нажатий по reply-меню)."""
-    async with session_scope() as s:
-        school = await schools_svc.get_school(s, school_id)
-        if school is None:
-            return
-        role = await schools_svc.get_role(s, school_id, admin_id)
-        if role is None:
-            return
-        members = await schools_svc.members_of(s, school_id)
-        all_schools = await schools_svc.admin_schools(s, admin_id)
-        group_count = len(await groups_svc.school_groups(s, school_id))
-    is_owner = role.value == "owner"
-    lines = [
-        f"🏫 <b>{escape(school.name)}</b>",
-        f"Групп: {group_count}",
-        "",
-        "Состав:",
-    ]
-    for admin, r in members:
-        glyph = "👑 owner" if r.value == "owner" else "🛠 co-admin"
-        lines.append(f"• {escape(admin.full_name)} — {glyph}")
-    text = "\n".join(lines)
-    multi = len(all_schools) > 1
-    markup = school_card_keyboard(school_id, is_owner, multi_school=multi)
-    if edit:
-        await target.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-    else:
-        await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-async def _render_school_list(
-    target: Message, admin_id: int, *, edit: bool = False
-) -> None:
-    async with session_scope() as s:
-        all_schools = await schools_svc.admin_schools(s, admin_id)
-    if not all_schools:
-        return
-    if len(all_schools) == 1:
-        school, _ = all_schools[0]
-        await _render_school_card(target, school.id, admin_id, edit=edit)
-        return
-    text = "🏫 Твои школы — выбери, какую открыть:"
-    markup = school_picker_keyboard(all_schools)
-    if edit:
-        await target.edit_text(text, reply_markup=markup)
-    else:
-        await target.answer(text, reply_markup=markup)
-
-
-@router.message(Command("school"))
-@router.message(F.text == MENU_SCHOOL)
-async def cmd_school(message: Message) -> None:
-    tg = message.from_user
-    if not tg:
-        return
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, tg.id)
-    if admin is None:
-        return
-    await _render_school_list(message, admin.id, edit=False)
-
-
-@router.callback_query(F.data == "schlist")
-async def cb_school_list(call: CallbackQuery) -> None:
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-    if admin is None or call.message is None:
-        await call.answer()
-        return
-    await _render_school_list(call.message, admin.id, edit=True)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("schcard:"))
-async def cb_school_card(call: CallbackQuery) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-    if admin is None or call.message is None:
-        await call.answer()
-        return
-    await _render_school_card(call.message, school_id, admin.id, edit=True)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("schlink:"))
-async def cb_school_invite_link(call: CallbackQuery, bot: Bot) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer("Только owner может приглашать", show_alert=True)
-            return
-        invite = await schools_svc.create_invite(s, school_id)
-        code = invite.code
-        school = await schools_svc.get_school(s, school_id)
-        school_name = school.name if school else "—"
-    link = await _partner_link(bot, code)
-    await call.message.answer(
-        f"🛠 Ссылка-приглашение co-админом школы «{escape(school_name)}» — "
-        f"действует 24 ч. Перешли её одному человеку:\n\n"
-        f"<code>{escape(link)}</code>",
-        parse_mode=ParseMode.HTML,
-    )
-    await call.answer("Ссылка готова — пересылай")
-
-
-@router.callback_query(F.data.startswith("schrem:"))
-async def cb_school_remove_member(call: CallbackQuery, bot: Bot) -> None:
-    parts = (call.data or "").split(":")
-    school_id, admin_id = int(parts[1]), int(parts[2])
-    async with session_scope() as s:
-        me = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if me is None or not await schools_svc.is_owner(s, school_id, me.id):
-            await call.answer("Только owner может убирать", show_alert=True)
-            return
-        removed_admin = await s.get(Admin, admin_id)
-        removed_tg = removed_admin.tg_user_id if removed_admin else None
-        removed = await schools_svc.remove_coadmin(s, school_id, admin_id)
-    if removed:
-        await call.answer("Убран")
-        if removed_tg is not None:
-            await _demote_to_student_if_empty(bot, admin_id, removed_tg)
-    else:
-        await call.answer("Уже не co-admin", show_alert=True)
-    if call.message is not None:
-        await _render_school_card(call.message, school_id, me.id, edit=True)
-
-
-@router.callback_query(F.data.startswith("schren:"))
-async def cb_school_rename_start(call: CallbackQuery, state: FSMContext) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer("Только owner может переименовывать", show_alert=True)
-            return
-    await state.set_state(RenameSchool.name)
-    await state.update_data(school_id=school_id)
-    await call.message.answer(
-        "Напиши новое название школы. Чтобы передумать — /cancel."
-    )
-    await call.answer()
-
-
-@router.message(Command("cancel"), RenameSchool.name)
-async def school_rename_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Отменил.")
-
-
-@router.message(RenameSchool.name, F.text, ~F.text.in_(MENU_TEXTS))
-async def school_rename_save(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    school_id = data.get("school_id")
-    await state.clear()
-    new_name = (message.text or "").strip()
-    if not new_name:
-        await message.answer("Пустое название — отменил.")
-        return
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, message.from_user.id)
-        if admin is None or school_id is None:
-            return
-        if not await schools_svc.is_owner(s, school_id, admin.id):
-            await message.answer("Только owner может переименовывать.")
-            return
-        await schools_svc.rename_school(s, school_id, new_name)
-    await message.answer(f"✅ Теперь школа называется «{new_name}».")
-
-
-@router.callback_query(F.data.startswith("schdel:"))
-async def cb_school_delete_confirm(call: CallbackQuery) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer("Только owner может удалять школу", show_alert=True)
-            return
-        school = await schools_svc.get_school(s, school_id)
-        group_count = len(await groups_svc.school_groups(s, school_id))
-        name = school.name if school else "—"
-    await call.message.edit_text(
-        f"⚠️ Удалить школу «{escape(name)}»?\n"
-        f"Внутри {group_count} групп(ы) — они тоже будут удалены вместе с "
-        f"учениками, опросами и пулом саппортов. Это необратимо.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_school_delete_keyboard(school_id),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("schdelok:"))
-async def cb_school_delete(call: CallbackQuery, bot: Bot) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    affected_tgs: list[tuple[int, int]] = []  # (admin_id, tg_id) бывших members
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer("Только owner может удалять школу", show_alert=True)
-            return
-        school = await schools_svc.get_school(s, school_id)
-        if school is None:
-            await call.answer("Уже удалена", show_alert=True)
-            return
-        name = school.name
-        members = await schools_svc.members_of(s, school_id)
-        affected_tgs = [(a.id, a.tg_user_id) for a, _ in members]
-        await schools_svc.delete_school(s, school)
-    await call.message.edit_text(f"🗑 Школа «{escape(name)}» удалена.")
-    await call.answer()
-    # Все бывшие members могли потерять последнюю школу — переключаем им меню.
-    for admin_id, tg_id in affected_tgs:
-        await _demote_to_student_if_empty(bot, admin_id, tg_id)
-
-
-@router.callback_query(F.data.startswith("schleave:"))
-async def cb_school_leave_confirm(call: CallbackQuery) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        school = await schools_svc.get_school(s, school_id)
-        if school is None:
-            await call.answer("Школа не найдена", show_alert=True)
-            return
-        name = school.name
-    await call.message.edit_text(
-        f"Выйти из школы «{escape(name)}»? Твои собственные данные не "
-        f"пропадут — ты просто перестанешь видеть её группы.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_school_leave_keyboard(school_id),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("schleaveok:"))
-async def cb_school_leave(call: CallbackQuery, bot: Bot) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    admin_id_to_demote: int | None = None
-    tg_to_demote: int | None = None
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None:
-            return
-        role = await schools_svc.get_role(s, school_id, admin.id)
-        if role is None:
-            await call.answer("Ты не в этой школе", show_alert=True)
-            return
-        if role.value == "owner":
-            await call.answer(
-                "Owner не может выйти; удали школу или передай владение.",
-                show_alert=True,
-            )
-            return
-        await schools_svc.remove_coadmin(s, school_id, admin.id)
-        school = await schools_svc.get_school(s, school_id)
-        name = school.name if school else "—"
-        admin_id_to_demote = admin.id
-        tg_to_demote = call.from_user.id
-    await call.message.edit_text(f"↩ Вышел из школы «{escape(name)}».")
-    if admin_id_to_demote is not None and tg_to_demote is not None:
-        await _demote_to_student_if_empty(bot, admin_id_to_demote, tg_to_demote)
-    await call.answer()
-
-
-async def handle_school_invite_start(message: Message, code: str) -> None:
-    """Точка входа из student.join_start при partner_<code>. Показывает
-    карточку школы и кнопку «Принять» — ничего не пишем в БД до подтверждения."""
-    async with session_scope() as s:
-        invite = await schools_svc.get_invite(s, code)
-        if invite is None or not schools_svc.invite_is_valid(invite):
-            await message.answer(
-                "Эта ссылка устарела или уже использована. Попроси у owner'а новую."
-            )
-            return
-        school = await schools_svc.get_school(s, invite.school_id)
-        if school is None:
-            await message.answer("Школа не найдена — возможно, удалена.")
-            return
-        name = school.name
-    await message.answer(
-        f"🛠 Тебя приглашают co-админом школы «{escape(name)}». "
-        f"Co-admin видит все группы школы, может управлять учениками и "
-        f"опросами, но не может удалить школу.\n\nПринимаешь?",
-        parse_mode=ParseMode.HTML,
-        reply_markup=school_accept_keyboard(code),
-    )
-
-
-@router.callback_query(F.data.startswith("schaccept:"))
-async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
-    code = (call.data or "").split(":", 1)[1]
-    tg = call.from_user
-    if not tg:
-        return
-    async with session_scope() as s:
-        invite = await schools_svc.get_invite(s, code)
-        if invite is None or not schools_svc.invite_is_valid(invite):
-            if call.message:
-                await call.message.edit_text(
-                    "Эта ссылка устарела или уже использована."
-                )
-            await call.answer()
-            return
-        admin = await admins_svc.get_or_create(
-            s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
-        )
-        await schools_svc.add_coadmin(s, invite.school_id, admin.id)
-        await schools_svc.consume_invite(s, invite, admin.id)
-        admin.has_completed_setup = True
-        await s.flush()
-        school = await schools_svc.get_school(s, invite.school_id)
-        name = school.name if school else "—"
-    try:
-        await grant_admin_commands(bot, tg.id)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Could not set admin commands for %s: %s", tg.id, e)
-    if call.message:
-        await call.message.edit_text(
-            f"✅ Готово, ты теперь co-админ школы «{escape(name)}»."
-        )
-    # Отправляем второе сообщение, чтобы Telegram переключил reply-keyboard
-    # на админ-меню — без этого юзер видит старое (или дефолтное) до /start.
-    try:
-        await bot.send_message(
-            tg.id,
-            "Открой меню снизу 👇 — там есть «📋 Мои группы», «🏫 Школа» и всё остальное.",
-            reply_markup=admin_menu_keyboard(),
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Could not push admin menu to %s: %s", tg.id, e)
-    await call.answer()
-
-
-@router.callback_query(F.data == "schdecline")
-async def cb_school_decline(call: CallbackQuery) -> None:
-    if call.message:
-        await call.message.edit_text("Окей, приглашение отклонено.")
-    await call.answer()

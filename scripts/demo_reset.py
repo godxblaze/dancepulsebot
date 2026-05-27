@@ -27,6 +27,7 @@ from app.scheduler.scheduler import _maybe_recruit, _poll_group
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
@@ -57,37 +58,38 @@ async def main() -> None:
 
             teacher = await admins_svc.get_by_tg_id(s, GODBLAZE_TG)
             assert teacher is not None, "Godblazer teacher row missing"
-            tid = teacher.id
+            school = await schools_svc.get_or_create_owned_school(s, teacher.id)
+            sid = school.id
 
             # 2. one shared venue
             venue = await venues_svc.create_venue(
-                s, tid, "Wave Dance", "Шлюзовая наб. 8с2"
+                s, sid, "Wave Dance", "Шлюзовая наб. 8с2"
             )
 
             # 3. four groups
             g_bachata = await groups_svc.create_group(
-                s, tid, "Бачата · ур.2", weekday_today, lesson_time_str, 18,
+                s, sid, "Бачата · ур.2", weekday_today, lesson_time_str, 18,
                 style="Бачата", level=2, venue_id=venue.id, room="зал 38",
                 teachers_note="Маша + Петя",
             )
             g_salsa = await groups_svc.create_group(
-                s, tid, "Сальса · ур.1", weekday_today, lesson_time_str, 18,
+                s, sid, "Сальса · ур.1", weekday_today, lesson_time_str, 18,
                 style="Сальса", level=1, venue_id=venue.id, room="зал 40",
                 teachers_note="Алина",
             )
             g_kizomba = await groups_svc.create_group(
-                s, tid, "Кизомба · ур.3", weekday_today, lesson_time_str, 18,
+                s, sid, "Кизомба · ур.3", weekday_today, lesson_time_str, 18,
                 style="Кизомба", level=3, venue_id=venue.id, room="зал 22",
             )
             # imbalanced group — NO Anubis here, so he qualifies as a support
             g_hustle = await groups_svc.create_group(
-                s, tid, "Хастл · ур.2", weekday_today, lesson_time_str, 18,
+                s, sid, "Хастл · ур.2", weekday_today, lesson_time_str, 18,
                 style="Хастл", level=2, venue_id=venue.id, room="зал 19",
                 teachers_note="Дима",
             )
 
             # 4. enrol Anubis into the first three
-            anubis = await persons_svc.get_person(s, tid, ANUBIS_TG)
+            anubis = await persons_svc.get_person(s, sid, ANUBIS_TG)
             assert anubis is not None
             for g in (g_bachata, g_salsa, g_kizomba):
                 await persons_svc.add_to_group(
@@ -98,7 +100,7 @@ async def main() -> None:
             females = (
                 await s.execute(
                     select(Person).where(
-                        Person.admin_id == tid, Person.gender == Gender.female
+                        Person.school_id == sid, Person.gender == Gender.female
                     )
                 )
             ).scalars().all()
@@ -112,7 +114,7 @@ async def main() -> None:
             extra_male = (
                 await s.execute(
                     select(Person).where(
-                        Person.admin_id == tid,
+                        Person.school_id == sid,
                         Person.gender == Gender.male,
                         Person.tg_user_id != ANUBIS_TG,
                     ).limit(1)

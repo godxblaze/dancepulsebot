@@ -10,13 +10,11 @@ import argparse
 import asyncio
 import logging
 
-from sqlalchemy import select
-
 from app.core.logging import setup_logging
-from app.db.models import Group
 from app.db.session import init_db, session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
+from app.services import schools as schools_svc
 
 log = logging.getLogger("seed")
 
@@ -27,16 +25,15 @@ async def seed(teacher_tg_id: int) -> None:
         teacher = await admins_svc.get_or_create(
             s, teacher_tg_id, "demo_teacher", "Демо Преподаватель"
         )
-        existing = (
-            await s.execute(select(Group).where(Group.admin_id == teacher.id))
-        ).scalars().first()
+        school = await schools_svc.get_or_create_owned_school(s, teacher.id)
+        existing = await groups_svc.school_groups(s, school.id)
         if existing:
             log.warning("Teacher already has groups — skipping group creation")
-            code = existing.join_code
-            name = existing.name
+            code = existing[0].join_code
+            name = existing[0].name
         else:
             group = await groups_svc.create_group(
-                s, teacher.id, "Hip-Hop начинающие", "0,2", "19:00", 18
+                s, school.id, "Hip-Hop начинающие", "0,2", "19:00", 18
             )
             code = group.join_code
             name = group.name

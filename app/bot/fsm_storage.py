@@ -20,7 +20,11 @@ from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
 
 def _key_to_str(key: StorageKey) -> str:
     bc = key.business_connection_id or ""
-    return f"{key.bot_id}:{key.chat_id}:{key.user_id}:{key.thread_id or 0}:{bc}"
+    # destiny ОБЯЗАТЕЛЬНО включать: aiogram-dialog различает stack и per-intent
+    # context именно через это поле. Без него dialog-контексты затирают друг
+    # друга и при load_context падает KeyError: 'state'.
+    destiny = key.destiny or "default"
+    return f"{key.bot_id}:{key.chat_id}:{key.user_id}:{key.thread_id or 0}:{bc}:{destiny}"
 
 
 class JsonFileStorage(BaseStorage):

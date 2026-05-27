@@ -183,6 +183,93 @@ async def test_tick_empty_group_creates_survey_without_crash(db, freeze) -> None
         assert survey is not None
 
 
+async def test_tick_sends_4h_reminder_to_pending(db, freeze) -> None:
+    """В 4h-окне (1ч < until <= 4ч) молчащим уходит «⏰ Напоминаю»."""
+    await _make_group(n_students=2)
+    # Первый tick за ~10ч до занятия — раздаёт опросы.
+    freeze(datetime(2026, 5, 25, 9, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+    assert len(bot.sent) == 2
+
+    # Студент 200 ответил, 201 молчит.
+    async with session_scope() as s:
+        from app.db.models import Answer
+        survey = await surveys.find_attendance_survey(s, 1, MONDAY_LESSON)
+        person = await persons.get_in_group(s, 1, 200)
+        await surveys.record_answer(s, survey.id, person.id, Answer.yes)
+
+    # Tick в 4h-окне (16:30 — до занятия ровно 2:30).
+    freeze(datetime(2026, 5, 25, 16, 30))
+    bot = FakeBot()
+    await sched.tick(bot)
+
+    reminders = [m for m in bot.sent if "Напоминаю" in m.text]
+    assert [m.chat_id for m in reminders] == [201]
+
+
+async def test_tick_sends_1h_reminder_to_pending(db, freeze) -> None:
+    """В 1h-окне (0 < until <= 1ч) — отдельная волна."""
+    await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+
+    # Tick за 30 минут до занятия — оба ещё молчат.
+    freeze(datetime(2026, 5, 25, 18, 30))
+    bot = FakeBot()
+    await sched.tick(bot)
+    reminders = [m for m in bot.sent if "Напоминаю" in m.text]
+    assert sorted(m.chat_id for m in reminders) == [200, 201]
+
+
+async def test_tick_reminder_idempotent_within_window(db, freeze) -> None:
+    """Два tick'а в одном окне → один пинг каждому."""
+    await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))
+    await sched.tick(FakeBot())
+
+    freeze(datetime(2026, 5, 25, 16, 30))  # 4h-окно
+    bot = FakeBot()
+    await sched.tick(bot)
+    await sched.tick(bot)
+    reminders = [m for m in bot.sent if "Напоминаю" in m.text]
+    assert sorted(m.chat_id for m in reminders) == [200, 201]
+
+
+async def test_tick_4h_and_1h_are_separate_waves(db, freeze) -> None:
+    """4h и 1h — независимые окна; кто получил 4h, получит и 1h, если так и не ответил."""
+    await _make_group(n_students=1)
+    freeze(datetime(2026, 5, 25, 9, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+    assert len(bot.sent) == 1  # initial poll
+
+    freeze(datetime(2026, 5, 25, 16, 30))  # 4h-окно
+    await sched.tick(bot)
+    assert sum(1 for m in bot.sent if "Напоминаю" in m.text) == 1
+
+    freeze(datetime(2026, 5, 25, 18, 30))  # 1h-окно
+    await sched.tick(bot)
+    assert sum(1 for m in bot.sent if "Напоминаю" in m.text) == 2
+
+
+async def test_first_poll_in_4h_window_does_not_double_send(db, freeze) -> None:
+    """Группа создалась поздно, первая рассылка попадает в 4h-окно. Опрос должен
+    уйти, а reminder того же tick'a не должен догнаться повторно."""
+    await _make_group(n_students=1, lead_hours=5)
+    freeze(datetime(2026, 5, 25, 16, 30))  # за 2:30 до занятия
+    bot = FakeBot()
+    await sched.tick(bot)
+    student_msgs = [m for m in bot.sent if m.chat_id == 200]
+    # Опрос ушёл — но он в форме «Придёшь?», не «Напоминаю».
+    assert len(student_msgs) == 1
+    assert "Напоминаю" not in student_msgs[0].text
+    # Следующий tick в том же 4h-окне — ученику ничего нового.
+    await sched.tick(bot)
+    assert len([m for m in bot.sent if m.chat_id == 200]) == 1
+
+
 async def test_tick_pings_admin_when_no_replies_to_support(db, freeze) -> None:
     """Если SupportCall в open уже >1h без откликов, scheduler пингует админа."""
     from datetime import UTC, timedelta

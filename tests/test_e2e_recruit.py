@@ -8,18 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from app.bot.handlers.admin import (
-    cb_pool_toggle,
-    newgroup_level_pick,
-    newgroup_room_skip,
-    newgroup_start,
-    newgroup_style_pick,
-    newgroup_style_typed,
-    newgroup_teachers_skip,
-    newgroup_time,
-    newgroup_venue_pick,
-    newgroup_weekdays,
-)
+from app.bot.handlers.pool import cb_pool_toggle
 from app.bot.handlers.recruit import (
     cb_support_join,
     cb_support_pick,
@@ -27,7 +16,7 @@ from app.bot.handlers.recruit import (
 )
 from app.bot.handlers.student import join_gender, join_name_typed, join_start
 from app.bot.handlers.survey import on_attendance
-from app.bot.states import JoinFlow, NewGroup
+from app.bot.states import JoinFlow
 from app.db.models import Gender, Person, SupportCallStatus
 from app.db.session import session_scope
 from app.scheduler.scheduler import _maybe_recruit, _poll_group
@@ -53,69 +42,18 @@ TEACHER_TG = 100
 
 
 async def _create_group_via_wizard(bot: FakeBot, monkeypatch) -> int:
-    """Drive /newgroup → Mon → 19:00 entirely through handlers. Returns group_id."""
-
-    async def _fake_username(_bot) -> str:
-        return "dancepulsebot"
-
-    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
-    teacher = fake_user(TEACHER_TG, full_name="Препод")
-    fsm = FakeFSM()
-
+    """Создание группы напрямую через services — UI-мастер тестируется
+    отдельно как aiogram-dialog flow. monkeypatch/bot оставлены для совместимости
+    с вызывающим кодом."""
+    del bot, monkeypatch
     async with session_scope() as s:
         await admins_svc.get_or_create(s, TEACHER_TG, None, "Препод")
-
-    start_msg = FakeMessage(teacher, bot=bot)
-    await newgroup_start(start_msg, fsm)
-    assert fsm.state == NewGroup.style
-
-    # pick «✏️ Ввести своё» then type the style name
-    style_kb_msg = start_msg.replies[-1]
-    await newgroup_style_pick(
-        FakeCallback("ngst:type", teacher, message=style_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.style_typing
-    style_typed_msg = FakeMessage(teacher, text="Бачата", bot=bot)
-    await newgroup_style_typed(style_typed_msg, fsm)
-    assert fsm.state == NewGroup.level
-
-    level_kb_msg = style_typed_msg.replies[-1]
-    await newgroup_level_pick(
-        FakeCallback("nglv:skip", teacher, message=level_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.weekdays
-
-    wd_kb_msg = level_kb_msg.replies[-1]
-    await newgroup_weekdays(FakeCallback("wd:0", teacher, message=wd_kb_msg), fsm)
-    await newgroup_weekdays(FakeCallback("wd:done", teacher, message=wd_kb_msg), fsm)
-    assert fsm.state == NewGroup.lesson_time
-
-    time_msg = FakeMessage(teacher, text="19:00", bot=bot)
-    await newgroup_time(time_msg, fsm, bot)
-    assert fsm.state == NewGroup.venue
-
-    venue_kb_msg = time_msg.replies[-1]
-    await newgroup_venue_pick(
-        FakeCallback("ngvn:skip", teacher, message=venue_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.room
-    room_kb_msg = venue_kb_msg.replies[-1]
-    await newgroup_room_skip(
-        FakeCallback("ngrm:skip", teacher, message=room_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.teachers_note
-    teachers_kb_msg = room_kb_msg.replies[-1]
-    await newgroup_teachers_skip(
-        FakeCallback("ngtn:skip", teacher, message=teachers_kb_msg), fsm, bot
-    )
-    assert fsm.state is None
-
-    async with session_scope() as s:
         t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
         assert t is not None
-        gs = await groups_svc.admin_visible_groups(s, t.id)
-        assert len(gs) == 1 and gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
-        return gs[0].id
+        group = await groups_svc.create_group(
+            s, t.id, "Бачата", "0", "19:00", 18, style="Бачата",
+        )
+        return group.id
 
 
 async def _join_via_link(
@@ -171,7 +109,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     # 3. Scheduler tick — poll the group. Real SQLite, real handlers, fake bot.
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         assert survey is not None

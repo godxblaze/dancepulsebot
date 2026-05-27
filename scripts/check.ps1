@@ -1,4 +1,4 @@
-# Dance Pulse — gate check: ruff + pytest.
+# Dance Pulse — gate check: ruff + pytest + mypy (warning).
 # Used by the Stop hook in .claude/settings.json. Exit 2 blocks completion.
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -7,6 +7,12 @@ $ruffOut = & python -m ruff check app scripts tests 2>&1
 $ruffCode = $LASTEXITCODE
 $pytestOut = & python -m pytest -q 2>&1
 $pytestCode = $LASTEXITCODE
+
+# mypy — warning-only: показывает свежие type-ошибки в dialogs/handlers,
+# но не блокирует. Многие false-positive (event union, generics aiogram-dialog)
+# поэтому ruff+pytest остаются обязательными.
+$mypyOut = & python -m mypy app/bot/dialogs app/bot/handlers --ignore-missing-imports --no-strict-optional 2>&1
+$mypyCode = $LASTEXITCODE
 
 if ($ruffCode -ne 0 -or $pytestCode -ne 0) {
     $err = [Console]::Error
@@ -17,5 +23,9 @@ if ($ruffCode -ne 0 -or $pytestCode -ne 0) {
     $err.WriteLine(($pytestOut | Out-String))
     exit 2
 }
-Write-Output "Dance Pulse: ruff + pytest OK"
+if ($mypyCode -ne 0) {
+    Write-Output "Dance Pulse: ruff + pytest OK; mypy: $mypyCode (warnings, не блокирует — посмотри если важно)"
+} else {
+    Write-Output "Dance Pulse: ruff + pytest + mypy OK"
+}
 exit 0

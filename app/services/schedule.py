@@ -1,4 +1,15 @@
-"""Schedule math — no DB, easy to unit-test."""
+"""Schedule math — no DB, easy to unit-test.
+
+**Timezone convention** во всём проекте:
+- `local_now()`, `Survey.lesson_at`, `LessonCancellation.lesson_at` — **naive local**
+  (datetime в timezone школы, без tzinfo). lesson_at — display-friendly, без
+  пересчёта при отображении пользователю.
+- `*.created_at` колонки с `server_default=func.now()` — **naive UTC**
+  (SQLite пишет UTC текстом без tz). Сравнения с `datetime.now(UTC).replace(tzinfo=None)`.
+
+Смешивать local-naive и UTC-naive нельзя; конвертация — через `astimezone()`
+на aware-datetime. См. `_notify_stale_support_calls` в [../scheduler/scheduler.py].
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta

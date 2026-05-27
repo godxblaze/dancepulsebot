@@ -29,12 +29,21 @@ class FakeBot:
         self.sent.append((chat_id, text))
 
 
+class FakeDialogManager:
+    """Заглушка для тестов /start — реальный aiogram-dialog не нужен в этих
+    ветках (teacher is None / student / уже есть школа), но cmd_start требует
+    позиционный dialog_manager."""
+
+    async def start(self, *args, **kwargs) -> None:
+        pass
+
+
 # ── /start role logic ────────────────────────────────────────────────
 
 
 async def test_start_new_user_is_not_teacher(db) -> None:
     msg = FakeMessage(user_id=10)
-    await cmd_start(msg)
+    await cmd_start(msg, FakeDialogManager())
     async with session_scope() as s:
         assert await admins.get_by_tg_id(s, 10) is None  # not auto-promoted
     assert any("ссылк" in r.lower() for r in msg.replies)  # guest view
@@ -43,7 +52,7 @@ async def test_start_new_user_is_not_teacher(db) -> None:
 async def test_start_developer_becomes_teacher(db, monkeypatch) -> None:
     monkeypatch.setattr(settings, "developer_id", 777)
     msg = FakeMessage(user_id=777)
-    await cmd_start(msg)
+    await cmd_start(msg, FakeDialogManager())
     async with session_scope() as s:
         assert await admins.get_by_tg_id(s, 777) is not None
     assert msg.markups[-1] is not None  # teacher menu keyboard
@@ -53,7 +62,7 @@ async def test_start_known_teacher_shows_menu(db) -> None:
     async with session_scope() as s:
         await admins.get_or_create(s, 10, "t", "Препод")
     msg = FakeMessage(user_id=10)
-    await cmd_start(msg)
+    await cmd_start(msg, FakeDialogManager())
     assert msg.markups[-1] is not None
 
 
@@ -63,7 +72,7 @@ async def test_start_student_sees_home_not_teacher(db) -> None:
         g = await groups.create_group(s, t.id, "Сальса", "0", "19:00", 18)
         await persons.add_to_group(s, g, 500, "u", "Аня")
     msg = FakeMessage(user_id=500)
-    await cmd_start(msg)
+    await cmd_start(msg, FakeDialogManager())
     assert any("Сальса" in r for r in msg.replies)
     async with session_scope() as s:
         assert await admins.get_by_tg_id(s, 500) is None

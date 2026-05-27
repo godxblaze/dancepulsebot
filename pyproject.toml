@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Dance Pulse — Telegram bot that polls dance-school students about class attendance"
 requires-python = ">=3.12"
 dependencies = [
-    "aiogram>=3.13,<4",
+    "aiogram>=3.14,<4",
+    "aiogram-dialog>=2.6,<3",
     "sqlalchemy>=2.0,<3",
     "aiosqlite>=0.20,<1",
     "apscheduler>=3.10,<4",

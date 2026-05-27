@@ -14,7 +14,12 @@ from aiogram.types import (
     Message,
 )
 
-from app.bot.keyboards import gender_keyboard, join_name_keyboard, student_menu_keyboard
+from app.bot.keyboards import (
+    gender_keyboard,
+    join_name_keyboard,
+    onboarding_menu_keyboard,
+    student_menu_keyboard,
+)
 from app.bot.states import JoinFlow
 from app.bot.utils import format_group_title, format_place
 from app.db.models import Gender, Group
@@ -74,7 +79,7 @@ async def join_start(
         return
     if payload.startswith(PARTNER_PREFIX):
         # Приглашение co-admin'ом в школу — обрабатывает admin.py с подтверждением.
-        from app.bot.handlers.admin import handle_school_invite_start
+        from app.bot.handlers.school import handle_school_invite_start
 
         await handle_school_invite_start(message, payload[len(PARTNER_PREFIX):])
         return
@@ -205,6 +210,7 @@ async def show_student_home(message: Message) -> None:
                 f"свой Telegram ID разработчику: <code>{tg.id}</code>. "
                 "Он выдаст тебе админ-статус, и сможешь создать свою школу.",
                 parse_mode=ParseMode.HTML,
+                reply_markup=onboarding_menu_keyboard(),
             )
             return
         groups = await persons_svc.person_groups(s, person.id)

@@ -39,6 +39,24 @@ async def set_name(session: AsyncSession, admin_id: int, full_name: str) -> None
         await session.flush()
 
 
+async def set_support_threshold(
+    session: AsyncSession, admin_id: int, threshold: int
+) -> None:
+    admin = await session.get(Admin, admin_id)
+    if admin is not None:
+        admin.support_threshold = threshold
+        await session.flush()
+
+
+async def set_support_cutoff_hours(
+    session: AsyncSession, admin_id: int, hours: int
+) -> None:
+    admin = await session.get(Admin, admin_id)
+    if admin is not None:
+        admin.support_cutoff_hours = hours
+        await session.flush()
+
+
 async def delete_admin(session: AsyncSession, admin_id: int) -> bool:
     """Полностью снести Admin-запись. Возвращает True если что-то удалено.
 

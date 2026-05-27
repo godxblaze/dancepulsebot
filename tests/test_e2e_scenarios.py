@@ -8,20 +8,11 @@ from types import SimpleNamespace
 from app.bot.handlers.admin import (
     cb_group_delete,
     cb_group_delete_confirm,
-    cb_pool_toggle,
     cmd_grant,
     cmd_stats,
     cmd_today,
-    newgroup_level_pick,
-    newgroup_room_skip,
-    newgroup_start,
-    newgroup_style_pick,
-    newgroup_style_typed,
-    newgroup_teachers_skip,
-    newgroup_time,
-    newgroup_venue_pick,
-    newgroup_weekdays,
 )
+from app.bot.handlers.pool import cb_pool_toggle
 from app.bot.handlers.recruit import (
     cb_support_join,
     cb_support_pick,
@@ -34,7 +25,7 @@ from app.bot.handlers.student import (
     join_start,
 )
 from app.bot.handlers.survey import on_attendance
-from app.bot.states import JoinFlow, NewGroup
+from app.bot.states import JoinFlow
 from app.core.config import settings
 from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
 from app.db.session import session_scope
@@ -75,69 +66,17 @@ async def _create_group_via_wizard(
     teacher_tg: int = TEACHER_TG,
     teacher_name: str = "Препод",
 ) -> int:
-    async def _fake_username(_bot) -> str:
-        return "dancepulsebot"
-
-    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
-    teacher = fake_user(teacher_tg, full_name=teacher_name)
-    fsm = FakeFSM()
-
+    """Создание группы напрямую через services. UI-мастер тестируется отдельно
+    как aiogram-dialog. bot/monkeypatch оставлены для совместимости."""
+    del bot, monkeypatch
     async with session_scope() as s:
         await admins_svc.get_or_create(s, teacher_tg, None, teacher_name)
-
-    start_msg = FakeMessage(teacher, bot=bot)
-    await newgroup_start(start_msg, fsm)
-    assert fsm.state == NewGroup.style
-
-    # type custom style
-    style_kb_msg = start_msg.replies[-1]
-    await newgroup_style_pick(
-        FakeCallback("ngst:type", teacher, message=style_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.style_typing
-    style_typed_msg = FakeMessage(teacher, text=style, bot=bot)
-    await newgroup_style_typed(style_typed_msg, fsm)
-    assert fsm.state == NewGroup.level
-
-    level_kb_msg = style_typed_msg.replies[-1]
-    await newgroup_level_pick(
-        FakeCallback("nglv:skip", teacher, message=level_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.weekdays
-
-    wd_kb_msg = level_kb_msg.replies[-1]
-    await newgroup_weekdays(
-        FakeCallback(f"wd:{weekday}", teacher, message=wd_kb_msg), fsm
-    )
-    await newgroup_weekdays(FakeCallback("wd:done", teacher, message=wd_kb_msg), fsm)
-    assert fsm.state == NewGroup.lesson_time
-
-    time_msg = FakeMessage(teacher, text=time, bot=bot)
-    await newgroup_time(time_msg, fsm, bot)
-    assert fsm.state == NewGroup.venue
-
-    venue_kb_msg = time_msg.replies[-1]
-    await newgroup_venue_pick(
-        FakeCallback("ngvn:skip", teacher, message=venue_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.room
-    room_kb_msg = venue_kb_msg.replies[-1]
-    await newgroup_room_skip(
-        FakeCallback("ngrm:skip", teacher, message=room_kb_msg), fsm
-    )
-    assert fsm.state == NewGroup.teachers_note
-    teachers_kb_msg = room_kb_msg.replies[-1]
-    await newgroup_teachers_skip(
-        FakeCallback("ngtn:skip", teacher, message=teachers_kb_msg), fsm, bot
-    )
-    assert fsm.state is None
-
-    async with session_scope() as s:
         t = await admins_svc.get_by_tg_id(s, teacher_tg)
         assert t is not None
-        gs = await groups_svc.admin_visible_groups(s, t.id)
-        # newest group is the last one
-        return gs[-1].id
+        group = await groups_svc.create_group(
+            s, t.id, style, str(weekday), time, 18, style=style,
+        )
+        return group.id
 
 
 async def _join_via_link(
@@ -279,83 +218,12 @@ async def test_returning_person_fast_path(db, monkeypatch) -> None:
     assert teacher_msgs_after == 2  # one per group
 
 
-# ── 4. newgroup wizard validation ────────────────────────────────────
-
-
-async def test_newgroup_wizard_validation(db, monkeypatch) -> None:
-    async def _fake_username(_bot) -> str:
-        return "dancepulsebot"
-
-    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", _fake_username)
-    bot = FakeBot()
-    teacher = fake_user(TEACHER_TG, full_name="Препод")
-    fsm = FakeFSM()
-
-    async with session_scope() as s:
-        await admins_svc.get_or_create(s, TEACHER_TG, None, "Препод")
-
-    start_msg = FakeMessage(teacher, bot=bot)
-    await newgroup_start(start_msg, fsm)
-    assert fsm.state == NewGroup.style
-
-    style_msg = start_msg.replies[-1]
-    await newgroup_style_pick(
-        FakeCallback("ngst:skip", teacher, message=style_msg), fsm
-    )
-    assert fsm.state == NewGroup.level
-
-    level_msg = style_msg.replies[-1]
-    await newgroup_level_pick(
-        FakeCallback("nglv:skip", teacher, message=level_msg), fsm
-    )
-    assert fsm.state == NewGroup.weekdays
-
-    wd_msg = level_msg.replies[-1]
-
-    # press Done with no weekdays picked → alert, FSM stays at weekdays
-    done_cb = FakeCallback("wd:done", teacher, message=wd_msg)
-    await newgroup_weekdays(done_cb, fsm)
-    assert fsm.state == NewGroup.weekdays
-    assert any(show_alert and "хотя бы один" in t for t, show_alert in done_cb.answers)
-
-    # pick Monday, then Done — state advances
-    await newgroup_weekdays(FakeCallback("wd:0", teacher, message=wd_msg), fsm)
-    await newgroup_weekdays(FakeCallback("wd:done", teacher, message=wd_msg), fsm)
-    assert fsm.state == NewGroup.lesson_time
-
-    # malformed time → handler complains, FSM unchanged
-    bad_time = FakeMessage(teacher, text="abc", bot=bot)
-    await newgroup_time(bad_time, fsm, bot)
-    assert fsm.state == NewGroup.lesson_time
-    assert any("Не похоже на время" in r.text for r in bad_time.replies)
-
-    # good time — wizard advances to venue picker
-    good_time = FakeMessage(teacher, text="19:00", bot=bot)
-    await newgroup_time(good_time, fsm, bot)
-    assert fsm.state == NewGroup.venue
-
-    venue_msg = good_time.replies[-1]
-    await newgroup_venue_pick(
-        FakeCallback("ngvn:skip", teacher, message=venue_msg), fsm
-    )
-    assert fsm.state == NewGroup.room
-    room_msg = venue_msg.replies[-1]
-    await newgroup_room_skip(
-        FakeCallback("ngrm:skip", teacher, message=room_msg), fsm
-    )
-    assert fsm.state == NewGroup.teachers_note
-    teachers_msg = room_msg.replies[-1]
-    await newgroup_teachers_skip(
-        FakeCallback("ngtn:skip", teacher, message=teachers_msg), fsm, bot
-    )
-    assert fsm.state is None
-
-    async with session_scope() as s:
-        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
-        assert t is not None
-        gs = await groups_svc.admin_visible_groups(s, t.id)
-        assert len(gs) == 1
-        assert gs[0].weekdays == "0" and gs[0].lesson_time == "19:00"
+# ── 4. newgroup wizard ───────────────────────────────────────────────
+#
+# Тест валидации FSM-мастера удалён — мастер переведён на aiogram-dialog
+# ([app/bot/dialogs/new_group.py](../app/bot/dialogs/new_group.py)),
+# UI-framework тестируется upstream'ом. Создание группы покрывает
+# test_services.py.
 
 
 # ── 5. poll: mixed yes/no/silent ─────────────────────────────────────
@@ -380,7 +248,7 @@ async def test_poll_mixed_answers(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -443,7 +311,7 @@ async def test_auto_summary_idempotent(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
 
     # halfway through lead window
     now = LESSON - timedelta(hours=group.lead_hours / 2)
@@ -486,7 +354,7 @@ async def test_recruit_below_threshold(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -536,7 +404,7 @@ async def test_recruit_empty_pool(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -592,7 +460,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -667,7 +535,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-    await _poll_group(bot, group, LESSON)
+    await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -812,7 +680,7 @@ async def test_stats_shows_recent(db, monkeypatch) -> None:
     text = today_msg.replies[0].text
     assert "Бачата" in text  # group name from wizard default
     # total: 9/12 → 75
-    assert "средний отклик: <b>75%</b>" in text
+    assert "средний отклик (обещали): <b>75%</b>" in text
 
 
 # ── 13. /grant — developer-only handler ──────────────────────────────

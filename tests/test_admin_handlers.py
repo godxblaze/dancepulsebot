@@ -13,17 +13,8 @@ from app.bot.handlers.admin import (
     cb_groups_list,
     cmd_stats,
     cmd_today,
-    newgroup_level_pick,
-    newgroup_room_skip,
-    newgroup_start,
-    newgroup_style_pick,
-    newgroup_style_typed,
-    newgroup_teachers_skip,
-    newgroup_time,
-    newgroup_venue_pick,
-    newgroup_weekdays,
 )
-from app.bot.states import NewGroup
+from app.bot.utils import derive_group_name
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
 from app.services import admins, groups, persons, surveys
@@ -200,7 +191,7 @@ async def test_stats_with_closed_surveys(db) -> None:
     await cmd_stats(msg)
     text = msg.replies[0]
     assert "последние 2 занятий" in text
-    assert "средний отклик: <b>100%</b>" in text
+    assert "средний отклик (обещали): <b>100%</b>" in text
 
 
 # ── _owned_group authorization ───────────────────────────────────────
@@ -233,101 +224,9 @@ async def test_owned_group_unknown_group(db) -> None:
         assert await _owned_group(s, 999, 10) is None
 
 
-# ── new-group wizard ─────────────────────────────────────────────────
-
-
-async def test_wizard_rejects_empty_style(db) -> None:
-    async with session_scope() as s:
-        await admins.get_or_create(s, 10, "t", "T")
-    fsm = FakeFSM()
-    await newgroup_start(FakeMessage(user_id=10), fsm)
-    assert fsm.state == NewGroup.style
-    # switch to free-typing then send blank text — wizard must hold the state
-    await newgroup_style_pick(FakeCallback("ngst:type", 10), fsm)
-    assert fsm.state == NewGroup.style_typing
-    msg = FakeMessage(user_id=10, text="   ")
-    await newgroup_style_typed(msg, fsm)
-    assert fsm.state == NewGroup.style_typing  # not advanced
-    assert any("Пустое направление" in r for r in msg.replies)
-
-
-async def test_wizard_rejects_bad_time(db) -> None:
-    fsm = FakeFSM()
-    fsm.data = {"name": "G", "weekdays": [0]}
-    fsm.state = NewGroup.lesson_time
-    msg = FakeMessage(user_id=10, text="25:99")
-    await newgroup_time(msg, fsm, None)
-    assert any("Не похоже на время" in r for r in msg.replies)
-    async with session_scope() as s:
-        assert await admins.get_by_tg_id(s, 10) is None  # nothing created
-
-
-async def test_wizard_full_flow_creates_group(db, monkeypatch) -> None:
-    async def fake_username(bot) -> str:
-        return "dancepulsebot"
-
-    monkeypatch.setattr("app.bot.handlers.admin.get_bot_username", fake_username)
-
-    async with session_scope() as s:
-        await admins.get_or_create(s, 30, "teacher", "Препод Тест")
-
-    fsm = FakeFSM()
-    await newgroup_start(FakeMessage(user_id=30), fsm)
-    assert fsm.state == NewGroup.style
-
-    await newgroup_style_pick(FakeCallback("ngst:type", 30), fsm)
-    assert fsm.state == NewGroup.style_typing
-    await newgroup_style_typed(FakeMessage(user_id=30, text="Сальса"), fsm)
-    assert fsm.state == NewGroup.level
-
-    await newgroup_level_pick(FakeCallback("nglv:pick:2", 30), fsm)
-    assert fsm.state == NewGroup.weekdays
-
-    await newgroup_weekdays(FakeCallback("wd:0", 30), fsm)  # Monday on
-    await newgroup_weekdays(FakeCallback("wd:2", 30), fsm)  # Wednesday on
-    await newgroup_weekdays(FakeCallback("wd:done", 30), fsm)
-    assert fsm.state == NewGroup.lesson_time
-
-    msg = FakeMessage(user_id=30, text="19:00")
-    await newgroup_time(msg, fsm, None)
-    assert fsm.state == NewGroup.venue
-    await newgroup_venue_pick(FakeCallback("ngvn:skip", 30), fsm)
-    assert fsm.state == NewGroup.room
-    await newgroup_room_skip(FakeCallback("ngrm:skip", 30), fsm)
-    assert fsm.state == NewGroup.teachers_note
-    final = FakeCallback("ngtn:skip", 30)
-    await newgroup_teachers_skip(final, fsm, None)
-
-    async with session_scope() as s:
-        t = await admins.get_by_tg_id(s, 30)
-        assert t is not None
-        gs = await groups.admin_visible_groups(s, t.id)
-    assert len(gs) == 1
-    assert gs[0].style == "Сальса"
-    assert gs[0].level == 2
-    assert gs[0].name == "Сальса · ур.2"
-    assert gs[0].weekdays == "0,2"
-    assert gs[0].lesson_time == "19:00"
-
-
-async def test_wizard_rejects_non_teacher(db) -> None:
-    fsm = FakeFSM()
-    msg = FakeMessage(user_id=999)
-    await newgroup_start(msg, fsm)
-    assert fsm.state is None
-    assert msg.replies == []
-    async with session_scope() as s:
-        assert await admins.get_by_tg_id(s, 999) is None
-
-
-async def test_wizard_done_with_no_weekdays_blocked(db) -> None:
-    fsm = FakeFSM()
-    fsm.data = {"name": "G", "weekdays": []}
-    fsm.state = NewGroup.weekdays
-    call = FakeCallback("wd:done", 10)
-    await newgroup_weekdays(call, fsm)
-    assert fsm.state == NewGroup.weekdays  # not advanced
-    assert any("хотя бы один день" in a for a in call.answers)
+# Wizard-тесты на FSM-handlers были удалены при миграции на aiogram-dialog
+# ([app/bot/dialogs/new_group.py](../app/bot/dialogs/new_group.py)). UI-фреймворк
+# тестируется upstream'ом; нашу бизнес-логику покрывает test_services.py.
 
 
 # ── group-card callbacks ─────────────────────────────────────────────
@@ -425,52 +324,35 @@ async def test_cb_groups_list_empty(db) -> None:
 
 
 # ── edit existing group ──────────────────────────────────────────────
+#
+# EditGroup мастер переведён на aiogram-dialog
+# ([app/bot/dialogs/edit_group.py](../app/bot/dialogs/edit_group.py)).
+# Бизнес-логика правок покрывается на уровне services — ниже.
 
 
-async def test_edit_level_updates_group_and_name(db) -> None:
-    from app.bot.handlers.admin import cb_edit_level, edit_level_pick
-
+async def test_update_group_recalculates_name(db) -> None:
+    """update_group(level=3) + ручной name=derive_group_name(...) — поведение
+    которое раньше зашивал _apply_group_edit; теперь это делает dialog."""
     gid = await _make_group_with_members(n=0)
-    fsm = FakeFSM()
-    # open the level picker
-    await cb_edit_level(FakeCallback(f"ge:level:{gid}", 10), fsm)
-    assert fsm.state.state.endswith(":level")  # EditGroup.level
-    # pick «ур.3»
-    await edit_level_pick(FakeCallback("nglv:pick:3", 10), fsm)
-    assert fsm.state is None
+    async with session_scope() as s:
+        g = await groups.get_group(s, gid)
+        await groups.update_group(s, g, level=3)
+        await groups.update_group(s, g, name=derive_group_name(g.style, g.level))
     async with session_scope() as s:
         g = await groups.get_group(s, gid)
         assert g.level == 3
-        # Сальса was set in _make_group_with_members → name derives from style+level
         assert g.name == "Сальса · ур.3"
 
 
-async def test_edit_room_typed_clears_when_skip(db) -> None:
-    from app.bot.handlers.admin import (
-        cb_edit_room,
-        edit_room_skip,
-        edit_room_typed,
-    )
-
+async def test_update_group_room_set_and_clear(db) -> None:
     gid = await _make_group_with_members(n=0)
-    fsm = FakeFSM()
-    await cb_edit_room(FakeCallback(f"ge:room:{gid}", 10), fsm)
-    await edit_room_typed(FakeMessage(user_id=10, text="зал 38"), fsm)
+    async with session_scope() as s:
+        g = await groups.get_group(s, gid)
+        await groups.update_group(s, g, room="зал 38")
     async with session_scope() as s:
         assert (await groups.get_group(s, gid)).room == "зал 38"
-    # second pass: skip clears it
-    fsm2 = FakeFSM()
-    await cb_edit_room(FakeCallback(f"ge:room:{gid}", 10), fsm2)
-    await edit_room_skip(FakeCallback("ngrm:skip", 10), fsm2)
+    async with session_scope() as s:
+        g = await groups.get_group(s, gid)
+        await groups.update_group(s, g, room=None)
     async with session_scope() as s:
         assert (await groups.get_group(s, gid)).room is None
-
-
-async def test_edit_rejects_non_owner(db) -> None:
-    from app.bot.handlers.admin import cb_edit_level
-
-    gid = await _make_group_with_members(owner_tg=10, n=0)
-    fsm = FakeFSM()
-    await cb_edit_level(FakeCallback(f"ge:level:{gid}", 999), fsm)  # not the owner
-    assert fsm.state is None  # didn't enter the edit flow
-    assert any("не найдена" in a for a in FakeCallback(f"ge:level:{gid}", 999).answers) is False

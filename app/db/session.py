@@ -39,6 +39,7 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("admins", "has_completed_setup", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("responses", "reminded_4h", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("responses", "reminded_1h", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("schools", "timezone", "VARCHAR(64) DEFAULT 'Europe/Moscow' NOT NULL"),
 )
 
 

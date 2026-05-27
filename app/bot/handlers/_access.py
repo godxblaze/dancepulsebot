@@ -62,8 +62,14 @@ async def is_owner_of_group_id(session, group_id: int, admin_id: int) -> bool:
 async def group_card_extras(session, group: Group) -> tuple[bool, bool]:
     """(has_upcoming, has_closed_surveys) — для скрытия мёртвых кнопок
     в group_actions_keyboard."""
+    tz_name = (
+        await schools_svc.get_timezone(session, group.school_id)
+        if group.school_id else None
+    )
     has_upcoming = bool(
-        upcoming_lessons(group.weekdays, group.lesson_time, utc_now(), n=1)
+        upcoming_lessons(
+            group.weekdays, group.lesson_time, utc_now(), n=1, tz=tz_name,
+        )
     )
     closed = await surveys_svc.recent_closed_surveys(session, group.id, limit=1)
     return has_upcoming, bool(closed)

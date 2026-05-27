@@ -289,26 +289,41 @@ async def cb_today_switch(call: CallbackQuery) -> None:
 
 
 async def _build_today_view(teacher_id: int, span: str):
-    """Возвращает (text, markup) для /today. span ∈ {'day', 'week'}."""
+    """Возвращает (text, markup) для /today. span ∈ {'day', 'week'}.
+
+    Date-сравнения для «сегодня/завтра» делаются в TZ каждой школы — иначе
+    при разнице UTC vs местного дня (например, 23:00 МСК = 20:00 UTC) дни
+    могут разъехаться."""
+    from app.services.schedule import school_tz_zone
+
     now = utc_now()
-    today = now.date()
-    horizon_days = 7 if span == "week" else 2  # day → today+tomorrow, week → 7 дней вперёд
-    horizon_dates = {(today + timedelta(days=i)) for i in range(horizon_days)}
+    horizon_days = 7 if span == "week" else 2
     blocks: list[str] = []
     pending_by_group: list[tuple[str, int, int]] = []
 
     async with session_scope() as s:
         groups = await groups_svc.admin_visible_groups(s, teacher_id)
+        tz_cache: dict[int, str] = {}
         for g in groups:
-            lesson_at = next_lesson_at(g.weekdays, g.lesson_time, now)
-            if lesson_at is None or lesson_at.date() not in horizon_dates:
+            if g.school_id is not None and g.school_id not in tz_cache:
+                tz_cache[g.school_id] = await schools_svc.get_timezone(s, g.school_id)
+        for g in groups:
+            tz_name = tz_cache.get(g.school_id) if g.school_id else None
+            tz = school_tz_zone(tz_name)
+            today_local = now.astimezone(tz).date()
+            horizon_dates = {today_local + timedelta(days=i) for i in range(horizon_days)}
+            lesson_at = next_lesson_at(g.weekdays, g.lesson_time, now, tz=tz_name)
+            if lesson_at is None:
                 continue
-            if lesson_at.date() == today:
+            lesson_local_date = lesson_at.astimezone(tz).date()
+            if lesson_local_date not in horizon_dates:
+                continue
+            if lesson_local_date == today_local:
                 when = "сегодня"
-            elif lesson_at.date() == today + timedelta(days=1):
+            elif lesson_local_date == today_local + timedelta(days=1):
                 when = "завтра"
             else:
-                when = f"{format_lesson_at(lesson_at, '%d.%m (%a)')}"
+                when = format_lesson_at(lesson_at, "%d.%m (%a)", tz=tz_name)
             survey = await surveys_svc.find_attendance_survey(s, g.id, lesson_at)
             if survey is None:
                 blocks.append(
@@ -387,6 +402,9 @@ async def cmd_stats(message: Message) -> None:
                     f"📊 <b>{escape(g.name)}</b> — пока нет завершённых опросов"
                 )
                 continue
+            tz_name = (
+                await schools_svc.get_timezone(s, g.school_id) if g.school_id else None
+            )
             lines = [
                 f"📊 <b>{escape(format_group_title(g))}</b> — "
                 f"последние {len(closed)} занятий:"
@@ -397,7 +415,7 @@ async def cmd_stats(message: Message) -> None:
                 summary = await surveys_svc.summarize(s, survey.id)
                 total_yes += summary.yes
                 total_all += summary.total
-                when_str = format_lesson_at(survey.lesson_at, "%d.%m")
+                when_str = format_lesson_at(survey.lesson_at, "%d.%m", tz=tz_name)
                 line = (
                     f"{bar(summary.yes, summary.total)}  "
                     f"{when_str} · обещали {summary.yes}/{summary.total}"
@@ -869,6 +887,10 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
         group_name = format_group_title(group)
         lesson_time = group.lesson_time
         lesson_at = survey.lesson_at
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
 
     if not pending:
         await call.answer("Все уже ответили — пинговать некого", show_alert=True)
@@ -876,8 +898,8 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
 
     text = (
         f"⏰ <b>{escape(group_name)}</b>\n"
-        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m')} в {lesson_time}.\n\n"
-        f"Придёшь?"
+        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz_name)} "
+        f"в {lesson_time}.\n\nПридёшь?"
     )
     sent = 0
     for p in pending:

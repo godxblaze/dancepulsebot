@@ -42,14 +42,20 @@ async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        upcoming = upcoming_lessons(group.weekdays, group.lesson_time, utc_now(), n=5)
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
+        upcoming = upcoming_lessons(
+            group.weekdays, group.lesson_time, utc_now(), n=5, tz=tz_name,
+        )
         if not upcoming:
             await call.answer("Нет ближайших занятий", show_alert=True)
             return
         items: list[tuple[int, str, bool]] = []
         for dt in upcoming:
             cancelled = await cancellations_svc.is_cancelled(s, group.id, dt)
-            label = format_lesson_at(dt, "%d.%m (%a) в %H:%M")
+            label = format_lesson_at(dt, "%d.%m (%a) в %H:%M", tz=tz_name)
             items.append((int(dt.timestamp()), label, cancelled))
         title = format_group_title(group)
     await call.message.edit_text(
@@ -74,8 +80,12 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
             await call.answer("Это занятие уже отменено", show_alert=True)
             return
         title = format_group_title(group)
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
     await call.message.edit_text(
-        f"Отменить занятие «{title}» {format_lesson_at(lesson_at)}?\n\n"
+        f"Отменить занятие «{title}» {format_lesson_at(lesson_at, tz=tz_name)}?\n\n"
         f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
         f"уйдёт уведомление об отмене.",
         reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
@@ -146,11 +156,16 @@ async def _do_cancel_lesson(
     support_tg_ids: list[int] = []
     coadmin_tg_ids: list[int] = []
     title = ""
+    tz_name: str | None = None
     async with session_scope() as s:
         group = await accessible_group(s, group_id, initiator_tg_id)
         if group is None:
             return "Группа не найдена."
         title = format_group_title(group)
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
         await cancellations_svc.cancel(s, group.id, lesson_at, reason=reason)
         if group.school_id is not None:
             all_tgs = await schools_svc.member_tg_ids(s, group.school_id)
@@ -182,14 +197,15 @@ async def _do_cancel_lesson(
                 await s.flush()
 
     reason_suffix = f"\nПричина: {reason}" if reason else ""
-    notice = f"⚠️ Занятие «{title}» {format_lesson_at(lesson_at)} отменено.{reason_suffix}"
+    when_str = format_lesson_at(lesson_at, tz=tz_name)
+    notice = f"⚠️ Занятие «{title}» {when_str} отменено.{reason_suffix}"
     for tg in yes_tg_ids:
         try:
             await bot.send_message(tg, notice)
         except Exception as e:  # noqa: BLE001
             log.info("cancel-notice to %s failed: %s", tg, e)
     sup_notice = (
-        f"⚠️ Помощь на занятии «{title}» {format_lesson_at(lesson_at)} "
+        f"⚠️ Помощь на занятии «{title}» {when_str} "
         f"больше не нужна — занятие отменено.{reason_suffix}"
     )
     for tg in support_tg_ids:
@@ -199,7 +215,7 @@ async def _do_cancel_lesson(
             log.info("cancel-notice (support) to %s failed: %s", tg, e)
 
     coadmin_notice = (
-        f"ℹ️ Занятие «{title}» {format_lesson_at(lesson_at)} отменено "
+        f"ℹ️ Занятие «{title}» {when_str} отменено "
         f"(отменил другой админ школы).{reason_suffix}"
     )
     for tg in coadmin_tg_ids:
@@ -209,7 +225,7 @@ async def _do_cancel_lesson(
             log.info("cancel-notice (coadmin) to %s failed: %s", tg, e)
 
     return (
-        f"🚫 Занятие «{title}» {format_lesson_at(lesson_at)} отменено. "
+        f"🚫 Занятие «{title}» {when_str} отменено. "
         f"Уведомления отправлены ({len(yes_tg_ids)} ученикам, "
         f"{len(support_tg_ids)} саппортам, {len(coadmin_tg_ids)} админам школы)."
     )

@@ -1,26 +1,24 @@
 """Schedule math — no DB, easy to unit-test.
 
-**Timezone convention** (после TZ-рефактора):
+**Timezone convention** (после TZ-рефактора + per-school timezone):
 
 Все datetime в проекте — **aware UTC**. И в БД хранятся как aware UTC.
 Single source of truth — UTC; конвертация в школьный TZ происходит только
-при отображении пользователю через `format_lesson_at()`.
+при отображении пользователю через `format_lesson_at(dt, fmt, tz=...)`.
+
+TZ каждой школы хранится в `School.timezone` (IANA name). Settings.timezone
+оставлен как **fallback** для случаев когда school ещё не загружена (например
+в tick'е до того как известна группа).
 
 API:
-- `utc_now()` — текущее время aware UTC. Используется везде где сравнивается
-  с lesson_at/created_at.
-- `local_now()` — текущее время aware в школьном TZ. Нужно только для
-  weekday/lesson_time-арифметики (определить «какое сейчас число и день
-  недели» с точки зрения школы).
-- `next_lesson_at(weekdays, lesson_time, now_utc)` — следующая дата занятия
-  как aware UTC. Внутри конвертит now в школьный TZ для подсчёта weekday,
-  собирает candidate в школьном TZ, возвращает в UTC.
-- `format_lesson_at(dt_utc, fmt)` — отобразить aware UTC datetime в школьном
-  TZ. Использовать вместо прямого f"{dt:%H:%M}" в любом user-facing тексте.
+- `utc_now()` — текущее время aware UTC.
+- `school_tz_zone(tz_name)` — string → ZoneInfo с fallback на settings.timezone.
+- `format_lesson_at(dt, fmt, tz)` — отобразить aware UTC в указанном TZ.
+- `next_lesson_at(weekdays, lesson_time, now, tz)` — следующая дата с учётом
+  weekday/lesson_time в указанном TZ; возвращает aware UTC.
 
-`weekdays` (например "0,2" = Пн+Ср) и `lesson_time` ("19:00") всегда живут
-в школьном TZ — это часть бизнес-смысла «занятие в Пн в 19:00 по местному».
-Конвертация в UTC происходит на лету при сохранении/чтении lesson_at.
+`weekdays` ("0,2" = Пн+Ср) и `lesson_time` ("19:00") живут в школьном TZ —
+это бизнес-смысл «занятие в Пн в 19:00 по местному».
 """
 from __future__ import annotations
 
@@ -35,22 +33,25 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def local_now() -> datetime:
-    """Текущее время aware в школьном TZ. Используется ТОЛЬКО для расчёта
-    weekday/lesson_time-контекста (в каком сейчас местном дне и часе)."""
-    return datetime.now(ZoneInfo(settings.timezone))
-
-
-def school_tz() -> ZoneInfo:
+def school_tz_zone(tz_name: str | None = None) -> ZoneInfo:
+    """`tz_name` → ZoneInfo. None или невалидный — fallback на
+    settings.timezone (для обратной совместимости со старым кодом)."""
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001
+            pass
     return ZoneInfo(settings.timezone)
 
 
-def format_lesson_at(dt: datetime, fmt: str = "%d.%m в %H:%M") -> str:
-    """Aware UTC → строка в школьном TZ. Если dt naive (legacy данные до
-    миграции) — трактуем как UTC."""
+def format_lesson_at(
+    dt: datetime, fmt: str = "%d.%m в %H:%M", *, tz: str | None = None,
+) -> str:
+    """Aware UTC → строка в указанном TZ школы. Naive datetime трактуется
+    как UTC (legacy fallback). tz=None → settings.timezone."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(school_tz()).strftime(fmt)
+    return dt.astimezone(school_tz_zone(tz)).strftime(fmt)
 
 
 def parse_weekdays(weekdays: str) -> set[int]:
@@ -65,24 +66,28 @@ def format_weekdays(weekdays: str) -> str:
 
 
 def next_lesson_at(
-    weekdays: str, lesson_time: str, now_utc: datetime
+    weekdays: str,
+    lesson_time: str,
+    now_utc: datetime,
+    *,
+    tz: str | None = None,
 ) -> datetime | None:
     """Следующее занятие aware UTC, строго после `now_utc`. None если
-    weekdays пуст. `weekdays`/`lesson_time` живут в школьном TZ."""
+    weekdays пуст. `weekdays`/`lesson_time` живут в школьном TZ (`tz`)."""
     days = parse_weekdays(weekdays)
     if not days:
         return None
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=UTC)
-    tz = school_tz()
-    now_local = now_utc.astimezone(tz)
+    school_tz = school_tz_zone(tz)
+    now_local = now_utc.astimezone(school_tz)
     hour, minute = (int(x) for x in lesson_time.split(":"))
     for offset in range(0, 8):
         day = (now_local + timedelta(days=offset)).date()
         if day.weekday() not in days:
             continue
         candidate_local = datetime(
-            day.year, day.month, day.day, hour, minute, tzinfo=tz,
+            day.year, day.month, day.day, hour, minute, tzinfo=school_tz,
         )
         candidate_utc = candidate_local.astimezone(UTC)
         if candidate_utc > now_utc:
@@ -96,6 +101,8 @@ def upcoming_lessons(
     now_utc: datetime,
     n: int = 5,
     horizon_days: int = 60,
+    *,
+    tz: str | None = None,
 ) -> list[datetime]:
     """До `n` ближайших aware UTC дат после `now_utc`. Пустой список — если
     weekdays пуст или дни не попадают в горизонт."""
@@ -104,8 +111,8 @@ def upcoming_lessons(
         return []
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=UTC)
-    tz = school_tz()
-    now_local = now_utc.astimezone(tz)
+    school_tz = school_tz_zone(tz)
+    now_local = now_utc.astimezone(school_tz)
     hour, minute = (int(x) for x in lesson_time.split(":"))
     result: list[datetime] = []
     for offset in range(0, horizon_days + 1):
@@ -113,7 +120,7 @@ def upcoming_lessons(
         if day.weekday() not in days:
             continue
         candidate_local = datetime(
-            day.year, day.month, day.day, hour, minute, tzinfo=tz,
+            day.year, day.month, day.day, hour, minute, tzinfo=school_tz,
         )
         candidate_utc = candidate_local.astimezone(UTC)
         if candidate_utc > now_utc:

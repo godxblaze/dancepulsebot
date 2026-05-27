@@ -17,6 +17,7 @@ from app.bot.utils import format_group_title
 from app.db.models import Person
 from app.db.session import session_scope
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import format_lesson_at
 
@@ -35,10 +36,14 @@ async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
             return
         surveys = await surveys_svc.recent_closed_surveys(s, group_id, limit=5)
         title = format_group_title(group)
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
     if not surveys:
         await call.answer("Нет прошедших занятий", show_alert=True)
         return
-    items = [(s.id, format_lesson_at(s.lesson_at)) for s in surveys]
+    items = [(s.id, format_lesson_at(s.lesson_at, tz=tz_name)) for s in surveys]
     await call.message.edit_text(
         f"✏️ Какое занятие «{title}» отметить?",
         reply_markup=closed_surveys_keyboard(group_id, items),
@@ -64,8 +69,12 @@ async def _render_attendance_roster(
             for p, r in roster
         ]
         title = format_group_title(group)
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
     head = (
-        f"✏️ «{title}» — {format_lesson_at(survey.lesson_at)}\n"
+        f"✏️ «{title}» — {format_lesson_at(survey.lesson_at, tz=tz_name)}\n"
         f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
         f"В скобках: ✓ обещал, ✗ отказался, — молчал."
     )

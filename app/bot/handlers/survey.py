@@ -11,6 +11,7 @@ from app.db.models import Answer, SurveyStatus
 from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import format_lesson_at
 
@@ -41,8 +42,12 @@ async def on_attendance(call: CallbackQuery) -> None:
         group = await groups_svc.get_group(s, survey.group_id)
         title = format_group_title(group) if group is not None else "занятие"
         lesson_at = survey.lesson_at
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group and group.school_id else None
+        )
 
-    when = f"{format_lesson_at(lesson_at)}"
+    when = format_lesson_at(lesson_at, tz=tz_name)
     text = (
         f"✅ Записал: придёшь на «{title}» {when}."
         if answer == Answer.yes

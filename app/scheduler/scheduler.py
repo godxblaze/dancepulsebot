@@ -31,7 +31,14 @@ from app.services.schedule import format_lesson_at, next_lesson_at, utc_now
 log = logging.getLogger(__name__)
 
 
-async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime) -> None:
+async def _poll_group(
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
+) -> None:
     """Ensure the survey exists, then message everyone who hasn't been polled yet.
 
     Идемпотентно по пере-tick'у: tg_message_id на Response отмечает «опрос отправлен»,
@@ -61,7 +68,7 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime
     place = format_place(group, venue)
     lines = [
         f"💓 <b>{escape(format_group_title(group))}</b>",
-        f"Занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}.",
+        f"Занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}.",
     ]
     if place:
         lines.append(f"📍 {escape(place)}")
@@ -135,10 +142,16 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime
     )
 
 
-def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.SurveySummary) -> str:
+def _format_summary(
+    group: Group,
+    lesson_at: datetime,
+    summary: surveys_svc.SurveySummary,
+    *,
+    tz: str | None = None,
+) -> str:
     lines = [
         f"💓 <b>{escape(group.name)}</b> — итоги опроса",
-        f"занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}",
+        f"занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}",
         "",
         f"придут <b>{summary.yes}/{summary.total}</b>  "
         f"{bar(summary.yes, summary.total)}",
@@ -151,7 +164,12 @@ def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.Surv
 
 
 async def _maybe_send_summary(
-    bot: Bot, group: Group, lesson_at: datetime, now: datetime
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
 ) -> None:
     """Once per lesson, halfway through the poll window, send every admin of the
     group the same auto-summary. mark_summary_sent ставится только после хотя бы
@@ -171,7 +189,7 @@ async def _maybe_send_summary(
 
     if not admin_tg_ids:
         return
-    text = _format_summary(group, lesson_at, summary)
+    text = _format_summary(group, lesson_at, summary, tz=tz)
     markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
     delivered = 0
     terminal = 0
@@ -200,7 +218,12 @@ def _gender_plural(gender: Gender) -> str:
 
 
 async def _maybe_recruit(
-    bot: Bot, group: Group, lesson_at: datetime, now: datetime
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
 ) -> None:
     """На отсечке считаем баланс пола; если перекос — спрашиваем owner'а школы
     «добрать саппортов?». Одно решение на занятие."""
@@ -247,7 +270,7 @@ async def _maybe_recruit(
     total_pairs = male + female
     head_lines = [
         f"🆘 <b>{escape(format_group_title(group))}</b> · "
-        f"{format_lesson_at(lesson_at, '%d.%m')} {group.lesson_time}",
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} {group.lesson_time}",
     ]
     place = format_place(group, venue)
     if place:
@@ -278,7 +301,12 @@ async def _maybe_recruit(
 
 
 async def _maybe_remind(
-    bot: Bot, group: Group, lesson_at: datetime, now: datetime
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
 ) -> None:
     """Auto-reminder не-ответившим: за 4ч и за 1ч до занятия отдельные пинги.
 
@@ -310,7 +338,7 @@ async def _maybe_remind(
     place = format_place(group, venue)
     lines = [
         f"⏰ <b>{escape(format_group_title(group))}</b>",
-        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}.",
+        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}.",
     ]
     if place:
         lines.append(f"📍 {escape(place)}")
@@ -407,9 +435,18 @@ async def tick(bot: Bot) -> None:
 
     async with session_scope() as s:
         groups = await groups_svc.active_groups(s)
+        # Кэш tz по school_id чтобы не запрашивать School для каждой группы
+        # отдельно (за tick может быть много групп одной школы).
+        tz_cache: dict[int, str] = {}
+        for group in groups:
+            if group.school_id is not None and group.school_id not in tz_cache:
+                tz_cache[group.school_id] = await schools_svc.get_timezone(
+                    s, group.school_id
+                )
 
     for group in groups:
-        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, now)
+        tz = tz_cache.get(group.school_id) if group.school_id else None
+        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, now, tz=tz)
         if lesson_at is None:
             continue
         hours_until = (lesson_at - now).total_seconds() / 3600
@@ -417,10 +454,10 @@ async def tick(bot: Bot) -> None:
             async with session_scope() as s:
                 if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                     continue
-            await _poll_group(bot, group, lesson_at, now)
-            await _maybe_send_summary(bot, group, lesson_at, now)
-            await _maybe_remind(bot, group, lesson_at, now)
-            await _maybe_recruit(bot, group, lesson_at, now)
+            await _poll_group(bot, group, lesson_at, now, tz=tz)
+            await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
+            await _maybe_remind(bot, group, lesson_at, now, tz=tz)
+            await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
 
 
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:

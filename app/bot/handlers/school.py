@@ -17,6 +17,7 @@ from app.bot.dialogs import RenameSchoolSG
 from app.bot.handlers._access import demote_to_student_if_empty
 from app.bot.keyboards import (
     MENU_SCHOOL,
+    TZ_OPTIONS,
     admin_menu_keyboard,
     confirm_school_delete_keyboard,
     confirm_school_leave_keyboard,
@@ -24,6 +25,7 @@ from app.bot.keyboards import (
     school_card_keyboard,
     school_config_keyboard,
     school_picker_keyboard,
+    school_tz_keyboard,
 )
 from app.bot.utils import get_bot_username
 from app.core.config import settings
@@ -204,6 +206,63 @@ async def _render_school_config(call: CallbackQuery, school_id: int) -> None:
             parse_mode=ParseMode.HTML,
             reply_markup=school_config_keyboard(school_id, threshold, cutoff),
         )
+
+
+async def _render_school_tz(call: CallbackQuery, school_id: int) -> None:
+    async with session_scope() as s:
+        current = await schools_svc.get_timezone(s, school_id)
+        school = await schools_svc.get_school(s, school_id)
+        school_name = school.name if school else "—"
+    label_map = dict(TZ_OPTIONS)
+    current_label = label_map.get(current, current)
+    text = (
+        f"🌐 <b>Часовой пояс школы «{escape(school_name)}»</b>\n\n"
+        f"Сейчас: <b>{escape(current_label)}</b>\n\n"
+        "Расписание (Пн/Вт/19:00) и отображение всех времён — в этом TZ. "
+        "Тап чтобы сменить."
+    )
+    if call.message:
+        await call.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=school_tz_keyboard(school_id, current),
+        )
+
+
+@router.callback_query(F.data.startswith("schtz:"))
+async def cb_school_tz(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может менять TZ", show_alert=True)
+            return
+    await _render_school_tz(call, school_id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schtzset:"))
+async def cb_school_tz_set(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":", 2)
+    school_id = int(parts[1])
+    tz_name = parts[2]
+    # Проверяем что tz_name в whitelist'е TZ_OPTIONS — пользователь не должен
+    # подсунуть произвольный callback с битым TZ.
+    if tz_name not in dict(TZ_OPTIONS):
+        await call.answer()
+        return
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner может менять TZ", show_alert=True)
+            return
+        current = await schools_svc.get_timezone(s, school_id)
+        if current == tz_name:
+            await call.answer("Уже выбрано")
+            return
+        await schools_svc.set_timezone(s, school_id, tz_name)
+    await _render_school_tz(call, school_id)
+    await call.answer(f"TZ: {tz_name}")
 
 
 @router.callback_query(F.data.startswith("schcfg:"))

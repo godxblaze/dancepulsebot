@@ -120,10 +120,14 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
         teachers_note = group.teachers_note
         lesson_time = group.lesson_time
         lesson_at = survey.lesson_at
+        tz_name = (
+            await schools_svc.get_timezone(s, group.school_id)
+            if group.school_id else None
+        )
 
     text_lines = [
         "🆘 Нужна помощь!",
-        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m')} в {lesson_time}.",
+        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m', tz=tz_name)} в {lesson_time}.",
     ]
     if place:
         text_lines.append(f"📍 {place}")
@@ -169,8 +173,9 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         title = format_group_title(group)
         group_name = group.name
         lesson_at = survey.lesson_at
+        tz_name = await schools_svc.get_timezone(s, group.school_id)
 
-    when = f"{format_lesson_at(lesson_at)}"
+    when = format_lesson_at(lesson_at, tz=tz_name)
     if not accepted:
         existing = await _is_already_claimed(call_id, person.id)
         if existing:
@@ -226,7 +231,8 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
         )
         if group is not None and survey is not None and group.school_id is not None:
             title = format_group_title(group)
-            when = f"{format_lesson_at(survey.lesson_at)}"
+            tz_name = await schools_svc.get_timezone(s, group.school_id)
+            when = format_lesson_at(survey.lesson_at, tz=tz_name)
             group_name = group.name
             person = await persons_svc.get_person(
                 s, group.school_id, call.from_user.id

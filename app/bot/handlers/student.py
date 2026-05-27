@@ -179,12 +179,15 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await _notify_admin(bot, group, name, person_id)
 
 
-def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:
-    """The soonest upcoming lesson across the given groups."""
+def _nearest_lesson(
+    groups: list[Group], tz_map: dict[int, str]
+) -> tuple[Group, datetime] | None:
+    """The soonest upcoming lesson across the given groups. tz_map: school_id → tz."""
     now = utc_now()
     best: tuple[Group, datetime] | None = None
     for g in groups:
-        dt = next_lesson_at(g.weekdays, g.lesson_time, now)
+        tz_name = tz_map.get(g.school_id) if g.school_id else None
+        dt = next_lesson_at(g.weekdays, g.lesson_time, now, tz=tz_name)
         if dt is not None and (best is None or dt < best[1]):
             best = (g, dt)
     return best
@@ -215,6 +218,10 @@ async def show_student_home(message: Message) -> None:
             return
         groups = await persons_svc.person_groups(s, person.id)
         name = person.full_name
+        tz_map: dict[int, str] = {}
+        for g in groups:
+            if g.school_id is not None and g.school_id not in tz_map:
+                tz_map[g.school_id] = await schools_svc.get_timezone(s, g.school_id)
 
     lines = [f"👋 Привет, {name}!"]
     if groups:
@@ -224,12 +231,13 @@ async def show_student_home(message: Message) -> None:
                 f"• «{format_group_title(g)}» — "
                 f"{format_weekdays(g.weekdays)} в {g.lesson_time}"
             )
-        nearest = _nearest_lesson(groups)
+        nearest = _nearest_lesson(groups, tz_map)
         if nearest is not None:
             g, dt = nearest
+            tz_name = tz_map.get(g.school_id) if g.school_id else None
             lines.append(
                 f"\n📅 Ближайшее: «{format_group_title(g)}» — "
-                f"{format_lesson_at(dt, '%d.%m в %H:%M')}"
+                f"{format_lesson_at(dt, '%d.%m в %H:%M', tz=tz_name)}"
             )
     else:
         lines.append("\nТы пока не записан ни в одну группу.")
@@ -251,17 +259,28 @@ async def show_student_today(message: Message) -> None:
             )
             return
         groups = await persons_svc.person_groups(s, person.id)
+        tz_map: dict[int, str] = {}
+        for g in groups:
+            if g.school_id is not None and g.school_id not in tz_map:
+                tz_map[g.school_id] = await schools_svc.get_timezone(s, g.school_id)
+
+    from app.services.schedule import school_tz_zone
 
     now = utc_now()
-    today = now.date()
-    tomorrow_d = (now + timedelta(days=1)).date()
     blocks: list[str] = []
     async with session_scope() as s:
         for g in groups:
-            dt = next_lesson_at(g.weekdays, g.lesson_time, now)
-            if dt is None or dt.date() not in (today, tomorrow_d):
+            tz_name = tz_map.get(g.school_id) if g.school_id else None
+            tz = school_tz_zone(tz_name)
+            today_local = now.astimezone(tz).date()
+            tomorrow_local = today_local + timedelta(days=1)
+            dt = next_lesson_at(g.weekdays, g.lesson_time, now, tz=tz_name)
+            if dt is None:
                 continue
-            when = "сегодня" if dt.date() == today else "завтра"
+            dt_local_date = dt.astimezone(tz).date()
+            if dt_local_date not in (today_local, tomorrow_local):
+                continue
+            when = "сегодня" if dt_local_date == today_local else "завтра"
             line = f"👯 «{format_group_title(g)}» — {when} в {g.lesson_time}"
             venue = (
                 await venues_svc.get_venue(s, g.venue_id)

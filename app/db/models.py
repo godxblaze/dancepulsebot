@@ -91,6 +91,10 @@ class School(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
+    # IANA timezone name (Europe/Moscow, America/New_York, …). Все lesson_at
+    # хранятся как aware UTC; конвертация в этот TZ — при отображении и при
+    # расчёте «занятие в Пн в 19:00 местного времени».
+    timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

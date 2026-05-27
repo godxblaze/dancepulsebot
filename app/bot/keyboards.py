@@ -214,8 +214,8 @@ def confirm_cancel_lesson_keyboard(group_id: int, ts: int) -> InlineKeyboardMark
 def school_card_keyboard(
     school_id: int, is_owner: bool, multi_school: bool = False
 ) -> InlineKeyboardMarkup:
-    """Карточка школы. Owner видит больше (пригласить, переименовать, настройки,
-    удалить); co-admin — только посмотреть состав и выйти."""
+    """Карточка школы. Owner видит больше (пригласить, настройки, переименовать,
+    timezone, удалить); co-admin — только посмотреть состав и выйти."""
     rows: list[list[InlineKeyboardButton]] = []
     if is_owner:
         rows.append([InlineKeyboardButton(
@@ -223,6 +223,9 @@ def school_card_keyboard(
         )])
         rows.append([InlineKeyboardButton(
             text="⚙ Настройки автодобора", callback_data=f"schcfg:{school_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="🌐 Часовой пояс", callback_data=f"schtz:{school_id}",
         )])
         rows.append([InlineKeyboardButton(
             text="✏️ Переименовать школу", callback_data=f"schren:{school_id}",
@@ -238,6 +241,41 @@ def school_card_keyboard(
         rows.append([InlineKeyboardButton(
             text="◀ К списку школ", callback_data="schlist",
         )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Фиксированный список IANA таймзон в picker'е. 12 наиболее популярных:
+# Москва + EU (LON/MAD/BER/LIS/PAR/KYIV/IST), США (NY/LA), Латам/JP,
+# Россия-Сибирь (Yekaterinburg, Novosibirsk). Свободный ввод не предлагаем —
+# валидировать руками рискованно.
+TZ_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Europe/Moscow", "🇷🇺 Москва (UTC+3)"),
+    ("Europe/Kyiv", "🇺🇦 Киев (UTC+2/+3)"),
+    ("Europe/Berlin", "🇩🇪 Берлин (UTC+1/+2)"),
+    ("Europe/Madrid", "🇪🇸 Мадрид (UTC+1/+2)"),
+    ("Europe/Lisbon", "🇵🇹 Лиссабон (UTC+0/+1)"),
+    ("Europe/London", "🇬🇧 Лондон (UTC+0/+1)"),
+    ("Europe/Istanbul", "🇹🇷 Стамбул (UTC+3)"),
+    ("Asia/Tbilisi", "🇬🇪 Тбилиси (UTC+4)"),
+    ("Asia/Yerevan", "🇦🇲 Ереван (UTC+4)"),
+    ("Asia/Almaty", "🇰🇿 Алматы (UTC+5/+6)"),
+    ("America/New_York", "🇺🇸 Нью-Йорк (UTC-5/-4)"),
+    ("America/Los_Angeles", "🇺🇸 Лос-Анджелес (UTC-8/-7)"),
+)
+
+
+def school_tz_keyboard(school_id: int, current: str) -> InlineKeyboardMarkup:
+    """Picker таймзоны школы. Текущая помечена ✅."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for tz_name, label in TZ_OPTIONS:
+        mark = "✅ " if tz_name == current else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{label}",
+            callback_data=f"schtzset:{school_id}:{tz_name}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="◀ К школе", callback_data=f"schcard:{school_id}",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

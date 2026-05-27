@@ -114,6 +114,25 @@ async def rename_school(
         await session.flush()
 
 
+async def set_timezone(
+    session: AsyncSession, school_id: int, tz_name: str
+) -> None:
+    """Меняет IANA timezone школы. Валидность tz_name проверяется на стороне
+    вызывающего (UI-picker предлагает фиксированный список)."""
+    school = await session.get(School, school_id)
+    if school is not None:
+        school.timezone = tz_name
+        await session.flush()
+
+
+async def get_timezone(session: AsyncSession, school_id: int) -> str:
+    """Имя TZ школы, или 'Europe/Moscow' если школа не найдена."""
+    school = await session.get(School, school_id)
+    if school is None:
+        return "Europe/Moscow"
+    return school.timezone or "Europe/Moscow"
+
+
 async def delete_school(session: AsyncSession, school: School) -> None:
     """ON DELETE CASCADE снесёт members/invites/groups/persons/venues."""
     await session.delete(school)

@@ -1,6 +1,7 @@
 """Tests for teacher commands and the new-group wizard."""
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -91,12 +92,22 @@ class FakeFSM:
         self.data = {}
 
 
+_MSK = ZoneInfo("Europe/Moscow")
+
+
+def _msk(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    """Aware UTC datetime от человекочитаемого МСК-времени."""
+    return datetime(year, month, day, hour, minute, tzinfo=_MSK).astimezone(UTC)
+
+
 @pytest.fixture
 def freeze_today(monkeypatch):
-    """Pin the clock used by /today."""
+    """Pin the clock used by /today. Naive datetime трактуется как МСК."""
 
     def _set(dt: datetime) -> None:
-        monkeypatch.setattr("app.bot.handlers.admin.local_now", lambda: dt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_MSK).astimezone(UTC)
+        monkeypatch.setattr("app.bot.handlers.admin.utc_now", lambda: dt)
 
     return _set
 
@@ -138,7 +149,7 @@ async def test_today_lesson_today_with_survey(db, freeze_today) -> None:
         g = await groups.create_group(s, t.id, "Хип-хоп", "0", "19:00", 18)
         p, _ = await persons.add_to_group(s, g, 50, "u", "Ученик")
         survey, _ = await surveys.get_or_create_survey(
-            s, g.id, SurveyKind.attendance, datetime(2026, 5, 25, 19, 0)
+            s, g.id, SurveyKind.attendance, _msk(2026, 5, 25, 19, 0),
         )
         await surveys.ensure_responses(s, survey.id, [p.id])
         await surveys.record_answer(s, survey.id, p.id, Answer.yes)

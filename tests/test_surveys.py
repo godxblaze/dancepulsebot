@@ -1,11 +1,13 @@
 """Integration test of the core attendance-survey flow."""
-from datetime import datetime
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from app.db.models import Answer, SurveyKind
 from app.db.session import session_scope
 from app.services import admins, groups, persons, surveys
 
-LESSON = datetime(2026, 5, 25, 19, 0)
+_MSK = ZoneInfo("Europe/Moscow")
+LESSON = datetime(2026, 5, 25, 19, 0, tzinfo=_MSK).astimezone(UTC)
 
 
 async def _setup_group() -> tuple[int, list[int]]:

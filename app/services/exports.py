@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Group, Membership, Person, Response, Survey
+from app.services.schedule import format_lesson_at
 
 
 def _csv_bytes(rows: list[list[str]], header: list[str]) -> bytes:
@@ -72,7 +73,7 @@ async def attendance_csv(session: AsyncSession, school_id: int) -> bytes:
     ).all():
         rows.append([
             group_name,
-            f"{lesson_at:%Y-%m-%d %H:%M}",
+            f"{format_lesson_at(lesson_at, '%Y-%m-%d %H:%M')}",
             status.value if hasattr(status, "value") else str(status),
             person_name,
             answer.value if answer else "",

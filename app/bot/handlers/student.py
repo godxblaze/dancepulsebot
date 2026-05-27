@@ -28,7 +28,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
 from app.services import venues as venues_svc
-from app.services.schedule import format_weekdays, local_now, next_lesson_at
+from app.services.schedule import format_lesson_at, format_weekdays, next_lesson_at, utc_now
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -181,7 +181,7 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
 
 def _nearest_lesson(groups: list[Group]) -> tuple[Group, datetime] | None:
     """The soonest upcoming lesson across the given groups."""
-    now = local_now()
+    now = utc_now()
     best: tuple[Group, datetime] | None = None
     for g in groups:
         dt = next_lesson_at(g.weekdays, g.lesson_time, now)
@@ -229,7 +229,7 @@ async def show_student_home(message: Message) -> None:
             g, dt = nearest
             lines.append(
                 f"\n📅 Ближайшее: «{format_group_title(g)}» — "
-                f"{dt:%d.%m} в {dt:%H:%M}"
+                f"{format_lesson_at(dt, '%d.%m в %H:%M')}"
             )
     else:
         lines.append("\nТы пока не записан ни в одну группу.")
@@ -252,7 +252,7 @@ async def show_student_today(message: Message) -> None:
             return
         groups = await persons_svc.person_groups(s, person.id)
 
-    now = local_now()
+    now = utc_now()
     today = now.date()
     tomorrow_d = (now + timedelta(days=1)).date()
     blocks: list[str] = []

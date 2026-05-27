@@ -19,6 +19,7 @@ from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
+from app.services.schedule import format_lesson_at
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -122,7 +123,7 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
 
     text_lines = [
         "🆘 Нужна помощь!",
-        f"«{title}» — {lesson_at:%d.%m} в {lesson_time}.",
+        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m')} в {lesson_time}.",
     ]
     if place:
         text_lines.append(f"📍 {place}")
@@ -169,7 +170,7 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         group_name = group.name
         lesson_at = survey.lesson_at
 
-    when = f"{lesson_at:%d.%m в %H:%M}"
+    when = f"{format_lesson_at(lesson_at)}"
     if not accepted:
         existing = await _is_already_claimed(call_id, person.id)
         if existing:
@@ -225,7 +226,7 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
         )
         if group is not None and survey is not None and group.school_id is not None:
             title = format_group_title(group)
-            when = f"{survey.lesson_at:%d.%m в %H:%M}"
+            when = f"{format_lesson_at(survey.lesson_at)}"
             group_name = group.name
             person = await persons_svc.get_person(
                 s, group.school_id, call.from_user.id

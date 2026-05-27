@@ -18,7 +18,7 @@ from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
-from app.services.schedule import local_now, upcoming_lessons
+from app.services.schedule import upcoming_lessons, utc_now
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ async def group_card_extras(session, group: Group) -> tuple[bool, bool]:
     """(has_upcoming, has_closed_surveys) — для скрытия мёртвых кнопок
     в group_actions_keyboard."""
     has_upcoming = bool(
-        upcoming_lessons(group.weekdays, group.lesson_time, local_now(), n=1)
+        upcoming_lessons(group.weekdays, group.lesson_time, utc_now(), n=1)
     )
     closed = await surveys_svc.recent_closed_surveys(session, group.id, limit=1)
     return has_upcoming, bool(closed)

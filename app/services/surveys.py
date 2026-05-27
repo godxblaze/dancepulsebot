@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,7 +94,7 @@ async def record_answer(
         resp = Response(survey_id=survey_id, person_id=person_id)
         session.add(resp)
     resp.answer = answer
-    resp.answered_at = datetime.now()
+    resp.answered_at = datetime.now(UTC)
     await session.flush()
 
 

@@ -26,7 +26,7 @@ from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
-from app.services.schedule import local_now, next_lesson_at
+from app.services.schedule import format_lesson_at, next_lesson_at, utc_now
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime
     place = format_place(group, venue)
     lines = [
         f"💓 <b>{escape(format_group_title(group))}</b>",
-        f"Занятие {lesson_at:%d.%m} в {group.lesson_time}.",
+        f"Занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}.",
     ]
     if place:
         lines.append(f"📍 {escape(place)}")
@@ -138,7 +138,7 @@ async def _poll_group(bot: Bot, group: Group, lesson_at: datetime, now: datetime
 def _format_summary(group: Group, lesson_at: datetime, summary: surveys_svc.SurveySummary) -> str:
     lines = [
         f"💓 <b>{escape(group.name)}</b> — итоги опроса",
-        f"занятие {lesson_at:%d.%m} в {group.lesson_time}",
+        f"занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}",
         "",
         f"придут <b>{summary.yes}/{summary.total}</b>  "
         f"{bar(summary.yes, summary.total)}",
@@ -247,7 +247,7 @@ async def _maybe_recruit(
     total_pairs = male + female
     head_lines = [
         f"🆘 <b>{escape(format_group_title(group))}</b> · "
-        f"{lesson_at:%d.%m} {group.lesson_time}",
+        f"{format_lesson_at(lesson_at, '%d.%m')} {group.lesson_time}",
     ]
     place = format_place(group, venue)
     if place:
@@ -310,7 +310,7 @@ async def _maybe_remind(
     place = format_place(group, venue)
     lines = [
         f"⏰ <b>{escape(format_group_title(group))}</b>",
-        f"Напоминаю: занятие {lesson_at:%d.%m} в {group.lesson_time}.",
+        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m')} в {group.lesson_time}.",
     ]
     if place:
         lines.append(f"📍 {escape(place)}")
@@ -397,7 +397,7 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
 
 async def tick(bot: Bot) -> None:
     """Runs every 15 min: close past surveys, send polls, auto-summaries and recruit."""
-    now = local_now()
+    now = utc_now()
     async with session_scope() as s:
         closed = await surveys_svc.close_past_surveys(s, now)
     if closed:

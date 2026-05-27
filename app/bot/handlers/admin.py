@@ -62,9 +62,10 @@ from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
 from app.services.schedule import (
+    format_lesson_at,
     format_weekdays,
-    local_now,
     next_lesson_at,
+    utc_now,
 )
 
 log = logging.getLogger(__name__)
@@ -289,7 +290,7 @@ async def cb_today_switch(call: CallbackQuery) -> None:
 
 async def _build_today_view(teacher_id: int, span: str):
     """Возвращает (text, markup) для /today. span ∈ {'day', 'week'}."""
-    now = local_now()
+    now = utc_now()
     today = now.date()
     horizon_days = 7 if span == "week" else 2  # day → today+tomorrow, week → 7 дней вперёд
     horizon_dates = {(today + timedelta(days=i)) for i in range(horizon_days)}
@@ -307,7 +308,7 @@ async def _build_today_view(teacher_id: int, span: str):
             elif lesson_at.date() == today + timedelta(days=1):
                 when = "завтра"
             else:
-                when = f"{lesson_at:%d.%m (%a)}"
+                when = f"{format_lesson_at(lesson_at, '%d.%m (%a)')}"
             survey = await surveys_svc.find_attendance_survey(s, g.id, lesson_at)
             if survey is None:
                 blocks.append(
@@ -377,7 +378,7 @@ async def cmd_stats(message: Message) -> None:
             await message.answer("У тебя пока нет групп. Создай первую: /newgroup")
             return
         top_helpers = await _top_supports_for(s, teacher, limit=3)
-        four_weeks_ago = local_now() - timedelta(weeks=4)
+        four_weeks_ago = utc_now() - timedelta(weeks=4)
         absent = await _long_absent_for(s, teacher, four_weeks_ago)
         for g in groups:
             closed = await surveys_svc.recent_closed_surveys(s, g.id, limit=5)
@@ -396,9 +397,10 @@ async def cmd_stats(message: Message) -> None:
                 summary = await surveys_svc.summarize(s, survey.id)
                 total_yes += summary.yes
                 total_all += summary.total
+                when_str = format_lesson_at(survey.lesson_at, "%d.%m")
                 line = (
                     f"{bar(summary.yes, summary.total)}  "
-                    f"{survey.lesson_at:%d.%m} · обещали {summary.yes}/{summary.total}"
+                    f"{when_str} · обещали {summary.yes}/{summary.total}"
                 )
                 if summary.actual_attended is not None:
                     # «обещали M → пришли N (no-show: K)»
@@ -874,7 +876,7 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
 
     text = (
         f"⏰ <b>{escape(group_name)}</b>\n"
-        f"Напоминаю: занятие {lesson_at:%d.%m} в {lesson_time}.\n\n"
+        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m')} в {lesson_time}.\n\n"
         f"Придёшь?"
     )
     sent = 0

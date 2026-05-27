@@ -1,6 +1,7 @@
 """Tests for support recruitment — deficit detection, the picker, claims."""
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from app.bot.handlers.recruit import (
     cb_support_join,
@@ -14,7 +15,8 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons, supports, surveys
 
-LESSON = datetime(2026, 5, 25, 19, 0)
+_MSK = ZoneInfo("Europe/Moscow")
+LESSON = datetime(2026, 5, 25, 19, 0, tzinfo=_MSK).astimezone(UTC)
 
 
 class FakeCbMessage:

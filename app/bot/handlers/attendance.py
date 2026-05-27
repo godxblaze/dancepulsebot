@@ -18,6 +18,7 @@ from app.db.models import Person
 from app.db.session import session_scope
 from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
+from app.services.schedule import format_lesson_at
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -37,7 +38,7 @@ async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
     if not surveys:
         await call.answer("Нет прошедших занятий", show_alert=True)
         return
-    items = [(s.id, s.lesson_at.strftime("%d.%m в %H:%M")) for s in surveys]
+    items = [(s.id, format_lesson_at(s.lesson_at)) for s in surveys]
     await call.message.edit_text(
         f"✏️ Какое занятие «{title}» отметить?",
         reply_markup=closed_surveys_keyboard(group_id, items),
@@ -64,7 +65,7 @@ async def _render_attendance_roster(
         ]
         title = format_group_title(group)
     head = (
-        f"✏️ «{title}» — {survey.lesson_at:%d.%m в %H:%M}\n"
+        f"✏️ «{title}» — {format_lesson_at(survey.lesson_at)}\n"
         f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
         f"В скобках: ✓ обещал, ✗ отказался, — молчал."
     )

@@ -5,8 +5,9 @@ If this passes, the recruit flow works without a single human click in TG.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from app.bot.handlers.pool import cb_pool_toggle
 from app.bot.handlers.recruit import (
@@ -34,7 +35,8 @@ from tests._fakes import (
     fake_user,
 )
 
-LESSON = datetime(2026, 6, 1, 19, 0)  # Monday 19:00
+_MSK = ZoneInfo("Europe/Moscow")
+LESSON = datetime(2026, 6, 1, 19, 0, tzinfo=_MSK).astimezone(UTC)  # Monday 19:00
 TEACHER_TG = 100
 
 

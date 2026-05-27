@@ -1,6 +1,7 @@
 """Integration tests for the attendance scheduler tick."""
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,7 +10,18 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons, surveys
 
-MONDAY_LESSON = datetime(2026, 5, 25, 19, 0)
+# Школа в Europe/Moscow (UTC+3). Тесты пишут датавремя в местном
+# восприятии «19:00 в понедельник в Москве», а в БД и сравнениях оно живёт
+# как aware UTC = 16:00.
+_MSK = ZoneInfo("Europe/Moscow")
+
+
+def _msk(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    """Aware UTC datetime от человекочитаемого МСК-времени."""
+    return datetime(year, month, day, hour, minute, tzinfo=_MSK).astimezone(UTC)
+
+
+MONDAY_LESSON = _msk(2026, 5, 25, 19, 0)
 
 
 class FakeBot:
@@ -30,10 +42,14 @@ class FakeBot:
 
 @pytest.fixture
 def freeze(monkeypatch):
-    """Pin the scheduler's clock so tick() is deterministic."""
+    """Pin the scheduler's clock so tick() is deterministic. Принимает datetime
+    в любом виде: aware → используется как есть, naive → считаем что это МСК
+    и конвертим в UTC."""
 
     def _set(dt: datetime) -> None:
-        monkeypatch.setattr(sched, "local_now", lambda: dt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_MSK).astimezone(UTC)
+        monkeypatch.setattr(sched, "utc_now", lambda: dt)
 
     return _set
 

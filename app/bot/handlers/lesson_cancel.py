@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -27,7 +27,7 @@ from app.services import cancellations as cancellations_svc
 from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services.schedule import local_now, upcoming_lessons
+from app.services.schedule import format_lesson_at, upcoming_lessons, utc_now
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -42,14 +42,15 @@ async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        upcoming = upcoming_lessons(group.weekdays, group.lesson_time, local_now(), n=5)
+        upcoming = upcoming_lessons(group.weekdays, group.lesson_time, utc_now(), n=5)
         if not upcoming:
             await call.answer("Нет ближайших занятий", show_alert=True)
             return
         items: list[tuple[int, str, bool]] = []
         for dt in upcoming:
             cancelled = await cancellations_svc.is_cancelled(s, group.id, dt)
-            items.append((int(dt.timestamp()), f"{dt:%d.%m (%a) в %H:%M}", cancelled))
+            label = format_lesson_at(dt, "%d.%m (%a) в %H:%M")
+            items.append((int(dt.timestamp()), label, cancelled))
         title = format_group_title(group)
     await call.message.edit_text(
         f"Отменить какое занятие «{title}»?",
@@ -63,7 +64,7 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
     """Шаг 2: confirmation выбранной даты."""
     parts = (call.data or "").split(":")
     group_id, ts = int(parts[1]), int(parts[2])
-    lesson_at = datetime.fromtimestamp(ts)
+    lesson_at = datetime.fromtimestamp(ts, UTC)
     async with session_scope() as s:
         group = await accessible_group(s, group_id, call.from_user.id)
         if group is None:
@@ -74,7 +75,7 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
             return
         title = format_group_title(group)
     await call.message.edit_text(
-        f"Отменить занятие «{title}» {lesson_at:%d.%m в %H:%M}?\n\n"
+        f"Отменить занятие «{title}» {format_lesson_at(lesson_at)}?\n\n"
         f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
         f"уйдёт уведомление об отмене.",
         reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
@@ -140,7 +141,7 @@ async def _do_cancel_lesson(
 ) -> str:
     """Пишет cancellation, закрывает survey/support, шлёт уведомления.
     Возвращает текст итоговой сводки для отправителя."""
-    lesson_at = datetime.fromtimestamp(ts)
+    lesson_at = datetime.fromtimestamp(ts, UTC)
     yes_tg_ids: list[int] = []
     support_tg_ids: list[int] = []
     coadmin_tg_ids: list[int] = []
@@ -181,14 +182,14 @@ async def _do_cancel_lesson(
                 await s.flush()
 
     reason_suffix = f"\nПричина: {reason}" if reason else ""
-    notice = f"⚠️ Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено.{reason_suffix}"
+    notice = f"⚠️ Занятие «{title}» {format_lesson_at(lesson_at)} отменено.{reason_suffix}"
     for tg in yes_tg_ids:
         try:
             await bot.send_message(tg, notice)
         except Exception as e:  # noqa: BLE001
             log.info("cancel-notice to %s failed: %s", tg, e)
     sup_notice = (
-        f"⚠️ Помощь на занятии «{title}» {lesson_at:%d.%m в %H:%M} "
+        f"⚠️ Помощь на занятии «{title}» {format_lesson_at(lesson_at)} "
         f"больше не нужна — занятие отменено.{reason_suffix}"
     )
     for tg in support_tg_ids:
@@ -198,7 +199,7 @@ async def _do_cancel_lesson(
             log.info("cancel-notice (support) to %s failed: %s", tg, e)
 
     coadmin_notice = (
-        f"ℹ️ Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено "
+        f"ℹ️ Занятие «{title}» {format_lesson_at(lesson_at)} отменено "
         f"(отменил другой админ школы).{reason_suffix}"
     )
     for tg in coadmin_tg_ids:
@@ -208,7 +209,7 @@ async def _do_cancel_lesson(
             log.info("cancel-notice (coadmin) to %s failed: %s", tg, e)
 
     return (
-        f"🚫 Занятие «{title}» {lesson_at:%d.%m в %H:%M} отменено. "
+        f"🚫 Занятие «{title}» {format_lesson_at(lesson_at)} отменено. "
         f"Уведомления отправлены ({len(yes_tg_ids)} ученикам, "
         f"{len(support_tg_ids)} саппортам, {len(coadmin_tg_ids)} админам школы)."
     )

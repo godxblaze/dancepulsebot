@@ -2,8 +2,9 @@
 handlers and the real SQLite. Each test drives one user-visible flow."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from app.bot.handlers.admin import (
     cb_group_delete,
@@ -49,7 +50,8 @@ from tests._fakes import (
     fake_user,
 )
 
-LESSON = datetime(2026, 6, 1, 19, 0)  # Monday 19:00
+_MSK = ZoneInfo("Europe/Moscow")
+LESSON = datetime(2026, 6, 1, 19, 0, tzinfo=_MSK).astimezone(UTC)  # Monday 19:00
 TEACHER_TG = 100
 
 
@@ -282,7 +284,7 @@ async def test_poll_mixed_answers(db, monkeypatch) -> None:
 
     # /today — pin clock to "today is Monday, lesson today"
     monkeypatch.setattr(
-        "app.bot.handlers.admin.local_now",
+        "app.bot.handlers.admin.utc_now",
         lambda: LESSON - timedelta(hours=4),
     )
     today_msg = FakeMessage(fake_user(TEACHER_TG, full_name="Препод"), bot=bot)
@@ -747,7 +749,7 @@ async def test_full_tick(db, monkeypatch) -> None:
 
     # Pin the scheduler clock: 2h before lesson (after cutoff=6h, well past half-window)
     pinned_now = LESSON - timedelta(hours=2)
-    monkeypatch.setattr(sched_module, "local_now", lambda: pinned_now)
+    monkeypatch.setattr(sched_module, "utc_now", lambda: pinned_now)
 
     # Each student should answer "yes" BEFORE the tick — but the tick is what
     # creates the survey. So: tick #1 sends polls, then students answer, then tick #2

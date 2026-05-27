@@ -176,7 +176,7 @@ class LessonCancellation(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
-    lesson_at: Mapped[datetime] = mapped_column(DateTime)
+    lesson_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -228,7 +228,7 @@ class Survey(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
     kind: Mapped[SurveyKind] = mapped_column(Enum(SurveyKind, name="survey_kind"))
-    lesson_at: Mapped[datetime] = mapped_column(DateTime)
+    lesson_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[SurveyStatus] = mapped_column(
         Enum(SurveyStatus, name="survey_status"), default=SurveyStatus.open
     )

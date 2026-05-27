@@ -112,6 +112,39 @@ async def _backfill_schools(conn) -> None:
     ))
 
 
+async def _migrate_lesson_at_to_utc(conn) -> None:
+    """TZ-рефактор: до него `Survey.lesson_at` и `LessonCancellation.lesson_at`
+    хранились как naive local (Europe/Moscow). После — aware UTC. Сдвиг
+    выполняем однократно: для каждой строки без 'T' и без '+'/'Z' в text-
+    представлении датавремени делаем `dt = naive_local.astimezone(UTC)` и
+    переписываем. Идемпотентно: если значение уже содержит TZ-маркер ('+',
+    '-' после позиции 10, или 'Z') — пропускаем."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(settings.timezone)
+    for table in ("surveys", "lesson_cancellations"):
+        rows = (await conn.execute(text(f"SELECT id, lesson_at FROM {table}"))).fetchall()
+        for row_id, raw in rows:
+            if raw is None or not isinstance(raw, str):
+                continue
+            # Уже aware? '+'/'-' в позициях 19+ (после YYYY-MM-DD HH:MM:SS) или 'Z'.
+            if "+" in raw[19:] or raw.endswith("Z") or "-" in raw[19:]:
+                continue
+            # Парсим как naive в локальном TZ → aware UTC.
+            try:
+                naive = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+            aware_local = naive.replace(tzinfo=tz)
+            aware_utc = aware_local.astimezone(ZoneInfo("UTC"))
+            new_raw = aware_utc.isoformat(sep=" ")
+            await conn.execute(
+                text(f"UPDATE {table} SET lesson_at = :v WHERE id = :i"),
+                {"v": new_raw, "i": row_id},
+            )
+
+
 async def init_db() -> None:
     """Свежая БД — Base.metadata.create_all уже создаёт таблицы без legacy
     `admin_id`. Старая БД — оставляем колонку в таблице как мёртвую (SQLite не
@@ -121,6 +154,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _apply_lightweight_migrations(conn)
         await _backfill_schools(conn)
+        await _migrate_lesson_at_to_utc(conn)
 
 
 @asynccontextmanager

@@ -12,6 +12,7 @@ from app.db.session import session_scope
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import surveys as surveys_svc
+from app.services.schedule import format_lesson_at
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -41,7 +42,7 @@ async def on_attendance(call: CallbackQuery) -> None:
         title = format_group_title(group) if group is not None else "занятие"
         lesson_at = survey.lesson_at
 
-    when = f"{lesson_at:%d.%m в %H:%M}"
+    when = f"{format_lesson_at(lesson_at)}"
     text = (
         f"✅ Записал: придёшь на «{title}» {when}."
         if answer == Answer.yes

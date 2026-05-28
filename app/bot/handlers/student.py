@@ -287,7 +287,7 @@ async def show_student_home(message: Message) -> None:
                 reply_markup=onboarding_menu_keyboard(),
             )
             return
-        groups = await persons_svc.person_groups(s, person.id)
+        groups = await persons_svc.groups_for_tg(s, tg.id)
         name = person.full_name
         tz_map: dict[int, str] = {}
         for g in groups:
@@ -329,7 +329,7 @@ async def show_student_today(message: Message) -> None:
                 reply_markup=student_menu_keyboard(),
             )
             return
-        groups = await persons_svc.person_groups(s, person.id)
+        groups = await persons_svc.groups_for_tg(s, tg.id)
         tz_map: dict[int, str] = {}
         for g in groups:
             if g.school_id is not None and g.school_id not in tz_map:

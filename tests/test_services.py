@@ -85,6 +85,26 @@ async def test_person_joins_two_groups(db) -> None:
         assert await persons.count_members(s, g2id) == 1
 
 
+async def test_groups_for_tg_spans_schools(db) -> None:
+    """Один tg-аккаунт — ученик в разных школах (отдельная Person на школу).
+    groups_for_tg должен вернуть группы ВСЕХ школ, а person_groups одной
+    строки — только своей школы."""
+    async with session_scope() as s:
+        t1 = await admins.get_or_create(s, 1, "t1", "T1")
+        t2 = await admins.get_or_create(s, 2, "t2", "T2")
+        g1 = await groups.create_group(s, t1.id, "S1G", "0", "19:00", 18)
+        g2 = await groups.create_group(s, t2.id, "S2G", "2", "20:00", 18)
+        p1, _ = await persons.add_to_group(s, g1, 10, "u", "Студент")
+        p2, _ = await persons.add_to_group(s, g2, 10, "u", "Студент")
+        assert p1.id != p2.id  # отдельная Person-строка в каждой школе
+        p1id = p1.id
+    async with session_scope() as s:
+        all_groups = await persons.groups_for_tg(s, 10)
+        single = await persons.person_groups(s, p1id)
+    assert {g.name for g in all_groups} == {"S1G", "S2G"}
+    assert len(single) == 1  # одна Person-строка видит только свою школу
+
+
 async def test_group_members_ordered_by_name(db) -> None:
     async with session_scope() as s:
         t = await admins.get_or_create(s, 1, "t", "T")

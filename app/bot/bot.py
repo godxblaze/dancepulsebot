@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.base import BaseStorage
+from aiogram.types import ErrorEvent
 from aiogram_dialog import setup_dialogs
 
 from app.bot.dialogs import (
@@ -26,6 +28,26 @@ from app.bot.handlers import (
     survey,
 )
 from app.core.config import settings
+
+log = logging.getLogger(__name__)
+
+
+async def _on_error(event: ErrorEvent) -> bool:
+    """Глобальный перехват необработанных ошибок в хендлерах. Гасит «вечный
+    спиннер» на callback'ах (битый/легаси callback_data, устаревший
+    call.message=None у сообщений старше ~48ч) и логирует с трейсбеком."""
+    log.exception("Unhandled error in update handler: %s", event.exception)
+    cq = event.update.callback_query
+    if cq is not None:
+        try:
+            await cq.answer(
+                "Что-то пошло не так — возможно, сообщение устарело. "
+                "Открой меню заново.",
+                show_alert=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return True
 
 
 def build_bot() -> Bot:
@@ -63,4 +85,5 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(edit_name_dialog)
     dp.include_router(broadcast_dialog)
     setup_dialogs(dp)
+    dp.errors.register(_on_error)
     return dp

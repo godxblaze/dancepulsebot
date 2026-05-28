@@ -51,6 +51,20 @@ async def person_groups(session: AsyncSession, person_id: int) -> list[Group]:
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def groups_for_tg(session: AsyncSession, tg_user_id: int) -> list[Group]:
+    """Все группы телеграм-аккаунта по ВСЕМ школам. Один человек = отдельная
+    Person-строка в каждой школе, поэтому person_groups(одной строки) теряет
+    группы остальных школ — для экранов ученика берём по tg_user_id."""
+    stmt = (
+        select(Group)
+        .join(Membership, Membership.group_id == Group.id)
+        .join(Person, Person.id == Membership.person_id)
+        .where(Person.tg_user_id == tg_user_id)
+        .order_by(Group.school_id, Group.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def _get_or_create_person(
     session: AsyncSession,
     school_id: int,

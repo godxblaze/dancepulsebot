@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 from app.bot.handlers.pool import cb_pool_toggle, cmd_pool
-from app.db.models import Person
 from app.db.session import session_scope
 from app.services import admins, groups, persons
 
@@ -67,20 +66,20 @@ async def test_cmd_pool_lists_people(db) -> None:
 
 
 async def test_pool_toggle_cycles_level(db) -> None:
-    _, pid = await _person_of_teacher()
-    # tap cycles the level: None -> 1 -> 2 -> 3 -> None
+    teacher_id, pid = await _person_of_teacher()
+    # tap cycles the level в ЛИЧНОМ пуле препода: None -> 1 -> 2 -> 3 -> None
     for expected in (1, 2, 3, None):
         await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=100))
         async with session_scope() as s:
-            person = await s.get(Person, pid)
-            assert person is not None and person.support_level == expected
+            levels = await persons.admin_pool_levels(s, teacher_id)
+            assert levels.get(pid) == expected
 
 
 async def test_pool_toggle_rejects_foreign_person(db) -> None:
-    _, pid = await _person_of_teacher(teacher_tg=100, person_tg=500)
+    teacher_id, pid = await _person_of_teacher(teacher_tg=100, person_tg=500)
     async with session_scope() as s:
         await admins.get_or_create(s, 200, "x", "Чужой Препод")
     await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=200))
     async with session_scope() as s:
-        person = await s.get(Person, pid)
-        assert person is not None and person.support_level is None  # unchanged
+        levels = await persons.admin_pool_levels(s, teacher_id)
+        assert levels.get(pid) is None  # чужой препод не тронул пул

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,10 +53,38 @@ async def set_support_threshold(
 async def set_support_cutoff_hours(
     session: AsyncSession, admin_id: int, hours: int
 ) -> None:
+    """Фаза 2 (добор остатка): за сколько часов до занятия. 0 = выключить."""
     admin = await session.get(Admin, admin_id)
     if admin is not None:
         admin.support_cutoff_hours = hours
         await session.flush()
+
+
+async def set_recruit_evening_time(
+    session: AsyncSession, admin_id: int, value: str
+) -> None:
+    """Фаза 1 (вечерний разбор): время суток накануне ("HH:MM")."""
+    admin = await session.get(Admin, admin_id)
+    if admin is not None:
+        admin.recruit_evening_time = value
+        await session.flush()
+
+
+async def get_or_create_support_code(session: AsyncSession, admin_id: int) -> str | None:
+    """Персональный код для ссылки-приглашения саппорта (start=support_<code>).
+    Генерируется один раз, дальше переиспользуется."""
+    admin = await session.get(Admin, admin_id)
+    if admin is None:
+        return None
+    if not admin.support_code:
+        admin.support_code = secrets.token_urlsafe(8)
+        await session.flush()
+    return admin.support_code
+
+
+async def get_by_support_code(session: AsyncSession, code: str) -> Admin | None:
+    stmt = select(Admin).where(Admin.support_code == code)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def delete_admin(session: AsyncSession, admin_id: int) -> bool:

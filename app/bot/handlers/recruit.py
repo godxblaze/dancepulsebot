@@ -19,7 +19,7 @@ from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
-from app.services.schedule import format_lesson_at
+from app.services.schedule import as_utc, format_lesson_at, utc_now
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -38,6 +38,38 @@ def _selected_ids(markup: InlineKeyboardMarkup | None) -> set[int]:
     return selected
 
 
+def _has_pickmore(markup: InlineKeyboardMarkup | None) -> bool:
+    """Есть ли в picker'е кнопка «➕ из пула коллег» (т.е. ещё не раскрыт)."""
+    if markup is None:
+        return False
+    return any(
+        (btn.callback_data or "").startswith("pickmore:")
+        for row in markup.inline_keyboard for btn in row
+    )
+
+
+async def _pick_candidates(session, group, gender, *, expanded: bool):
+    """(candidates, levels, can_expand) для picker'а: пул lead'а, при expanded —
+    плюс пул коллег."""
+    lead = await groups_svc.resolve_recruit_lead(session, group)
+    lead_id = lead.id if lead else None
+    own = (
+        await persons_svc.support_candidates(session, lead_id, gender, group.id)
+        if lead_id is not None else []
+    )
+    levels = (
+        await persons_svc.admin_pool_levels(session, lead_id)
+        if lead_id is not None else {}
+    )
+    colleagues = await persons_svc.school_pool_candidates(
+        session, group.school_id, gender, group.id, {c.id for c in own},
+        exclude_admin_id=lead_id,
+    )
+    if expanded:
+        return own + colleagues, levels, False
+    return own, levels, bool(colleagues)
+
+
 async def _call_context(session, call_id: int):
     """Returns (call, survey, group) for a SupportCall — any may be None."""
     call = await supports_svc.get_call(session, call_id)
@@ -50,27 +82,61 @@ async def _call_context(session, call_id: int):
 
 @router.callback_query(F.data.startswith("pick:"))
 async def cb_support_pick(call: CallbackQuery) -> None:
-    """Admin (owner школы) ticks/unticks a pool member in the recruit picker."""
+    """Lead ticks/unticks a pool member in the recruit picker."""
     parts = (call.data or "").split(":")
     call_id, person_id = int(parts[1]), int(parts[2])
-    selected = _selected_ids(call.message.reply_markup if call.message else None)
+    markup = call.message.reply_markup if call.message else None
+    selected = _selected_ids(markup)
     selected ^= {person_id}  # toggle
+    expanded = not _has_pickmore(markup)  # пул коллег уже раскрыт?
     async with session_scope() as s:
         sc, _survey, group = await _call_context(s, call_id)
         if sc is None or group is None or group.school_id is None:
             await call.answer()
             return
         admin_id = await _admin_id_from_tg(call.from_user.id, s)
-        if admin_id is None or not await schools_svc.is_owner(s, group.school_id, admin_id):
-            # подмена — picker открыт по callback'у; если юзер не owner, тихо игнор
+        if admin_id is None or not await groups_svc.can_manage_recruit(
+            s, group.id, group.school_id, admin_id
+        ):
+            # picker открыт по callback'у; если юзер не lead — тихо игнор
             await call.answer()
             return
-        candidates = await persons_svc.support_candidates(
-            s, group.school_id, sc.gender, group.id
+        candidates, levels, can_expand = await _pick_candidates(
+            s, group, sc.gender, expanded=expanded
         )
     if call.message:
         await call.message.edit_reply_markup(
-            reply_markup=support_pick_keyboard(call_id, candidates, selected)
+            reply_markup=support_pick_keyboard(
+                call_id, candidates, selected, levels, can_expand=can_expand
+            )
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("pickmore:"))
+async def cb_support_pickmore(call: CallbackQuery) -> None:
+    """«➕ из пула коллег» — дораскрыть picker саппортами из пулов других преподов."""
+    call_id = int((call.data or "").split(":")[1])
+    selected = _selected_ids(call.message.reply_markup if call.message else None)
+    async with session_scope() as s:
+        sc, _survey, group = await _call_context(s, call_id)
+        if sc is None or group is None or group.school_id is None:
+            await call.answer()
+            return
+        admin_id = await _admin_id_from_tg(call.from_user.id, s)
+        if admin_id is None or not await groups_svc.can_manage_recruit(
+            s, group.id, group.school_id, admin_id
+        ):
+            await call.answer()
+            return
+        candidates, levels, _ = await _pick_candidates(
+            s, group, sc.gender, expanded=True
+        )
+    if call.message:
+        await call.message.edit_reply_markup(
+            reply_markup=support_pick_keyboard(
+                call_id, candidates, selected, levels, can_expand=False
+            )
         )
     await call.answer()
 
@@ -95,11 +161,14 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
             await call.answer("Уже обработано", show_alert=True)
             return
         admin_id = await _admin_id_from_tg(call.from_user.id, s)
-        if admin_id is None or not await schools_svc.is_owner(s, group.school_id, admin_id):
+        if admin_id is None or not await groups_svc.can_manage_recruit(
+            s, group.id, group.school_id, admin_id
+        ):
             await call.answer()
             return
-        if sc.status == SupportCallStatus.closed:
-            await call.answer("Набор уже закрыт", show_alert=True)
+        if sc.status != SupportCallStatus.pending:
+            # Кто-то из ответственных уже разобрал (open/closed) — гасим дубль.
+            await call.answer("Уже разобрано", show_alert=True)
             return
         invited: list[tuple[int, str]] = []
         for pid in selected:
@@ -109,7 +178,9 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
         if not invited:
             await call.answer("Никого не нашлось", show_alert=True)
             return
-        await supports_svc.set_status(s, call_id, SupportCallStatus.open)
+        # status → open + сброс таймера «тишины» на момент отправки инвайтов,
+        # иначе «никто не откликнулся» отсчитывается от создания call'а (вечер).
+        await supports_svc.mark_invited(s, call_id)
         venue = (
             await venues_svc.get_venue(s, group.venue_id)
             if group.venue_id is not None
@@ -163,12 +234,20 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         if group is None or group.school_id is None:
             await call.answer()
             return
+        if as_utc(survey.lesson_at) <= utc_now():
+            # Занятие уже началось/прошло — поздний тап не засчитываем.
+            if call.message:
+                await call.message.edit_text(
+                    "Занятие уже началось — добор закрыт. Спасибо, что откликнулся!"
+                )
+            await call.answer()
+            return
         person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
         if person is None:
             await call.answer()
             return
         accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
-        owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
+        notify_tgs = await groups_svc.group_admin_tg_ids(s, group.id, group.school_id)
         person_name = person.full_name
         title = format_group_title(group)
         group_name = group.name
@@ -202,11 +281,11 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             reply_markup=support_flip_keyboard(call_id, "join"),
         )
     await call.answer("Записал!")
-    if owner_tg is not None:
-        done = "  Набор закрыт ✅" if filled >= needed else ""
+    done = "  Набор закрыт ✅" if filled >= needed else ""
+    for tg in notify_tgs:
         try:
             await bot.send_message(
-                owner_tg,
+                tg,
                 f"🆘 {person_name} придёт выручить «{group_name}» — "
                 f"{filled}/{needed}.{done}",
             )
@@ -219,7 +298,7 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
     call_id = int((call.data or "").split(":")[2])
     reverted_name: str | None = None
     filled = needed = 0
-    owner_tg: int | None = None
+    notify_tgs: list[int] = []
     title = "занятие"
     when = ""
     group_name = ""
@@ -242,7 +321,9 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                     reverted_name = person.full_name
                     filled = await supports_svc.count_claims(s, call_id)
                     needed = sc.needed
-                    owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
+                    notify_tgs = await groups_svc.group_admin_tg_ids(
+                        s, group.id, group.school_id
+                    )
 
     if call.message:
         text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
@@ -251,15 +332,16 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
         )
     await call.answer()
 
-    if reverted_name is not None and owner_tg is not None:
-        try:
-            await bot.send_message(
-                owner_tg,
-                f"↩️ {reverted_name} передумал — снова «{group_name}» "
-                f"{filled}/{needed}.",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+    if reverted_name is not None:
+        for tg in notify_tgs:
+            try:
+                await bot.send_message(
+                    tg,
+                    f"↩️ {reverted_name} передумал — снова «{group_name}» "
+                    f"{filled}/{needed}.",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def _is_already_claimed(call_id: int, person_id: int) -> bool:

@@ -1,7 +1,12 @@
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from app.services.schedule import format_weekdays, next_lesson_at, parse_weekdays
+from app.services.schedule import (
+    evening_fix_at,
+    format_weekdays,
+    next_lesson_at,
+    parse_weekdays,
+)
 
 _MSK = ZoneInfo("Europe/Moscow")
 
@@ -55,3 +60,18 @@ def test_next_lesson_skips_exact_now() -> None:
     # A lesson exactly at `now` is not strictly after it → next week.
     now = _msk(2026, 5, 25, 19, 0)  # Monday 19:00 МСК
     assert next_lesson_at("0", "19:00", now) == _msk(2026, 6, 1, 19, 0)
+
+
+def test_evening_fix_at_is_prev_day_local_time() -> None:
+    # Понедельник 19:00 МСК → разбор накануне (вс) 20:00 МСК.
+    lesson = _msk(2026, 5, 25, 19, 0)
+    assert evening_fix_at(lesson, "20:00", tz="Europe/Moscow") == _msk(2026, 5, 24, 20, 0)
+
+
+def test_evening_fix_at_morning_lesson_still_prev_day() -> None:
+    # Утреннее занятие в 11:00 — разбор всё равно накануне вечером (за ~15 ч),
+    # не за фиксированное число часов.
+    lesson = _msk(2026, 5, 25, 11, 0)
+    fix = evening_fix_at(lesson, "20:00", tz="Europe/Moscow")
+    assert fix == _msk(2026, 5, 24, 20, 0)
+    assert fix < lesson

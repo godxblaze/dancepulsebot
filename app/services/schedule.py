@@ -33,6 +33,14 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def as_utc(dt: datetime) -> datetime:
+    """Привести к aware UTC. Naive (как читается из SQLite) трактуем как UTC —
+    для сравнения lesson_at, прочитанного из БД, с `utc_now()`."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 def school_tz_zone(tz_name: str | None = None) -> ZoneInfo:
     """`tz_name` → ZoneInfo. None или невалидный — fallback на
     settings.timezone (для обратной совместимости со старым кодом)."""
@@ -93,6 +101,27 @@ def next_lesson_at(
         if candidate_utc > now_utc:
             return candidate_utc
     return None
+
+
+def evening_fix_at(
+    lesson_at: datetime,
+    evening_time: str,
+    *,
+    tz: str | None = None,
+) -> datetime:
+    """Момент «вечернего разбора» накануне занятия: календарный день перед
+    датой занятия (в школьном TZ) в `evening_time` ("HH:MM"). Возвращает aware
+    UTC. Всегда строго раньше `lesson_at` (накануне вечером < занятия)."""
+    if lesson_at.tzinfo is None:
+        lesson_at = lesson_at.replace(tzinfo=UTC)
+    school_tz = school_tz_zone(tz)
+    lesson_local = lesson_at.astimezone(school_tz)
+    prev_day = lesson_local.date() - timedelta(days=1)
+    hour, minute = (int(x) for x in evening_time.split(":"))
+    fix_local = datetime(
+        prev_day.year, prev_day.month, prev_day.day, hour, minute, tzinfo=school_tz,
+    )
+    return fix_local.astimezone(UTC)
 
 
 def upcoming_lessons(

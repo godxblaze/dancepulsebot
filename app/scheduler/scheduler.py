@@ -17,7 +17,7 @@ from app.bot.keyboards import (
 )
 from app.bot.utils import bar, format_group_title, format_place
 from app.core.config import settings
-from app.db.models import Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
+from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
@@ -26,9 +26,19 @@ from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
-from app.services.schedule import format_lesson_at, next_lesson_at, utc_now
+from app.services.schedule import (
+    as_utc,
+    evening_fix_at,
+    format_lesson_at,
+    next_lesson_at,
+    utc_now,
+)
 
 log = logging.getLogger(__name__)
+
+# Опрос должен уйти не позже чем за столько до вечернего разбора, чтобы к
+# фиксации у людей было время ответить (иначе фаза 1 считает пустой опрос).
+POLL_BEFORE_FIX = timedelta(hours=4)
 
 
 async def _poll_group(
@@ -181,9 +191,8 @@ async def _maybe_send_summary(
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
             return
         summary = await surveys_svc.summarize(s, survey.id)
-        admin_tg_ids = (
-            await schools_svc.member_tg_ids(s, group.school_id)
-            if group.school_id else []
+        admin_tg_ids = await groups_svc.group_admin_tg_ids(
+            s, group.id, group.school_id
         )
         survey_id = survey.id
 
@@ -217,59 +226,30 @@ def _gender_plural(gender: Gender) -> str:
     return "парни" if gender == Gender.male else "девушки"
 
 
-async def _maybe_recruit(
+async def _send_recruit_picker(
     bot: Bot,
+    *,
+    teacher_tgs: list[int],
     group: Group,
     lesson_at: datetime,
-    now: datetime,
-    *,
-    tz: str | None = None,
+    call_id: int,
+    gender_needed: Gender,
+    deficit: int,
+    male: int,
+    female: int,
+    candidates: list,
+    venue,
+    tz: str | None,
+    levels: dict[int, int] | None = None,
+    can_expand: bool = False,
+    phase2: bool = False,
 ) -> None:
-    """На отсечке считаем баланс пола; если перекос — спрашиваем owner'а школы
-    «добрать саппортов?». Одно решение на занятие."""
-    if group.school_id is None:
-        return
-    async with session_scope() as s:
-        owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
-        if owner_tg is None:
-            return
-        # Берём threshold/cutoff с owner'а школы — они хранятся на самом Admin'е.
-        from app.services import admins as admins_svc
-        owner_row = await admins_svc.get_by_tg_id(s, owner_tg)
-        if owner_row is None:
-            return
-        if now < lesson_at - timedelta(hours=owner_row.support_cutoff_hours):
-            return
-        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
-        if survey is None:
-            return
-        if await supports_svc.get_call_for_survey(s, survey.id) is not None:
-            return  # decision already taken for this lesson
-        male, female = await surveys_svc.gender_yes_counts(s, survey.id)
-        deficit = abs(male - female)
-        if deficit < owner_row.support_threshold:
-            await supports_svc.create_call(
-                s, survey.id, Gender.male, 0, SupportCallStatus.closed
-            )
-            return
-        gender_needed = Gender.male if male < female else Gender.female
-        call = await supports_svc.create_call(
-            s, survey.id, gender_needed, deficit, SupportCallStatus.pending
-        )
-        call_id = call.id
-        teacher_tg = owner_tg
-        candidates = await persons_svc.support_candidates(
-            s, group.school_id, gender_needed, group.id
-        )
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
-
+    """Шлёт lead'у группы сводку баланса + picker его пула (или «пул пуст»).
+    Используется обеими фазами добора; первый разобравший выигрывает."""
     total_pairs = male + female
+    header = "🆘 Добор остатка" if phase2 else "🆘"
     head_lines = [
-        f"🆘 <b>{escape(format_group_title(group))}</b> · "
+        f"{header} <b>{escape(format_group_title(group))}</b> · "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} {group.lesson_time}",
     ]
     place = format_place(group, venue)
@@ -282,22 +262,155 @@ async def _maybe_recruit(
         f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.",
     ])
     head = "\n".join(head_lines)
-    try:
-        if candidates:
+    if candidates:
+        body = head + "\n\nОтметь, кого позвать:"
+        markup = support_pick_keyboard(
+            call_id, candidates, set(), levels, can_expand=can_expand
+        )
+    elif can_expand:
+        body = head + "\n\nВ твоём пуле нет подходящих — глянь пул коллег:"
+        markup = support_pick_keyboard(call_id, [], set(), levels, can_expand=True)
+    else:
+        body = head + "\n\nВ пуле нет подходящих саппортов — добавь через /pool."
+        markup = None
+    for tg in teacher_tgs:
+        try:
             await bot.send_message(
-                teacher_tg,
-                head + "\n\nОтметь, кого позвать:",
-                reply_markup=support_pick_keyboard(call_id, candidates, set()),
-                parse_mode=ParseMode.HTML,
+                tg, body, reply_markup=markup, parse_mode=ParseMode.HTML
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not ask admin %s about supports: %s", tg, e)
+
+
+async def _maybe_recruit(
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
+) -> None:
+    """Двухфазный автодобор, привязанный к календарю (не к hours-offset):
+
+    Фаза 1 — вечерний разбор накануне в `recruit_evening_time` (школьный TZ):
+    создаём решение по занятию (нужен добор или баланс ок) и, если перекос ≥
+    порога, шлём owner'у picker. Одно решение на занятие.
+
+    Фаза 2 — добор остатка в день занятия за `support_cutoff_hours` ч (0 = выкл):
+    один раз пересчитываем живой баланс с учётом уже согласившихся саппортов;
+    если из-за поздних отмен появилась новая дыра — до-зываем."""
+    if group.school_id is None:
+        return
+    send_kwargs: dict | None = None
+    async with session_scope() as s:
+        # Добор ведёт «куратор» группы (lead) — его настройки, его пул, ему picker.
+        lead = await groups_svc.resolve_recruit_lead(s, group)
+        if lead is None:
+            return
+        lead_id = lead.id
+        threshold = lead.support_threshold
+        topup_hours = lead.support_cutoff_hours
+        evening_time = lead.recruit_evening_time
+        targets = [lead.tg_user_id]
+
+        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
+        if survey is None:
+            return
+        survey_id = survey.id
+        call = await supports_svc.get_call_for_survey(s, survey_id)
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
+
+        if call is None:
+            # ── Фаза 1: вечерний разбор ──
+            if now < evening_fix_at(lesson_at, evening_time, tz=tz):
+                return
+            male, female = await surveys_svc.gender_yes_counts(s, survey_id)
+            deficit = abs(male - female)
+            if deficit < threshold:
+                await supports_svc.create_call(
+                    s, survey_id, Gender.male, 0, SupportCallStatus.closed
+                )
+                return
+            gender_needed = Gender.male if male < female else Gender.female
+            new_call = await supports_svc.create_call(
+                s, survey_id, gender_needed, deficit, SupportCallStatus.pending
+            )
+            candidates = await persons_svc.support_candidates(
+                s, lead_id, gender_needed, group.id
+            )
+            levels = await persons_svc.admin_pool_levels(s, lead_id)
+            colleagues = await persons_svc.school_pool_candidates(
+                s, group.school_id, gender_needed, group.id,
+                {c.id for c in candidates}, exclude_admin_id=lead_id,
+            )
+            send_kwargs = dict(
+                teacher_tgs=targets, call_id=new_call.id, gender_needed=gender_needed,
+                deficit=deficit, male=male, female=female, candidates=candidates,
+                venue=venue, levels=levels, can_expand=bool(colleagues), phase2=False,
             )
         else:
-            await bot.send_message(
-                teacher_tg,
-                head + "\n\nВ пуле нет подходящих саппортов — добавь через /pool.",
-                parse_mode=ParseMode.HTML,
+            # ── Фаза 2: добор остатка в день занятия ──
+            if topup_hours <= 0 or call.topup_done:
+                return
+            if now < lesson_at - timedelta(hours=topup_hours):
+                return
+            call.topup_done = True
+            male, female = await surveys_svc.gender_yes_counts(s, survey_id)
+            claimed = await supports_svc.count_claims(s, call.id)
+            had_recruit = call.needed > 0
+            sec_male = claimed if had_recruit and call.gender == Gender.male else 0
+            sec_female = claimed if had_recruit and call.gender == Gender.female else 0
+            eff_male, eff_female = male + sec_male, female + sec_female
+            deficit = abs(eff_male - eff_female)
+            short = Gender.male if eff_male < eff_female else Gender.female
+            remaining = max(0, call.needed - claimed)
+            if deficit < threshold:
+                if call.status != SupportCallStatus.closed:
+                    call.status = SupportCallStatus.closed  # баланс сложился
+                await s.flush()
+                return
+            if (had_recruit and short != call.gender) or deficit <= remaining:
+                # перекос ушёл в другую сторону (редко, не флипаем) либо уже
+                # добираем достаточно — ничего нового не спрашиваем.
+                await s.flush()
+                return
+            # Нужно БОЛЬШЕ `short`, чем уже добираем → расширяем и зовём ещё.
+            call.gender = short
+            call.needed = claimed + deficit
+            call.status = SupportCallStatus.pending
+            call.no_reply_notified = False
+            # Свежий picker на бо́льшую дыру — разрешаем и nudge заново, если
+            # owner и его проигнорит.
+            call.pending_notified = False
+            # сбрасываем таймер «тишины» на момент добора (иначе stale-пинг
+            # сработает сразу — call создан ещё вечером накануне).
+            call.created_at = datetime.now(UTC).replace(tzinfo=None)
+            await s.flush()
+            claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
+            cands = await persons_svc.support_candidates(
+                s, lead_id, short, group.id
             )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Could not ask teacher %s about supports: %s", teacher_tg, e)
+            candidates = [c for c in cands if c.id not in claimed_ids]
+            levels = await persons_svc.admin_pool_levels(s, lead_id)
+            colleagues = await persons_svc.school_pool_candidates(
+                s, group.school_id, short, group.id,
+                {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
+            )
+            send_kwargs = dict(
+                teacher_tgs=targets, call_id=call.id, gender_needed=short,
+                deficit=deficit, male=eff_male, female=eff_female,
+                candidates=candidates, venue=venue, levels=levels,
+                can_expand=bool(colleagues), phase2=True,
+            )
+
+    if send_kwargs is not None:
+        await _send_recruit_picker(
+            bot, group=group, lesson_at=lesson_at, tz=tz, **send_kwargs
+        )
 
 
 async def _maybe_remind(
@@ -377,50 +490,81 @@ async def _maybe_remind(
 
 
 SUPPORT_NO_REPLY_AFTER = timedelta(hours=1)
+# Pending-call (owner получил picker, но не нажал «Позвать») напоминаем, когда
+# до занятия осталось не больше этого.
+PENDING_NUDGE_LEAD = timedelta(hours=12)
+
+
+async def _stale_call_context(s, call, *, survey=None):
+    """(admin_tg_ids, title) для SupportCall — или None если чего-то нет."""
+    if survey is None:
+        survey = await surveys_svc.get_survey(s, call.survey_id)
+    if survey is None:
+        return None
+    group = await groups_svc.get_group(s, survey.group_id)
+    if group is None or group.school_id is None:
+        return None
+    admin_tgs = await groups_svc.group_admin_tg_ids(s, group.id, group.school_id)
+    if not admin_tgs:
+        return None
+    return admin_tgs, format_group_title(group)
 
 
 async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
-    """Если SupportCall в open уже больше SUPPORT_NO_REPLY_AFTER, а откликов
-    ещё нет/мало — пингуем preпода: «никто не откликнулся, попробуй сам»."""
+    """Два пинга preподу:
+    - open-call без достаточного числа откликов >SUPPORT_NO_REPLY_AFTER —
+      «никто не откликнулся, попробуй сам»;
+    - pending-call, который owner так и не разобрал, а занятие уже близко —
+      «разбери добор»."""
+    messages: list[tuple[int, str]] = []
     async with session_scope() as s:
-        # SupportCall.created_at в SQLite хранится без таймзоны (server_default=now()),
-        # потому сравниваем naive UTC vs naive UTC.
+        # SupportCall.created_at в SQLite — naive UTC (server_default=now()),
+        # потому сравниваем naive vs naive.
         now_utc = datetime.now(UTC).replace(tzinfo=None)
-        stale = await supports_svc.stale_open_calls(s, now_utc, SUPPORT_NO_REPLY_AFTER)
-        items: list[tuple[int, int, int, str]] = []  # needed, filled, admin_tg, title
-        for call in stale:
+        for call in await supports_svc.stale_open_calls(
+            s, now_utc, SUPPORT_NO_REPLY_AFTER
+        ):
             filled = await supports_svc.count_claims(s, call.id)
             if filled >= call.needed:
-                # Уже хватает — просто пометим чтобы не пинговать.
                 await supports_svc.mark_no_reply_notified(s, call.id)
                 continue
+            ctx = await _stale_call_context(s, call)
+            if ctx is None:
+                continue
+            admin_tgs, title = ctx
+            for tg in admin_tgs:
+                messages.append((
+                    tg,
+                    f"🆘 «{escape(title)}» — никто из приглашённых не откликнулся "
+                    f"за час ({filled}/{call.needed}). Стоит написать им лично или "
+                    f"поискать саппорта через /pool.",
+                ))
+            await supports_svc.mark_no_reply_notified(s, call.id)
+
+        for call in await supports_svc.pending_unnotified_calls(s):
             survey = await surveys_svc.get_survey(s, call.survey_id)
             if survey is None:
                 continue
-            group = await groups_svc.get_group(s, survey.group_id)
-            if group is None:
+            lesson_at = as_utc(survey.lesson_at)
+            if now >= lesson_at or lesson_at - now > PENDING_NUDGE_LEAD:
+                continue  # занятие прошло либо ещё рано напоминать
+            ctx = await _stale_call_context(s, call, survey=survey)
+            if ctx is None:
                 continue
-            admin_tgs = (
-                await schools_svc.member_tg_ids(s, group.school_id)
-                if group.school_id else []
-            )
-            if not admin_tgs:
-                continue
-            title = format_group_title(group)
+            admin_tgs, title = ctx
             for tg in admin_tgs:
-                items.append((call.needed, filled, tg, title))
-            await supports_svc.mark_no_reply_notified(s, call.id)
+                messages.append((
+                    tg,
+                    f"🆘 «{escape(title)}» — добор саппортов не разобран, "
+                    f"а занятие уже скоро. Загляни в сообщение выше или в /school.",
+                ))
+            await supports_svc.mark_pending_notified(s, call.id)
 
-    for needed, filled, tg, title in items:
-        text = (
-            f"🆘 «{escape(title)}» — никто из приглашённых не откликнулся "
-            f"за час ({filled}/{needed}). Стоит написать им лично или поискать "
-            f"саппорта через /pool."
-        )
+    for tg, text in messages:
         try:
             await bot.send_message(tg, text, parse_mode=ParseMode.HTML)
         except Exception as e:  # noqa: BLE001
-            log.warning("Failed to send stale-support notice to admin %s: %s", tg, e)
+            log.warning("Failed to send support notice to admin %s: %s", tg, e)
 
 
 async def tick(bot: Bot) -> None:
@@ -434,23 +578,50 @@ async def tick(bot: Bot) -> None:
     await _notify_stale_support_calls(bot, now)
 
     async with session_scope() as s:
+        from app.services import admins as admins_svc
         groups = await groups_svc.active_groups(s)
-        # Кэш tz по school_id чтобы не запрашивать School для каждой группы
-        # отдельно (за tick может быть много групп одной школы).
+        # tz — по школе; вечернее время разбора — личное у lead'а группы (кэш
+        # по admin_id, чтобы не дёргать одного и того же препода многократно).
         tz_cache: dict[int, str] = {}
+        admin_evening: dict[int, str | None] = {}
+        group_evening: dict[int, str | None] = {}
         for group in groups:
-            if group.school_id is not None and group.school_id not in tz_cache:
+            if group.school_id is None:
+                group_evening[group.id] = None
+                continue
+            if group.school_id not in tz_cache:
                 tz_cache[group.school_id] = await schools_svc.get_timezone(
                     s, group.school_id
                 )
+            lead_id = group.recruit_lead_admin_id
+            if lead_id is None:
+                owner_tg = await schools_svc.get_owner_tg_id(s, group.school_id)
+                owner = await admins_svc.get_by_tg_id(s, owner_tg) if owner_tg else None
+                lead_id = owner.id if owner else None
+            if lead_id is None:
+                group_evening[group.id] = None
+                continue
+            if lead_id not in admin_evening:
+                lead = await s.get(Admin, lead_id)
+                admin_evening[lead_id] = lead.recruit_evening_time if lead else None
+            group_evening[group.id] = admin_evening[lead_id]
 
     for group in groups:
         tz = tz_cache.get(group.school_id) if group.school_id else None
         lesson_at = next_lesson_at(group.weekdays, group.lesson_time, now, tz=tz)
-        if lesson_at is None:
+        if lesson_at is None or now >= lesson_at:
             continue
-        hours_until = (lesson_at - now).total_seconds() / 3600
-        if 0 < hours_until <= group.lead_hours:
+        # Окно активности группы открывается за lead_hours до занятия, но если у
+        # lead'а включён вечерний разбор — не позже чем за POLL_BEFORE_FIX до него,
+        # чтобы к фиксации опрос уже разошёлся и были ответы.
+        window_start = lesson_at - timedelta(hours=group.lead_hours)
+        evening_time = group_evening.get(group.id)
+        if evening_time:
+            window_start = min(
+                window_start,
+                evening_fix_at(lesson_at, evening_time, tz=tz) - POLL_BEFORE_FIX,
+            )
+        if window_start <= now:
             async with session_scope() as s:
                 if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                     continue

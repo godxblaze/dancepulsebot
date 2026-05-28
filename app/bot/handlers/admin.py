@@ -39,9 +39,11 @@ from app.bot.keyboards import (
     confirm_remove_from_group_keyboard,
     gender_from_code,
     group_actions_keyboard,
+    group_admins_keyboard,
     groups_keyboard,
     lvl_from_code,
     person_card_keyboard,
+    stats_keyboard,
     students_keyboard,
     today_ping_keyboard,
 )
@@ -352,18 +354,8 @@ async def _build_today_view(teacher_id: int, span: str):
     return "\n\n".join(blocks), today_ping_keyboard(pending_by_group, span=span)
 
 
-@router.message(Command("export"))
-@router.message(F.text == MENU_EXPORT)
-async def cmd_export(message: Message, bot: Bot) -> None:
-    """CSV-выгрузка учеников и посещаемости. Без аргументов — два файла одним
-    диалогом. Сами файлы лежат в памяти, ничего не сохраняется на диск."""
-    tg = message.from_user
-    if not tg:
-        return
+async def _send_export_files(message: Message, teacher) -> None:
     async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is None:
-            return  # not an admin — silent
         students_data = await _students_csv_for(s, teacher)
         attendance_data = await _attendance_csv_for(s, teacher)
     await message.answer_document(
@@ -376,22 +368,43 @@ async def cmd_export(message: Message, bot: Bot) -> None:
     )
 
 
-@router.message(Command("stats"))
-@router.message(F.text == MENU_STATS)
-async def cmd_stats(message: Message) -> None:
+@router.message(Command("export"))
+@router.message(F.text == MENU_EXPORT)
+async def cmd_export(message: Message, bot: Bot) -> None:
+    """CSV-выгрузка учеников и посещаемости. Доступна и кнопкой в /stats."""
     tg = message.from_user
     if not tg:
         return
-    blocks: list[str] = []
-
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is None:
-            return
-        groups = await groups_svc.admin_visible_groups(s, teacher.id)
+    if teacher is None:
+        return  # not an admin — silent
+    await _send_export_files(message, teacher)
+
+
+@router.callback_query(F.data == "statsexport")
+async def cb_stats_export(call: CallbackQuery) -> None:
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+    if teacher is None or call.message is None:
+        await call.answer()
+        return
+    await call.answer("Готовлю CSV…")
+    await _send_export_files(call.message, teacher)
+
+
+async def _build_stats_text(teacher, scope: str) -> str | None:
+    """Текст статистики. scope: 'school' — все группы школ админа, 'mine' —
+    только где он ответственный. None — если групп в этом разрезе нет."""
+    blocks: list[str] = []
+    async with session_scope() as s:
+        groups = (
+            await groups_svc.my_groups(s, teacher.id)
+            if scope == "mine"
+            else await groups_svc.admin_visible_groups(s, teacher.id)
+        )
         if not groups:
-            await message.answer("У тебя пока нет групп. Создай первую: /newgroup")
-            return
+            return None
         top_helpers = await _top_supports_for(s, teacher, limit=3)
         four_weeks_ago = utc_now() - timedelta(weeks=4)
         absent = await _long_absent_for(s, teacher, four_weeks_ago)
@@ -455,7 +468,53 @@ async def cmd_stats(message: Message) -> None:
             ab_lines.append(f"… и ещё {len(absent) - 10}")
         blocks.append("\n".join(ab_lines))
 
-    await message.answer("\n\n".join(blocks), parse_mode=ParseMode.HTML)
+    header = "📊 Вся школа" if scope == "school" else "📊 Только мои группы"
+    return f"<b>{header}</b>\n\n" + "\n\n".join(blocks)
+
+
+@router.message(Command("stats"))
+@router.message(F.text == MENU_STATS)
+async def cmd_stats(message: Message) -> None:
+    tg = message.from_user
+    if not tg:
+        return
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, tg.id)
+    if teacher is None:
+        return
+    text = await _build_stats_text(teacher, "school")
+    if text is None:
+        await message.answer(
+            "В школе пока нет групп. Создай первую: 🏫 Школа → ➕ Новая группа."
+        )
+        return
+    await message.answer(
+        text, parse_mode=ParseMode.HTML, reply_markup=stats_keyboard("school")
+    )
+
+
+@router.callback_query(F.data.startswith("statsscope:"))
+async def cb_stats_scope(call: CallbackQuery) -> None:
+    scope = (call.data or "").split(":", 1)[1]
+    if scope not in ("school", "mine"):
+        await call.answer()
+        return
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+    if teacher is None or call.message is None:
+        await call.answer()
+        return
+    text = await _build_stats_text(teacher, scope)
+    if text is None:
+        await call.answer(
+            "В этом разрезе групп нет" if scope == "mine" else "Групп нет",
+            show_alert=True,
+        )
+        return
+    await call.message.edit_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=stats_keyboard(scope)
+    )
+    await call.answer()
 
 
 # ── new group wizard ─────────────────────────────────────────────────
@@ -533,15 +592,21 @@ async def cb_group_edit(call: CallbackQuery, dialog_manager: DialogManager) -> N
 # ── groups list & actions ────────────────────────────────────────────
 
 
+_NO_MY_GROUPS = (
+    "У тебя пока нет своих групп. Создай в карточке школы (🏫 Школа → "
+    "➕ Новая группа) или попроси owner'а назначить тебя ответственным."
+)
+
+
 async def _send_groups_list(target: Message) -> None:
     tg = target.chat
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        groups = await groups_svc.admin_visible_groups(s, teacher.id) if teacher else []
+        groups = await groups_svc.my_groups(s, teacher.id) if teacher else []
     if not groups:
-        await target.answer("У тебя пока нет групп. Создай первую: /newgroup")
+        await target.answer(_NO_MY_GROUPS)
         return
-    await target.answer("Твои группы:", reply_markup=groups_keyboard(groups))
+    await target.answer("👥 Мои группы:", reply_markup=groups_keyboard(groups))
 
 
 @router.message(Command("groups"))
@@ -562,17 +627,23 @@ async def cmd_groups(message: Message) -> None:
 async def cb_groups_list(call: CallbackQuery) -> None:
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        groups = await groups_svc.admin_visible_groups(s, teacher.id) if teacher else []
+        groups = await groups_svc.my_groups(s, teacher.id) if teacher else []
     if not groups:
-        await call.message.edit_text("У тебя пока нет групп. Создай первую: /newgroup")
+        await call.message.edit_text(_NO_MY_GROUPS)
     else:
-        await call.message.edit_text("Твои группы:", reply_markup=groups_keyboard(groups))
+        await call.message.edit_text("👥 Мои группы:", reply_markup=groups_keyboard(groups))
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("grp:"))
 async def cb_group_card(call: CallbackQuery) -> None:
-    group_id = int(call.data.split(":", 1)[1])
+    parts = (call.data or "").split(":")
+    group_id = int(parts[1])
+    # origin `s<school_id>` — если пришли из «Группы школы», туда же и вернёмся.
+    back_cb, back_label = "grplist", "◀ К списку"
+    if len(parts) > 2 and parts[2].startswith("s"):
+        back_cb = f"schgroups:{parts[2][1:]}"
+        back_label = "◀ К группам школы"
     async with session_scope() as s:
         group = await _accessible_group(s, group_id, call.from_user.id)
         if group is None:
@@ -601,9 +672,71 @@ async def cb_group_card(call: CallbackQuery) -> None:
         reply_markup=group_actions_keyboard(
             group_id, is_owner, is_active,
             has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+            back_cb=back_cb, back_label=back_label,
         ),
     )
     await call.answer()
+
+
+async def _render_group_admins(call: CallbackQuery, group_id: int) -> bool:
+    """Перерисовать экран назначения ответственных. Возвращает False (уже
+    ответив на callback) если доступа нет — чтобы вызывающий не отвечал дважды."""
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None or group.school_id is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return False
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if teacher is None or not await schools_svc.is_owner(
+            s, group.school_id, teacher.id
+        ):
+            await call.answer("Только owner назначает ответственных", show_alert=True)
+            return False
+        members = await schools_svc.members_of(s, group.school_id)
+        assigned = await groups_svc.group_admin_ids(s, group.id)
+        items = [(a.id, a.full_name, a.id in assigned) for a, _role in members]
+        title = format_group_title(group)
+    note = (
+        "Уведомления группы (опрос-сводка, добор саппортов) идут отмеченным."
+        if assigned
+        else "Никто не отмечен → уведомления идут всем членам школы (как сейчас)."
+    )
+    await call.message.edit_text(
+        f"👤 Ответственные за «{title}»\n{note}\nТап по имени — переключить.",
+        reply_markup=group_admins_keyboard(group_id, items),
+    )
+    return True
+
+
+@router.callback_query(F.data.startswith("grpadm:"))
+async def cb_group_admins(call: CallbackQuery) -> None:
+    group_id = int(call.data.split(":", 1)[1])
+    if await _render_group_admins(call, group_id):
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpadmtog:"))
+async def cb_group_admin_toggle(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    group_id, admin_id = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None or group.school_id is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if teacher is None or not await schools_svc.is_owner(
+            s, group.school_id, teacher.id
+        ):
+            await call.answer()
+            return
+        if not await schools_svc.is_member(s, group.school_id, admin_id):
+            await call.answer()  # назначать можно только членов этой школы
+            return
+        currently = admin_id in await groups_svc.group_admin_ids(s, group.id)
+        await groups_svc.set_group_admin(s, group.id, admin_id, not currently)
+    if await _render_group_admins(call, group_id):
+        await call.answer()
 
 
 @router.callback_query(F.data.startswith("grpstu:"))
@@ -637,19 +770,37 @@ async def cb_group_students(call: CallbackQuery) -> None:
     await call.answer()
 
 
-def _person_card_text(person: Person, groups: list[Group]) -> str:
+@router.callback_query(F.data.startswith("stupg:"))
+async def cb_students_page(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    group_id, page = int(parts[1]), int(parts[2])
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        members = await persons_svc.group_members(s, group_id)
+    if call.message:
+        await call.message.edit_reply_markup(
+            reply_markup=students_keyboard(group_id, members, page=page)
+        )
+    await call.answer()
+
+
+def _person_card_text(person: Person, groups: list[Group], level: int | None) -> str:
+    """`level` — уровень person'а в пуле СМОТРЯЩЕГО админа (None = не в его пуле)."""
     if person.gender == Gender.male:
         who = "🕺 парень"
     elif person.gender == Gender.female:
         who = "💃 девушка"
     else:
         who = "— пол не задан"
-    if person.support_level is None:
-        pool = "вне пула"
+    if level is None:
+        pool = "вне твоего пула"
     else:
         helped = f", помог {person.helped_count}" if person.helped_count else ""
         pool = (
-            f"в пуле, ур. {person.support_level} (приоритет в picker'е "
+            f"в твоём пуле, ур. {level} (приоритет в picker'е "
             f"автодобора: 3 — первый, 1 — последний){helped}"
         )
     group_lines = "\n".join(f"  • {escape(g.name)}" for g in groups) if groups else "  (нет групп)"
@@ -659,6 +810,15 @@ def _person_card_text(person: Person, groups: list[Group]) -> str:
         f"саппорт: {pool}\n\n"
         f"группы:\n{group_lines}"
     )
+
+
+async def _viewer_pool_level(s, tg_id: int, person_id: int) -> tuple[int | None, int | None]:
+    """(teacher_admin_id, level в его пуле) для смотрящего админа."""
+    teacher = await admins_svc.get_by_tg_id(s, tg_id)
+    if teacher is None:
+        return None, None
+    levels = await persons_svc.admin_pool_levels(s, teacher.id)
+    return teacher.id, levels.get(person_id)
 
 
 @router.callback_query(F.data.startswith("pcard:"))
@@ -673,12 +833,13 @@ async def cb_person_card(call: CallbackQuery) -> None:
             return
         groups = await persons_svc.person_groups(s, person.id)
         in_group = group in groups
-        text = _person_card_text(person, groups)
+        _, level = await _viewer_pool_level(s, call.from_user.id, person_id)
+        text = _person_card_text(person, groups, level)
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=person_card_keyboard(
-            group_id, person_id, person.support_level, person.gender, in_group=in_group,
+            group_id, person_id, level, person.gender, in_group=in_group,
         ),
     )
     await call.answer()
@@ -686,8 +847,8 @@ async def cb_person_card(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("pcardlvl:"))
 async def cb_person_card_level(call: CallbackQuery) -> None:
-    """Cycle support level 1→2→3→null, then redraw the card. idempotency-guard
-    через expected-уровень в callback_data — двойной тап не перескочит."""
+    """Cycle уровень person'а в пуле СМОТРЯЩЕГО админа 1→2→3→null. idempotency-
+    guard через expected-уровень в callback_data."""
     parts = (call.data or "").split(":")
     group_id, person_id = int(parts[1]), int(parts[2])
     expected = lvl_from_code(parts[3]) if len(parts) > 3 else None
@@ -697,25 +858,21 @@ async def cb_person_card_level(call: CallbackQuery) -> None:
         if group is None or person is None or person.school_id != group.school_id:
             await call.answer("Не найдено", show_alert=True)
             return
-        stale = len(parts) > 3 and person.support_level != expected
-        if not stale:
-            new_level = (
-                None if person.support_level == _MAX_LEVEL
-                else (person.support_level or 0) + 1
-            )
-            await persons_svc.set_support_level(s, person_id, new_level)
-            await s.refresh(person)
+        teacher_id, level = await _viewer_pool_level(s, call.from_user.id, person_id)
+        stale = len(parts) > 3 and level != expected
+        if not stale and teacher_id is not None:
+            level = None if level == _MAX_LEVEL else (level or 0) + 1
+            await persons_svc.set_pool_level(s, teacher_id, person_id, level)
         groups = await persons_svc.person_groups(s, person.id)
         in_group = group in groups
-        text = _person_card_text(person, groups)
+        text = _person_card_text(person, groups, level)
     # Перерисовываем карточку даже при stale — иначе быстрый тап «зависает».
     try:
         await call.message.edit_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=person_card_keyboard(
-                group_id, person_id, person.support_level, person.gender,
-                in_group=in_group,
+                group_id, person_id, level, person.gender, in_group=in_group,
             ),
         )
     except Exception as e:  # noqa: BLE001
@@ -745,14 +902,14 @@ async def cb_person_gender_toggle(call: CallbackQuery) -> None:
             await s.refresh(person)
         groups = await persons_svc.person_groups(s, person.id)
         in_group = group in groups
-        text = _person_card_text(person, groups)
+        _, level = await _viewer_pool_level(s, call.from_user.id, person_id)
+        text = _person_card_text(person, groups, level)
     try:
         await call.message.edit_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=person_card_keyboard(
-                group_id, person_id, person.support_level, person.gender,
-                in_group=in_group,
+                group_id, person_id, level, person.gender, in_group=in_group,
             ),
         )
     except Exception as e:  # noqa: BLE001
@@ -774,14 +931,14 @@ async def cb_person_add_to_group(call: CallbackQuery) -> None:
         await persons_svc.add_to_group(
             s, group, person.tg_user_id, person.tg_username, person.full_name,
         )
-        await s.refresh(person)
         groups = await persons_svc.person_groups(s, person.id)
-        text = _person_card_text(person, groups)
+        _, level = await _viewer_pool_level(s, call.from_user.id, person_id)
+        text = _person_card_text(person, groups, level)
     await call.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=person_card_keyboard(
-            group_id, person_id, person.support_level, person.gender, in_group=True,
+            group_id, person_id, level, person.gender, in_group=True,
         ),
     )
     await call.answer("Записал постоянно")

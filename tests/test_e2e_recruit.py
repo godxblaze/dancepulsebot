@@ -143,16 +143,15 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
             FakeCallback(f"tpool:{pid}", teacher, message=SentMessage(None, TEACHER_TG, ""))
         )
     async with session_scope() as s:
-        assert (await s.get(Person, sup1_id)).support_level == 1
-        assert (await s.get(Person, sup2_id)).support_level == 1
+        teacher_row = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        levels = await persons_svc.admin_pool_levels(s, teacher_row.id)
+        assert levels.get(sup1_id) == 1
+        assert levels.get(sup2_id) == 1
 
-    # 6. Cutoff: scheduler measures the deficit and pings the teacher with the picker.
+    # 6. Вечерний разбор: scheduler measures the deficit and pings the picker.
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
-        t = await admins_svc.get_by_tg_id(s, TEACHER_TG)
-        assert t is not None
-        cutoff_h = t.support_cutoff_hours
-    await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=cutoff_h - 1))
+    await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=2))
 
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
@@ -204,8 +203,9 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
         sc = await supports_svc.get_call(s, call_id)
         assert sc.status == SupportCallStatus.open  # 2/4 — still open
         assert await supports_svc.count_claims(s, call_id) == 2
-        assert (await s.get(Person, sup1_id)).helped_count == 1
-        assert (await s.get(Person, sup2_id)).helped_count == 1
+        # helped_count считается по факту явки (post-lesson), не по отклику.
+        assert (await s.get(Person, sup1_id)).helped_count == 0
+        assert (await s.get(Person, sup2_id)).helped_count == 0
 
     # teacher got the "filled X/Y" pings
     pings = [m for m in bot.sent_to(TEACHER_TG) if "придёт выручить" in m.text]

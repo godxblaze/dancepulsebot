@@ -1,11 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Gender, Person, SupportCall, SupportCallStatus, SupportClaim
+
+
+async def _recount_helped(session: AsyncSession, person_id: int) -> None:
+    """helped_count = число claim'ов этого человека с attended=True. Денормализованный
+    счётчик пересчитывается из факта явки, не из числа откликов."""
+    cnt = (await session.execute(
+        select(func.count())
+        .select_from(SupportClaim)
+        .where(SupportClaim.person_id == person_id, SupportClaim.attended.is_(True))
+    )).scalar_one()
+    person = await session.get(Person, person_id)
+    if person is not None:
+        person.helped_count = cnt
+        await session.flush()
 
 
 async def get_call(session: AsyncSession, call_id: int) -> SupportCall | None:
@@ -50,11 +64,20 @@ async def count_claims(session: AsyncSession, call_id: int) -> int:
     return (await session.execute(stmt)).scalar_one()
 
 
+async def claimed_person_ids(session: AsyncSession, call_id: int) -> set[int]:
+    """Person id'ы, уже согласившиеся выручить по этому call'у — чтобы не
+    предлагать их повторно в picker'е добора остатка (фаза 2)."""
+    stmt = select(SupportClaim.person_id).where(
+        SupportClaim.support_call_id == call_id
+    )
+    return set((await session.execute(stmt)).scalars().all())
+
+
 async def unclaim(
     session: AsyncSession, call_id: int, person_id: int
 ) -> bool:
-    """Revert a person's claim. Decrements helped_count and re-opens a closed
-    call so the freed slot is available again. Returns True if anything changed.
+    """Revert a person's claim. Re-opens a closed call so the freed slot is
+    available again, and recomputes helped_count. Returns True if anything changed.
     """
     row = (
         await session.execute(
@@ -66,15 +89,72 @@ async def unclaim(
     ).scalar_one_or_none()
     if row is None:
         return False
-    person = await session.get(Person, person_id)
-    if person is not None and person.helped_count > 0:
-        person.helped_count -= 1
     await session.delete(row)
+    await session.flush()
+    await _recount_helped(session, person_id)
     call = await session.get(SupportCall, call_id)
     if call is not None and call.status == SupportCallStatus.closed:
         call.status = SupportCallStatus.open
     await session.flush()
     return True
+
+
+async def mark_invited(session: AsyncSession, call_id: int) -> None:
+    """Инвайты только что отправлены: статус → open, таймер «тишины» считаем с
+    этого момента (created_at = now), флаг no_reply_notified сбрасываем."""
+    call = await session.get(SupportCall, call_id)
+    if call is not None:
+        call.status = SupportCallStatus.open
+        call.created_at = datetime.now(UTC).replace(tzinfo=None)
+        call.no_reply_notified = False
+        await session.flush()
+
+
+async def pending_unnotified_calls(session: AsyncSession) -> list[SupportCall]:
+    """Pending-call'ы (owner получил picker, но ещё не нажал «Позвать»), по
+    которым его ещё не пинговали. Scheduler решает по близости занятия, пора ли
+    напомнить «разбери добор»."""
+    stmt = select(SupportCall).where(
+        SupportCall.status == SupportCallStatus.pending,
+        SupportCall.pending_notified.is_(False),
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_pending_notified(session: AsyncSession, call_id: int) -> None:
+    call = await session.get(SupportCall, call_id)
+    if call is not None:
+        call.pending_notified = True
+        await session.flush()
+
+
+async def claimed_supports_for_survey(
+    session: AsyncSession, survey_id: int
+) -> list[tuple[Person, SupportClaim]]:
+    """Согласившиеся саппорты занятия (через SupportCall) — для пост-leson
+    отметки явки. Возвращает (person, claim), по имени."""
+    stmt = (
+        select(Person, SupportClaim)
+        .join(SupportClaim, SupportClaim.person_id == Person.id)
+        .join(SupportCall, SupportCall.id == SupportClaim.support_call_id)
+        .where(SupportCall.survey_id == survey_id)
+        .order_by(Person.full_name)
+    )
+    return [(p, c) for p, c in (await session.execute(stmt)).all()]
+
+
+async def set_support_attended(
+    session: AsyncSession, claim_id: int, attended: bool | None
+) -> int | None:
+    """Отметить, пришёл ли саппорт. Пересчитывает helped_count человека.
+    Возвращает person_id (или None если claim не найден)."""
+    claim = await session.get(SupportClaim, claim_id)
+    if claim is None:
+        return None
+    claim.attended = attended
+    await session.flush()
+    await _recount_helped(session, claim.person_id)
+    return claim.person_id
 
 
 async def stale_open_calls(
@@ -126,10 +206,9 @@ async def claim(
         return False, filled, call.needed
     if filled >= call.needed:
         return False, filled, call.needed
+    # helped_count НЕ инкрементим здесь — он считается по факту явки
+    # (SupportClaim.attended), которую preпод отмечает после занятия.
     session.add(SupportClaim(support_call_id=call_id, person_id=person_id))
-    person = await session.get(Person, person_id)
-    if person is not None:
-        person.helped_count += 1
     filled += 1
     if filled >= call.needed:
         call.status = SupportCallStatus.closed

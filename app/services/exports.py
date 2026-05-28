@@ -9,10 +9,17 @@ from __future__ import annotations
 import csv
 import io
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Group, Membership, Person, Response, Survey
+from app.db.models import (
+    Group,
+    Membership,
+    Person,
+    Response,
+    SupportPoolEntry,
+    Survey,
+)
 from app.services.schedule import format_lesson_at
 
 
@@ -39,6 +46,14 @@ async def students_csv(session: AsyncSession, school_id: int) -> bytes:
     groups_map: dict[int, list[str]] = {}
     for pid, name in (await session.execute(group_stmt)).all():
         groups_map.setdefault(pid, []).append(name)
+    # Уровни в пулах теперь per-teacher → в CSV отдаём максимальный по школе.
+    pool_stmt = (
+        select(SupportPoolEntry.person_id, func.max(SupportPoolEntry.level))
+        .join(Person, Person.id == SupportPoolEntry.person_id)
+        .where(Person.school_id == school_id)
+        .group_by(SupportPoolEntry.person_id)
+    )
+    pool_max = dict((await session.execute(pool_stmt)).all())
     rows: list[list[str]] = []
     for p in persons:
         rows.append([
@@ -47,12 +62,12 @@ async def students_csv(session: AsyncSession, school_id: int) -> bytes:
             p.tg_username or "",
             str(p.tg_user_id),
             p.gender.value if p.gender else "",
-            str(p.support_level) if p.support_level is not None else "",
+            str(pool_max[p.id]) if p.id in pool_max else "",
             str(p.helped_count),
             "; ".join(sorted(groups_map.get(p.id, []))),
         ])
     header = ["id", "name", "tg_username", "tg_user_id", "gender",
-              "support_level", "helped_count", "groups"]
+              "support_level_max", "helped_count", "groups"]
     return _csv_bytes(rows, header)
 
 

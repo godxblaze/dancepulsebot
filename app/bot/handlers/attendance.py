@@ -18,6 +18,7 @@ from app.db.models import Person
 from app.db.session import session_scope
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
+from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import format_lesson_at
 
@@ -68,6 +69,10 @@ async def _render_attendance_roster(
             (p, r.actually_attended, r.answer.value if r.answer else None)
             for p, r in roster
         ]
+        support_rows = await supports_svc.claimed_supports_for_survey(s, survey_id)
+        support_items = [
+            (claim.id, p.full_name, claim.attended) for p, claim in support_rows
+        ]
         title = format_group_title(group)
         tz_name = (
             await schools_svc.get_timezone(s, group.school_id)
@@ -78,9 +83,13 @@ async def _render_attendance_roster(
         f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
         f"В скобках: ✓ обещал, ✗ отказался, — молчал."
     )
+    if support_items:
+        head += "\n🆘 — саппорты; отметь, кто реально пришёл выручить."
     await call.message.edit_text(
         head,
-        reply_markup=attendance_mark_keyboard(survey_id, group_id, items, page=page),
+        reply_markup=attendance_mark_keyboard(
+            survey_id, group_id, items, page=page, supports=support_items
+        ),
     )
 
 
@@ -205,5 +214,38 @@ async def cb_attendance_toggle(call: CallbackQuery) -> None:
             )
         group_id = group.id
     # Перерисовываем ростер даже при stale — иначе быстрый тап «зависает».
+    await _render_attendance_roster(call, survey_id, group_id, page=page)
+    await call.answer("Уже обновлено" if stale else "")
+
+
+@router.callback_query(F.data.startswith("supatt:"))
+async def cb_support_attendance_toggle(call: CallbackQuery) -> None:
+    """Отметка явки саппорта (☐→✅→❌→☐). От ✅ зависит helped_count человека.
+    idempotency-guard через expected-state, как в atntog."""
+    from app.db.models import SupportClaim
+
+    parts = (call.data or "").split(":")
+    survey_id, claim_id = int(parts[1]), int(parts[2])
+    expected = attended_from_code(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 0
+    async with session_scope() as s:
+        survey = await surveys_svc.get_survey(s, survey_id)
+        if survey is None:
+            await call.answer("Опрос не найден", show_alert=True)
+            return
+        group = await accessible_group(s, survey.group_id, call.from_user.id)
+        if group is None:
+            await call.answer("Группа не найдена", show_alert=True)
+            return
+        claim = await s.get(SupportClaim, claim_id)
+        if claim is None:
+            await call.answer("Саппорт не найден", show_alert=True)
+            return
+        cur = claim.attended
+        stale = len(parts) > 3 and cur != expected
+        if not stale:
+            new_value = True if cur is None else (False if cur is True else None)
+            await supports_svc.set_support_attended(s, claim_id, new_value)
+        group_id = group.id
     await _render_attendance_roster(call, survey_id, group_id, page=page)
     await call.answer("Уже обновлено" if stale else "")

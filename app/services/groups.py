@@ -5,7 +5,7 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Group, SchoolMember
+from app.db.models import Admin, Group, GroupAdmin, SchoolMember
 
 
 def _gen_join_code() -> str:
@@ -25,7 +25,10 @@ async def create_group(
     venue_id: int | None = None,
     room: str | None = None,
     teachers_note: str | None = None,
+    created_by_admin_id: int | None = None,
 ) -> Group:
+    """Создаёт группу. Если задан `created_by_admin_id` — автор становится
+    ответственным (`GroupAdmin`) и куратором добора (`recruit_lead_admin_id`)."""
     group = Group(
         school_id=school_id,
         name=name,
@@ -38,10 +41,39 @@ async def create_group(
         room=room,
         teachers_note=teachers_note,
         join_code=_gen_join_code(),
+        recruit_lead_admin_id=created_by_admin_id,
     )
     session.add(group)
     await session.flush()
+    if created_by_admin_id is not None:
+        session.add(GroupAdmin(group_id=group.id, admin_id=created_by_admin_id))
+        await session.flush()
     return group
+
+
+async def set_recruit_lead(
+    session: AsyncSession, group_id: int, admin_id: int | None
+) -> None:
+    """Назначить/сменить куратора добора группы."""
+    group = await session.get(Group, group_id)
+    if group is not None:
+        group.recruit_lead_admin_id = admin_id
+        await session.flush()
+
+
+async def resolve_recruit_lead(session: AsyncSession, group: Group) -> Admin | None:
+    """Куратор добора группы: назначенный lead, иначе fallback на owner школы.
+    None если ни того, ни другого нет."""
+    if group.recruit_lead_admin_id is not None:
+        lead = await session.get(Admin, group.recruit_lead_admin_id)
+        if lead is not None:
+            return lead
+    if group.school_id is None:
+        return None
+    from app.services import admins as admins_svc
+    from app.services import schools as schools_svc
+    owner_tg = await schools_svc.get_owner_tg_id(session, group.school_id)
+    return await admins_svc.get_by_tg_id(session, owner_tg) if owner_tg else None
 
 
 _UNSET = object()
@@ -125,6 +157,18 @@ async def admin_visible_groups(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def my_groups(session: AsyncSession, admin_id: int) -> list[Group]:
+    """Группы, за которые админ ОТВЕЧАЕТ (есть запись GroupAdmin). «Мои группы».
+    Видимость всех групп школы — через карточку школы, не здесь."""
+    stmt = (
+        select(Group)
+        .join(GroupAdmin, GroupAdmin.group_id == Group.id)
+        .where(GroupAdmin.admin_id == admin_id)
+        .order_by(Group.school_id, Group.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def active_groups(session: AsyncSession) -> list[Group]:
     stmt = select(Group).where(Group.active.is_(True))
     return list((await session.execute(stmt)).scalars().all())
@@ -140,3 +184,63 @@ async def set_active(session: AsyncSession, group: Group, active: bool) -> None:
     не делает recruit; уже разосланные опросы продолжают жить до lesson_at."""
     group.active = active
     await session.flush()
+
+
+# ── ответственные за группу (маршрутизация админ-уведомлений) ─────────
+
+
+async def group_admin_ids(session: AsyncSession, group_id: int) -> set[int]:
+    """admin_id'ы, назначенные ответственными за группу. Пусто = не назначены."""
+    stmt = select(GroupAdmin.admin_id).where(GroupAdmin.group_id == group_id)
+    return set((await session.execute(stmt)).scalars().all())
+
+
+async def set_group_admin(
+    session: AsyncSession, group_id: int, admin_id: int, assigned: bool
+) -> None:
+    """Идемпотентно добавить/убрать ответственного за группу."""
+    existing = (await session.execute(
+        select(GroupAdmin).where(
+            GroupAdmin.group_id == group_id, GroupAdmin.admin_id == admin_id
+        )
+    )).scalar_one_or_none()
+    if assigned and existing is None:
+        session.add(GroupAdmin(group_id=group_id, admin_id=admin_id))
+    elif not assigned and existing is not None:
+        await session.delete(existing)
+    await session.flush()
+
+
+async def group_admin_tg_ids(
+    session: AsyncSession, group_id: int, school_id: int | None
+) -> list[int]:
+    """tg_user_id ответственных за группу. Если никто не назначен — fallback на
+    всех членов школы (поведение по умолчанию, пока ответственные не расставлены)."""
+    stmt = (
+        select(Admin.tg_user_id)
+        .join(GroupAdmin, GroupAdmin.admin_id == Admin.id)
+        .where(GroupAdmin.group_id == group_id)
+    )
+    tgs = list((await session.execute(stmt)).scalars().all())
+    if tgs:
+        return tgs
+    if school_id is None:
+        return []
+    from app.services import schools as schools_svc
+    return await schools_svc.member_tg_ids(session, school_id)
+
+
+async def can_manage_recruit(
+    session: AsyncSession, group_id: int, school_id: int | None, admin_id: int
+) -> bool:
+    """Разбирать добор может «куратор» группы (recruit lead). Если lead не задан —
+    fallback на любого члена школы."""
+    group = await session.get(Group, group_id)
+    if group is None:
+        return False
+    if group.recruit_lead_admin_id is not None:
+        return admin_id == group.recruit_lead_admin_id
+    if school_id is None:
+        return False
+    from app.services import schools as schools_svc
+    return await schools_svc.is_member(session, school_id, admin_id)

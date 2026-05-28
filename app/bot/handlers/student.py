@@ -24,6 +24,7 @@ from app.bot.states import JoinFlow
 from app.bot.utils import format_group_title, format_place
 from app.db.models import Gender, Group
 from app.db.session import session_scope
+from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
@@ -35,6 +36,16 @@ router = Router()
 
 JOIN_PREFIX = "join_"
 PARTNER_PREFIX = "partner_"
+SUPPORT_PREFIX = "support_"
+
+
+async def _notify_support_added(bot: Bot, admin_tg: int, name: str) -> None:
+    try:
+        await bot.send_message(
+            admin_tg, f"🆘 {name} готов(а) выручать — добавил(а) в твой пул саппортов."
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not notify admin %s about support: %s", admin_tg, e)
 
 
 def _display_name(tg) -> str:
@@ -83,6 +94,9 @@ async def join_start(
 
         await handle_school_invite_start(message, payload[len(PARTNER_PREFIX):])
         return
+    if payload.startswith(SUPPORT_PREFIX):
+        await _support_invite_start(message, payload[len(SUPPORT_PREFIX):], state, bot)
+        return
     if not payload.startswith(JOIN_PREFIX):
         await message.answer(
             "Ссылка-приглашение не распознана. Попроси преподавателя прислать новую."
@@ -126,6 +140,41 @@ async def join_start(
     )
 
 
+async def _support_invite_start(
+    message: Message, code: str, state: FSMContext, bot: Bot
+) -> None:
+    """Онбординг саппорта по персональной ссылке препода: Person в школе БЕЗ
+    группы → сразу в пул пригласившего препода (уровень 1)."""
+    tg = message.from_user
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_support_code(s, code)
+        school = await schools_svc.get_owned_school(s, admin.id) if admin else None
+        if admin is None or school is None:
+            await message.answer("Ссылка-приглашение саппорта не найдена или устарела.")
+            return
+        existing = await persons_svc.get_person(s, school.id, tg.id)
+        known = existing is not None and existing.gender is not None
+        admin_id, admin_tg, school_id = admin.id, admin.tg_user_id, school.id
+        if known:
+            await persons_svc.set_pool_level(s, admin_id, existing.id, 1)
+            known_name = existing.full_name
+
+    if known:
+        await _notify_support_added(bot, admin_tg, known_name)
+        await message.answer(
+            "✅ Ты в пуле саппортов — препод позовёт, если на занятии не хватит пары."
+        )
+        return
+
+    await state.set_state(JoinFlow.name)
+    await state.update_data(support_admin_id=admin_id, support_school_id=school_id)
+    await message.answer(
+        "Привет! Запишу тебя саппортом — буду звать выручить, когда на занятии "
+        "не хватает пары.\n\nКак тебя зовут?",
+        reply_markup=join_name_keyboard(_display_name(tg)),
+    )
+
+
 @router.callback_query(JoinFlow.name, F.data == "join:name_ok")
 async def join_name_confirm(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(name=_display_name(call.from_user))
@@ -156,6 +205,28 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
     tg = call.from_user
     name = data.get("name") or _display_name(tg)
+
+    # Ветка онбординга саппорта (по support-ссылке): нет группы, сразу в пул.
+    if "support_admin_id" in data:
+        from app.db.models import Admin
+        async with session_scope() as s:
+            person = await persons_svc.ensure_person(
+                s, data["support_school_id"], tg.id, tg.username, name
+            )
+            await persons_svc.set_gender(s, person.id, gender)
+            await persons_svc.set_pool_level(s, data["support_admin_id"], person.id, 1)
+            inviter = await s.get(Admin, data["support_admin_id"])
+            inviter_tg = inviter.tg_user_id if inviter else None
+        await state.clear()
+        if call.message:
+            await call.message.edit_text(
+                f"✅ Готово, {name}! Ты в пуле саппортов — позову, когда на "
+                f"занятии не хватит пары."
+            )
+        await call.answer()
+        if inviter_tg is not None:
+            await _notify_support_added(bot, inviter_tg, name)
+        return
 
     async with session_scope() as s:
         group = await groups_svc.get_group(s, data["group_id"])

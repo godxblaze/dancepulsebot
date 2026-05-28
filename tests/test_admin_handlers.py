@@ -331,7 +331,7 @@ async def test_cb_group_delete_rejects_non_owner(db) -> None:
 async def test_cb_groups_list_empty(db) -> None:
     call = FakeCallback("grplist", 555)
     await cb_groups_list(call)
-    assert call.message.text is not None and "нет групп" in call.message.text
+    assert call.message.text is not None and "нет своих групп" in call.message.text
 
 
 # ── edit existing group ──────────────────────────────────────────────

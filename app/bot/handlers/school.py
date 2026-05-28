@@ -21,9 +21,9 @@ from app.bot.keyboards import (
     admin_menu_keyboard,
     confirm_school_delete_keyboard,
     confirm_school_leave_keyboard,
+    groups_keyboard,
     school_accept_keyboard,
     school_card_keyboard,
-    school_config_keyboard,
     school_picker_keyboard,
     school_tz_keyboard,
 )
@@ -137,6 +137,48 @@ async def cb_school_card(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data.startswith("schgroups:"))
+async def cb_school_groups(call: CallbackQuery) -> None:
+    """Все группы школы (любому члену). Tap → карточка группы."""
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_member(s, school_id, admin.id):
+            await call.answer("Нет доступа", show_alert=True)
+            return
+        groups = await groups_svc.school_groups(s, school_id)
+    if call.message:
+        if groups:
+            await call.message.edit_text(
+                "📋 Группы школы:",
+                reply_markup=groups_keyboard(groups, origin_school_id=school_id),
+            )
+        else:
+            await call.message.edit_text(
+                "В школе пока нет групп. Owner создаёт их кнопкой «➕ Новая группа»."
+            )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schnewgroup:"))
+async def cb_school_new_group(
+    call: CallbackQuery, dialog_manager: DialogManager
+) -> None:
+    """Старт мастера новой группы из карточки школы. Группу создаёт любой член
+    школы (owner или co-admin) — мастер заведёт её именно в этой школе."""
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_member(s, school_id, admin.id):
+            await call.answer("Нет доступа к школе", show_alert=True)
+            return
+    from app.bot.dialogs import NewGroupSG
+    await call.answer()
+    await dialog_manager.start(
+        NewGroupSG.style, mode=StartMode.RESET_STACK, data={"school_id": school_id}
+    )
+
+
 @router.callback_query(F.data.startswith("schlink:"))
 async def cb_school_invite_link(call: CallbackQuery, bot: Bot) -> None:
     school_id = int(call.data.split(":", 1)[1])
@@ -181,31 +223,6 @@ async def cb_school_remove_member(call: CallbackQuery, bot: Bot) -> None:
         await call.answer("Уже не co-admin", show_alert=True)
     if call.message is not None:
         await _render_school_card(call.message, school_id, me.id, edit=True)
-
-
-async def _render_school_config(call: CallbackQuery, school_id: int) -> None:
-    """Перерисовать экран настроек автодобора. threshold/cutoff живут на
-    owner'е школы — берём их оттуда."""
-    async with session_scope() as s:
-        owner_tg = await schools_svc.get_owner_tg_id(s, school_id)
-        owner = await admins_svc.get_by_tg_id(s, owner_tg) if owner_tg else None
-        if owner is None:
-            await call.answer()
-            return
-        threshold = owner.support_threshold
-        cutoff = owner.support_cutoff_hours
-    text = (
-        "⚙ <b>Настройки автодобора саппортов</b>\n\n"
-        f"Перекос пар (при какой разнице звать): <b>{threshold}</b>\n"
-        f"За сколько часов до занятия проверяем: <b>{cutoff} ч</b>\n\n"
-        "Тап на цифру — изменить."
-    )
-    if call.message:
-        await call.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=school_config_keyboard(school_id, threshold, cutoff),
-        )
 
 
 async def _render_school_tz(call: CallbackQuery, school_id: int) -> None:
@@ -263,68 +280,6 @@ async def cb_school_tz_set(call: CallbackQuery) -> None:
         await schools_svc.set_timezone(s, school_id, tz_name)
     await _render_school_tz(call, school_id)
     await call.answer(f"TZ: {tz_name}")
-
-
-@router.callback_query(F.data.startswith("schcfg:"))
-async def cb_school_config(call: CallbackQuery) -> None:
-    school_id = int(call.data.split(":", 1)[1])
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer("Только owner может менять настройки", show_alert=True)
-            return
-    await _render_school_config(call, school_id)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("schcfgt:"))
-async def cb_school_cfg_threshold(call: CallbackQuery) -> None:
-    parts = (call.data or "").split(":")
-    school_id, value = int(parts[1]), int(parts[2])
-    if value < 1 or value > 5:
-        await call.answer()
-        return
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer()
-            return
-        owner_tg = await schools_svc.get_owner_tg_id(s, school_id)
-        owner = await admins_svc.get_by_tg_id(s, owner_tg) if owner_tg else None
-        if owner is None:
-            await call.answer()
-            return
-        if owner.support_threshold == value:
-            await call.answer("Уже выбрано")
-            return
-        await admins_svc.set_support_threshold(s, owner.id, value)
-    await _render_school_config(call, school_id)
-    await call.answer(f"Перекос: {value}")
-
-
-@router.callback_query(F.data.startswith("schcfgc:"))
-async def cb_school_cfg_cutoff(call: CallbackQuery) -> None:
-    parts = (call.data or "").split(":")
-    school_id, value = int(parts[1]), int(parts[2])
-    if value < 1 or value > 48:
-        await call.answer()
-        return
-    async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
-            await call.answer()
-            return
-        owner_tg = await schools_svc.get_owner_tg_id(s, school_id)
-        owner = await admins_svc.get_by_tg_id(s, owner_tg) if owner_tg else None
-        if owner is None:
-            await call.answer()
-            return
-        if owner.support_cutoff_hours == value:
-            await call.answer("Уже выбрано")
-            return
-        await admins_svc.set_support_cutoff_hours(s, owner.id, value)
-    await _render_school_config(call, school_id)
-    await call.answer(f"Отсечка: {value} ч")
 
 
 @router.callback_query(F.data.startswith("schren:"))

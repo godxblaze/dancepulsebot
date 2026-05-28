@@ -74,8 +74,13 @@ class Admin(Base):
     tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
+    # Настройки автодобора — личные у каждого препода (его пул, его «когда удобно
+    # разбирать»). Используются для групп, где этот Admin — recruit lead.
     support_threshold: Mapped[int] = mapped_column(Integer, default=2)
-    support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=6)
+    support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=3)  # фаза 2, 0=выкл
+    recruit_evening_time: Mapped[str] = mapped_column(String(5), default="20:00")  # фаза 1
+    # Персональная переиспользуемая ссылка-приглашение саппорта (start=support_<code>).
+    support_code: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     # True если человек хоть раз прошёл onboarding (создал свою школу либо
     # принял partner-приглашение). Используется чтобы не показывать
     # CreateSchool-prompt бывшим co-admin'ам, которых сняли со всех школ.
@@ -165,6 +170,11 @@ class Group(Base):
     room: Mapped[str | None] = mapped_column(String(80), nullable=True)
     teachers_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
     join_code: Mapped[str] = mapped_column(String(32), unique=True)
+    # «Куратор добора» — чей пул/настройки/время использует автодобор этой группы.
+    # GroupAdmin (несколько) — для сводок/пингов; lead (один) — для recruiting.
+    recruit_lead_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -204,7 +214,7 @@ class Person(Base):
     gender: Mapped[Gender | None] = mapped_column(
         Enum(Gender, name="gender"), nullable=True
     )
-    support_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # support_level переехал в SupportPoolEntry (per-teacher pool).
     helped_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -221,6 +231,40 @@ class Membership(Base):
     person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupAdmin(Base):
+    """Ответственный за группу admin. Маршрутизация админ-уведомлений группы
+    (picker автодобора, авто-сводка, stale/pending пинги) идёт на этих людей.
+    Если у группы нет ни одной записи — fallback на всех членов школы. Видимость
+    групп этим НЕ ограничивается — только уведомления."""
+
+    __tablename__ = "group_admins"
+    __table_args__ = (
+        UniqueConstraint("group_id", "admin_id", name="uq_group_admins"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupportPoolEntry(Base):
+    """Персональный пул саппортов препода: (admin, person) → level. Один человек
+    может быть в пулах нескольких преподов с разными уровнями. Уровень = приоритет
+    в picker'е (3 первым). Раньше был один `Person.support_level` на всю школу."""
+
+    __tablename__ = "support_pool_entries"
+    __table_args__ = (
+        UniqueConstraint("admin_id", "person_id", name="uq_support_pool"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Survey(Base):
@@ -278,6 +322,10 @@ class SupportCall(Base):
     # Помечается, когда scheduler отправил «никто не откликнулся за X часов» —
     # чтобы не пинговать препода повторно на каждом tick'е.
     no_reply_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Owner уже получил напоминание «разбери добор» по зависшему pending-call'у.
+    pending_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Фаза 2 уже отрабатывала на этом занятии (добор остатка делается один раз).
+    topup_done: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -294,4 +342,7 @@ class SupportClaim(Base):
         ForeignKey("support_calls.id", ondelete="CASCADE")
     )
     person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
+    # «Реально пришёл выручить?» — отмечается preподом после занятия. None = не
+    # отмечено. helped_count считается по числу claim'ов с attended=True.
+    attended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

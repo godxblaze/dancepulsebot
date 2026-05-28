@@ -481,7 +481,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
         )
         sup, _ = await persons_svc.add_to_group(s, sibling, 910, "u", "Саппорт")
         await persons_svc.set_gender(s, sup.id, Gender.male)
-        await persons_svc.set_support_level(s, sup.id, 2)
+        await persons_svc.set_pool_level(s, admin_id, sup.id, 2)
         sup_id = sup.id
 
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
@@ -558,7 +558,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
         for tg, name in ((1101, "S1"), (1102, "S2"), (1103, "S3")):
             sup, _ = await persons_svc.add_to_group(s, sibling, tg, "u", name)
             await persons_svc.set_gender(s, sup.id, Gender.male)
-            await persons_svc.set_support_level(s, sup.id, 2)
+            await persons_svc.set_pool_level(s, admin_id, sup.id, 2)
             pool_ids.append((sup.id, tg))
 
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
@@ -609,8 +609,9 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
 
     async with session_scope() as s:
         assert (await s.get(Person, sup3_pid)).helped_count == helped_3  # unchanged
-        assert (await s.get(Person, sup1_pid)).helped_count == 1
-        assert (await s.get(Person, sup2_pid)).helped_count == 1
+        # claim не инкрементит helped_count — он по факту явки (post-lesson).
+        assert (await s.get(Person, sup1_pid)).helped_count == 0
+        assert (await s.get(Person, sup2_pid)).helped_count == 0
 
 
 # ── 11. pool level cycle ─────────────────────────────────────────────
@@ -635,7 +636,9 @@ async def test_pool_level_cycle(db, monkeypatch) -> None:
             )
         )
         async with session_scope() as s:
-            assert (await s.get(Person, person_id)).support_level == want
+            teacher_row = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+            levels = await persons_svc.admin_pool_levels(s, teacher_row.id)
+            assert levels.get(person_id) == want
 
 
 # ── 12. stats shows recent closed surveys ────────────────────────────
@@ -745,7 +748,7 @@ async def test_full_tick(db, monkeypatch) -> None:
         )
         sup, _ = await persons_svc.add_to_group(s, sibling, 1410, "u", "Помощник")
         await persons_svc.set_gender(s, sup.id, Gender.male)
-        await persons_svc.set_support_level(s, sup.id, 2)
+        await persons_svc.set_pool_level(s, admin_id, sup.id, 2)
 
     # Pin the scheduler clock: 2h before lesson (after cutoff=6h, well past half-window)
     pinned_now = LESSON - timedelta(hours=2)

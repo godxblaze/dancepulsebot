@@ -3,20 +3,30 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
+
 from app.bot.handlers.recruit import (
     cb_support_join,
     cb_support_pick,
     cb_support_pick_send,
+    cb_support_pickmore,
     cb_support_skip,
 )
 from app.bot.keyboards import support_pick_keyboard
 from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import admins, groups, persons, supports, surveys
+from app.services import admins, groups, persons, schools, supports, surveys
 
 _MSK = ZoneInfo("Europe/Moscow")
-LESSON = datetime(2026, 5, 25, 19, 0, tzinfo=_MSK).astimezone(UTC)
+# Занятие в будущем (cb_support_join сверяет lesson_at с реальным utc_now —
+# фикс-дата в прошлом ломала бы guard «добор после начала занятия»). 19:00 МСК
+# через 14 дней: -30 ч заведомо раньше вечернего разбора, -3 ч — позже.
+LESSON = (
+    (datetime.now(UTC).astimezone(_MSK) + timedelta(days=14))
+    .replace(hour=19, minute=0, second=0, microsecond=0)
+    .astimezone(UTC)
+)
 
 
 class FakeCbMessage:
@@ -103,21 +113,21 @@ async def test_support_candidates_pool_gender_level(db) -> None:
         # male member of the target group, even in the pool — excluded
         member, _ = await persons.add_to_group(s, g, 1, "u", "Участник")
         await persons.set_gender(s, member.id, Gender.male)
-        await persons.set_support_level(s, member.id, 3)
+        await persons.set_pool_level(s, t.id, member.id, 3)
         # male pool members, not in the target group
         lo, _ = await persons.add_to_group(s, other, 2, "u", "Слабый")
         await persons.set_gender(s, lo.id, Gender.male)
-        await persons.set_support_level(s, lo.id, 1)
+        await persons.set_pool_level(s, t.id, lo.id, 1)
         hi, _ = await persons.add_to_group(s, other, 3, "u", "Сильный")
         await persons.set_gender(s, hi.id, Gender.male)
-        await persons.set_support_level(s, hi.id, 3)
+        await persons.set_pool_level(s, t.id, hi.id, 3)
         # male not in the pool — excluded
         out, _ = await persons.add_to_group(s, other, 4, "u", "Вне пула")
         await persons.set_gender(s, out.id, Gender.male)
         # female in the pool — wrong gender
         fp, _ = await persons.add_to_group(s, other, 5, "u", "Девушка")
         await persons.set_gender(s, fp.id, Gender.female)
-        await persons.set_support_level(s, fp.id, 2)
+        await persons.set_pool_level(s, t.id, fp.id, 2)
         tid, gid, lo_id, hi_id = t.id, g.id, lo.id, hi.id
     async with session_scope() as s:
         cands = await persons.support_candidates(s, tid, Gender.male, gid)
@@ -157,7 +167,8 @@ async def test_claim_fills_and_closes(db) -> None:
     async with session_scope() as s:
         call = await supports.get_call(s, cid)
         assert call is not None and call.status == SupportCallStatus.closed
-        assert (await s.get(Person, pids[0])).helped_count == 1
+        # claim сам по себе helped_count НЕ инкрементит — он по факту явки.
+        assert (await s.get(Person, pids[0])).helped_count == 0
         assert (await s.get(Person, pids[2])).helped_count == 0
 
 
@@ -169,7 +180,7 @@ async def test_claim_duplicate_not_double_counted(db) -> None:
         accepted, filled, _ = await supports.claim(s, cid, pids[0])  # same person
         assert not accepted and filled == 1
     async with session_scope() as s:
-        assert (await s.get(Person, pids[0])).helped_count == 1
+        assert (await s.get(Person, pids[0])).helped_count == 0  # явка не отмечена
 
 
 # ── scheduler _maybe_recruit ─────────────────────────────────────────
@@ -197,12 +208,15 @@ async def test_maybe_recruit_below_threshold_closes(db) -> None:
     assert bot.sent == []
 
 
-async def test_maybe_recruit_before_cutoff_does_nothing(db) -> None:
+async def test_maybe_recruit_before_evening_fix_does_nothing(db) -> None:
+    """Фаза 1 (вечерний разбор) не срабатывает раньше своего времени накануне.
+    Дефолт 20:00 МСК накануне = за ~23 ч до занятия; за 30 ч ещё рано."""
     g, survey_id = await _imbalanced_lesson()
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=10))
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=30))
     async with session_scope() as s:
         assert await supports.get_call_for_survey(s, survey_id) is None
+    assert bot.sent == []
 
 
 async def test_maybe_recruit_idempotent(db) -> None:
@@ -211,7 +225,58 @@ async def test_maybe_recruit_idempotent(db) -> None:
     now = LESSON - timedelta(hours=3)
     await sched._maybe_recruit(bot, g, LESSON, now)
     await sched._maybe_recruit(bot, g, LESSON, now)
-    assert len(bot.sent) == 1  # asked only once
+    assert len(bot.sent) == 1  # asked only once (фаза 2 без новой дыры молчит)
+
+
+async def test_topup_recruits_after_late_cancellation(db) -> None:
+    """Вечером баланс сложился (closed), потом отмены создали дыру — добор
+    остатка в день занятия её ловит и зовёт ещё."""
+    g, survey_id = await _imbalanced_lesson(males_yes=3, females_yes=3)  # balanced
+    bot = FakeBot()
+    # фаза 1 на вечерней фиксации — баланс ок, call закрыт, needed=0
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=20))
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, survey_id)
+        assert call is not None and call.status == SupportCallStatus.closed
+        # две девушки отменяются → перекос 3 vs 1
+        females = [
+            p for p in await persons.group_members(s, g.id)
+            if (await s.get(Person, p.id)).gender == Gender.female
+        ]
+        for p in females[:2]:
+            await surveys.record_answer(s, survey_id, p.id, Answer.no)
+        # в пуле lead'а (owner) есть две девушки-саппорта из соседней группы
+        owner = await admins.get_by_tg_id(s, 100)
+        other = await groups.create_group(s, g.school_id, "Сосед", "2", "20:00", 18)
+        for uid in (901, 902):
+            fp, _ = await persons.add_to_group(s, other, uid, "u", f"F{uid}")
+            await persons.set_gender(s, fp.id, Gender.female)
+            await persons.set_pool_level(s, owner.id, fp.id, 2)
+
+    # фаза 2 на доборе остатка (дефолт 3 ч до занятия)
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=2))
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, survey_id)
+        assert call.status == SupportCallStatus.pending
+        assert call.gender == Gender.female and call.needed == 2
+        assert call.topup_done is True
+    assert any(chat == 100 for chat, _ in bot.sent)  # owner got the top-up picker
+
+
+async def test_topup_disabled_when_cutoff_zero(db) -> None:
+    """support_cutoff_hours=0 — фаза 2 выключена, добора остатка нет."""
+    g, survey_id = await _imbalanced_lesson(males_yes=1, females_yes=4)
+    async with session_scope() as s:
+        owner = await admins.get_by_tg_id(s, 100)
+        await admins.set_support_cutoff_hours(s, owner.id, 0)
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=20))  # фаза 1
+    sent_after_phase1 = len(bot.sent)
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=1))  # фаза 2 off
+    assert len(bot.sent) == sent_after_phase1  # ничего нового
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, survey_id)
+        assert call.topup_done is False  # фаза 2 даже не запускалась
 
 
 # ── recruit picker ───────────────────────────────────────────────────
@@ -230,9 +295,10 @@ async def _call_with_pool_candidate():
         other = await groups.create_group(s, t.id, "Другая", "2", "20:00", 18)
         sup, _ = await persons.add_to_group(s, other, 700, "u", "Саппорт")
         await persons.set_gender(s, sup.id, Gender.male)
-        await persons.set_support_level(s, sup.id, 2)
+        await persons.set_pool_level(s, t.id, sup.id, 2)  # пул owner'а (= lead по fallback)
         return SimpleNamespace(
-            call_id=call.id, sup_pid=sup.id, admin_id=t.id, group_id=g.id
+            call_id=call.id, sup_pid=sup.id, admin_id=t.id,
+            group_id=g.id, school_id=g.school_id,
         )
 
 
@@ -340,3 +406,292 @@ async def test_support_flip_skip_without_prior_claim(db) -> None:
     await cb_support_skip(cb, bot)
     assert bot.sent == []  # teacher not pinged
     assert cb.message.text and "не сможешь" in cb.message.text
+
+
+# ── #5: claim после начала занятия ───────────────────────────────────
+
+
+async def test_claim_after_lesson_rejected(db) -> None:
+    """Поздний тап «приду выручить» после начала занятия не засчитывается."""
+    past = datetime.now(UTC) - timedelta(hours=1)
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, past
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.open
+        )
+        await persons.add_to_group(s, g, 700, "u", "Поздний")
+        call_id = call.id
+    bot = FakeBot()
+    cb = FakeCallback(f"sup:join:{call_id}", user_id=700)
+    await cb_support_join(cb, bot)
+    async with session_scope() as s:
+        assert await supports.count_claims(s, call_id) == 0
+    assert cb.message.text and "уже началось" in cb.message.text.lower()
+
+
+# ── #3: таймер «тишины» считается от отправки инвайтов ───────────────
+
+
+async def test_mark_invited_resets_silence_timer(db) -> None:
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.pending
+        )
+        # call создан давно и его уже как-то пинговали
+        call.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=5)
+        call.no_reply_notified = True
+        call_id = call.id
+    async with session_scope() as s:
+        await supports.mark_invited(s, call_id)
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+        assert call.status == SupportCallStatus.open
+        assert call.no_reply_notified is False
+        now_naive = datetime.now(UTC).replace(tzinfo=None)
+        stale = await supports.stale_open_calls(s, now_naive, timedelta(hours=1))
+        assert call_id not in [c.id for c in stale]  # таймер сброшен на «сейчас»
+
+
+# ── #4: нудж по зависшему pending-call'у ─────────────────────────────
+
+
+async def test_pending_call_nudges_owner_when_lesson_near(db) -> None:
+    soon = datetime.now(UTC) + timedelta(hours=2)
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, soon
+        )
+        await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.pending
+        )
+    bot = FakeBot()
+    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    assert any("не разобран" in txt for _, txt in bot.sent)
+    # идемпотентно — повторно не пингуем
+    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    assert sum(1 for _, txt in bot.sent if "не разобран" in txt) == 1
+
+
+async def test_pending_call_quiet_when_lesson_far(db) -> None:
+    """Занятие далеко (> PENDING_NUDGE_LEAD) — pending не дёргаем."""
+    far = datetime.now(UTC) + timedelta(hours=30)
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, far
+        )
+        await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.pending
+        )
+    bot = FakeBot()
+    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    assert bot.sent == []
+
+
+# ── #6: helped_count по факту явки ───────────────────────────────────
+
+
+async def test_support_attendance_drives_helped_count(db) -> None:
+    from app.bot.handlers.attendance import cb_support_attendance_toggle
+    from app.db.models import SupportClaim
+
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+    bot = FakeBot()
+    await cb_support_join(FakeCallback(f"sup:join:{ctx.call_id}", user_id=700), bot)
+    async with session_scope() as s:
+        # отклик есть, но явка ещё не отмечена → 0
+        assert (await s.get(Person, ctx.sup_pid)).helped_count == 0
+        claim = (await s.execute(
+            select(SupportClaim).where(SupportClaim.person_id == ctx.sup_pid)
+        )).scalar_one()
+        claim_id = claim.id
+        survey_id = (await supports.get_call(s, ctx.call_id)).survey_id
+
+    # препод отмечает «пришёл» в пост-leson ростере (код "x" = текущее None,
+    # как и рисует keyboards._attended_code)
+    await cb_support_attendance_toggle(
+        FakeCallback(f"supatt:{survey_id}:{claim_id}:x:0", user_id=100)
+    )
+    async with session_scope() as s:
+        assert (await s.get(Person, ctx.sup_pid)).helped_count == 1
+
+    # переключение в «не пришёл» → helped_count снова 0
+    await cb_support_attendance_toggle(
+        FakeCallback(f"supatt:{survey_id}:{claim_id}:y:0", user_id=100)
+    )
+    async with session_scope() as s:
+        assert (await s.get(Person, ctx.sup_pid)).helped_count == 0
+
+
+# ── #7: ответственные за группу + маршрутизация ──────────────────────
+
+
+async def test_group_admin_routing_and_access(db) -> None:
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "Owner")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        gid, school_id, owner_id = g.id, g.school_id, t.id
+        # group_admin_tg_ids (сводки/пинги): без назначения → все члены (owner)
+        assert await groups.group_admin_tg_ids(s, gid, school_id) == [100]
+        # recruit-доступ: lead не задан → fallback на члена школы
+        assert await groups.can_manage_recruit(s, gid, school_id, owner_id) is True
+        # назначаем lead'ом co-admin
+        co = await admins.get_or_create(s, 555, "c", "Co")
+        await schools.add_coadmin(s, school_id, co.id)
+        await groups.set_group_admin(s, gid, co.id, True)
+        assert set(await groups.group_admin_tg_ids(s, gid, school_id)) == {555}
+        await groups.set_recruit_lead(s, gid, co.id)
+        assert await groups.can_manage_recruit(s, gid, school_id, co.id) is True
+        # owner больше НЕ lead → не может разобрать добор
+        assert await groups.can_manage_recruit(s, gid, school_id, owner_id) is False
+
+
+async def test_recruit_picker_goes_to_lead_only(db) -> None:
+    g, _ = await _imbalanced_lesson(males_yes=1, females_yes=4)
+    async with session_scope() as s:
+        co = await admins.get_or_create(s, 555, "c", "Co")
+        await schools.add_coadmin(s, g.school_id, co.id)
+        await groups.set_recruit_lead(s, g.id, co.id)
+        g = await groups.get_group(s, g.id)  # перечитать со свежим lead
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    chats = {chat for chat, _ in bot.sent}
+    assert 555 in chats  # picker ушёл lead'у (co-admin)
+    assert 100 not in chats  # owner — нет (не lead)
+
+
+async def test_create_group_assigns_lead_and_responsible(db) -> None:
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "Owner")
+        g = await groups.create_group(
+            s, t.id, "G", "0", "19:00", 18, created_by_admin_id=t.id
+        )
+        assert g.recruit_lead_admin_id == t.id
+        assert t.id in await groups.group_admin_ids(s, g.id)
+        mine = await groups.my_groups(s, t.id)
+        assert [x.id for x in mine] == [g.id]
+
+
+async def test_pool_levels_are_per_teacher(db) -> None:
+    """Один человек в пулах двух преподов с разными уровнями — независимо."""
+    async with session_scope() as s:
+        t1 = await admins.get_or_create(s, 100, "a", "A")
+        t2 = await admins.get_or_create(s, 200, "b", "B")
+        g = await groups.create_group(s, t1.id, "G", "0", "19:00", 18)
+        await schools.add_coadmin(s, g.school_id, t2.id)
+        p, _ = await persons.add_to_group(s, g, 700, "u", "Саппорт")
+        await persons.set_pool_level(s, t1.id, p.id, 3)
+        await persons.set_pool_level(s, t2.id, p.id, 1)
+        assert (await persons.admin_pool_levels(s, t1.id)).get(p.id) == 3
+        assert (await persons.admin_pool_levels(s, t2.id)).get(p.id) == 1
+        # убрать из пула t1 не трогает пул t2
+        await persons.set_pool_level(s, t1.id, p.id, None)
+        assert (await persons.admin_pool_levels(s, t1.id)).get(p.id) is None
+        assert (await persons.admin_pool_levels(s, t2.id)).get(p.id) == 1
+
+
+async def test_pickmore_reveals_colleague_pool(db) -> None:
+    """«➕ из пула коллег»: у lead'а свой пул пуст, но у коллеги есть саппорт."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "Owner")  # lead по fallback
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.pending
+        )
+        co = await admins.get_or_create(s, 555, "c", "Co")
+        await schools.add_coadmin(s, g.school_id, co.id)
+        other = await groups.create_group(s, g.school_id, "Сосед", "2", "20:00", 18)
+        sup, _ = await persons.add_to_group(s, other, 701, "u", "Чужой пул")
+        await persons.set_gender(s, sup.id, Gender.male)
+        await persons.set_pool_level(s, co.id, sup.id, 2)  # в пуле коллеги, не lead'а
+        call_id, sup_id = call.id, sup.id
+    cb = FakeCallback(f"pickmore:{call_id}", user_id=100)
+    await cb_support_pickmore(cb)
+    callbacks = [
+        b.callback_data
+        for row in cb.message.reply_markup.inline_keyboard
+        for b in row
+    ]
+    assert f"pick:{call_id}:{sup_id}" in callbacks  # саппорт коллеги показан
+
+
+async def test_support_invite_known_person_added_to_pool(db) -> None:
+    """Существующий человек открыл support-ссылку препода → попал в его пул."""
+    from app.bot.handlers.student import _support_invite_start
+    from tests._fakes import FakeBot as FB
+    from tests._fakes import FakeFSM, FakeMessage, fake_user
+
+    async with session_scope() as s:
+        owner = await admins.get_or_create(s, 100, "t", "Owner")
+        g = await groups.create_group(s, owner.id, "G", "0", "19:00", 18)
+        p, _ = await persons.add_to_group(s, g, 700, "u", "Знакомый")
+        await persons.set_gender(s, p.id, Gender.male)
+        code = await admins.get_or_create_support_code(s, owner.id)
+        owner_id, pid = owner.id, p.id
+    bot = FB()
+    msg = FakeMessage(fake_user(700, full_name="Знакомый"), bot=bot)
+    await _support_invite_start(msg, code, FakeFSM(), bot)
+    async with session_scope() as s:
+        assert (await persons.admin_pool_levels(s, owner_id)).get(pid) == 1
+
+
+async def test_recruit_threshold_read_from_lead(db) -> None:
+    """Настройки автодобора — личные на Admin(lead): высокий порог → добора нет."""
+    g, survey_id = await _imbalanced_lesson(males_yes=1, females_yes=4)  # дефицит 3
+    async with session_scope() as s:
+        owner = await admins.get_by_tg_id(s, 100)  # lead по fallback
+        await admins.set_support_threshold(s, owner.id, 5)  # 3 < 5
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, survey_id)
+        assert call is not None and call.status == SupportCallStatus.closed
+    assert bot.sent == []
+
+
+async def test_picksend_blocked_when_already_handled(db) -> None:
+    """Второй ответственный со «стейл» picker'ом не задваивает инвайты."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)  # уже разобрано
+        cands = await persons.support_candidates(
+            s, ctx.admin_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, cands, {ctx.sup_pid})
+    bot = FakeBot()
+    send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
+    await cb_support_pick_send(send, bot)
+    assert bot.sent == []
+    assert send.answers and "разобрано" in send.answers[0].lower()
+
+
+async def test_support_join_notifies_assigned_admin_not_owner(db) -> None:
+    """Уведомление об отклике саппорта идёт ответственным за группу, не owner'у."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        co = await admins.get_or_create(s, 555, "c", "Co")
+        await schools.add_coadmin(s, ctx.school_id, co.id)
+        await groups.set_group_admin(s, ctx.group_id, co.id, True)
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+    bot = FakeBot()
+    await cb_support_join(FakeCallback(f"sup:join:{ctx.call_id}", user_id=700), bot)
+    chats = {chat for chat, _ in bot.sent}
+    assert 555 in chats  # ответственный co-admin уведомлён
+    assert 100 not in chats  # owner — нет (не ответственный)

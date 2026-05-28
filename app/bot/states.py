@@ -15,3 +15,10 @@ class CancelLesson(StatesGroup):
     """Опциональный ввод причины отмены занятия. group_id и ts — в FSM data."""
 
     reason = State()
+
+
+class EntitySearch(StatesGroup):
+    """Поиск по имени в длинных списках людей (walk-in / pool / ростер).
+    kind и контекст (survey_id/group_id) — в FSM data."""
+
+    query = State()

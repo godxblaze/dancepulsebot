@@ -21,6 +21,7 @@ from app.bot.handlers import (
     pool,
     recruit,
     school,
+    search,
     student,
     survey,
 )
@@ -49,6 +50,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(survey.router)
     dp.include_router(recruit.router)
     dp.include_router(pool.router)
+    dp.include_router(search.router)
     dp.include_router(lesson_cancel.router)
     dp.include_router(school.router)
     dp.include_router(attendance.router)

@@ -299,10 +299,22 @@ async def _finish_new_group(target: Message, manager: DialogManager) -> None:
         if admin is None:
             await manager.done()
             return
-        school = await schools_svc.get_or_create_owned_school(s, admin.id)
+        # Если мастер запущен из карточки конкретной школы — создаём группу
+        # ИМЕННО в ней (так co-admin заводит группы в чужой школе). Без контекста
+        # (команда /newgroup) — в собственную школу препода.
+        target_school_id = (manager.start_data or {}).get("school_id")
+        if target_school_id is not None:
+            if not await schools_svc.is_member(s, target_school_id, admin.id):
+                await target.answer("Нет доступа к этой школе — отменяю.")
+                await manager.done()
+                return
+            school_id = target_school_id
+        else:
+            school = await schools_svc.get_or_create_owned_school(s, admin.id)
+            school_id = school.id
         group = await groups_svc.create_group(
             s,
-            school.id,
+            school_id,
             derive_group_name(style, level),
             weekdays,
             data["lesson_time"],
@@ -312,6 +324,7 @@ async def _finish_new_group(target: Message, manager: DialogManager) -> None:
             venue_id=venue_id,
             room=room,
             teachers_note=teachers_note,
+            created_by_admin_id=admin.id,
         )
         code = group.join_code
         title = format_group_title(group)

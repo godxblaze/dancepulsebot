@@ -51,14 +51,19 @@ def weekdays_keyboard(selected: set[int]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def groups_keyboard(groups: list[Group]) -> InlineKeyboardMarkup:
+def groups_keyboard(
+    groups: list[Group], origin_school_id: int | None = None
+) -> InlineKeyboardMarkup:
+    """Список групп. `origin_school_id` — если список открыт из карточки школы:
+    тогда карточка группы вернёт «◀» назад в «Группы школы», а не в «Мои группы»."""
+    suffix = f":s{origin_school_id}" if origin_school_id is not None else ""
     kb = InlineKeyboardBuilder()
     for g in groups:
         prefix = "⏸ " if not g.active else ""
         label = f"{prefix}{g.name} · {g.style}" if g.style else f"{prefix}{g.name}"
         if len(label) > 64:
             label = label[:61] + "…"
-        kb.button(text=label, callback_data=f"grp:{g.id}")
+        kb.button(text=label, callback_data=f"grp:{g.id}{suffix}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -70,6 +75,8 @@ def group_actions_keyboard(
     *,
     has_upcoming: bool = True,
     has_closed_surveys: bool = True,
+    back_cb: str = "grplist",
+    back_label: str = "◀ К списку",
 ) -> InlineKeyboardMarkup:
     """Кнопки в карточке группы. Кнопки группируются в 2 колонки чтобы карточка
     влезала в один экран. Owner видит больше (изменить, пауза, удалить);
@@ -84,6 +91,9 @@ def group_actions_keyboard(
         flat.append(
             InlineKeyboardButton(text="✏️ Изменить", callback_data=f"grpedit:{group_id}")
         )
+        flat.append(InlineKeyboardButton(
+            text="👤 Ответственные", callback_data=f"grpadm:{group_id}",
+        ))
     if has_upcoming:
         flat.append(InlineKeyboardButton(
             text="🚫 Отменить занятие", callback_data=f"grpcancel:{group_id}",
@@ -108,7 +118,7 @@ def group_actions_keyboard(
     rows: list[list[InlineKeyboardButton]] = [
         flat[i:i + 2] for i in range(0, len(flat), 2)
     ]
-    rows.append([InlineKeyboardButton(text="◀ К списку", callback_data="grplist")])
+    rows.append([InlineKeyboardButton(text=back_label, callback_data=back_cb)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -125,10 +135,23 @@ def walk_in_picker_keyboard(
     nav = _pagination_row(page, total, f"wkpg:{survey_id}:{group_id}")
     if nav:
         rows.append(nav)
+    if len(candidates) > PAGE_SIZE:
+        rows.append([InlineKeyboardButton(
+            text="🔍 Поиск по имени",
+            callback_data=f"search:walkin:{survey_id}:{group_id}",
+        )])
     rows.append([InlineKeyboardButton(
         text="◀ Назад к ростеру", callback_data=f"atnlesson:{survey_id}:{group_id}",
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _attended_mark(attended: bool | None) -> str:
+    if attended is True:
+        return "✅"
+    if attended is False:
+        return "❌"
+    return "☐"
 
 
 def attendance_mark_keyboard(
@@ -136,18 +159,15 @@ def attendance_mark_keyboard(
     group_id: int,
     items: list[tuple[Person, bool | None, str | None]],
     page: int = 0,
+    supports: list[tuple[int, str, bool | None]] | None = None,
 ) -> InlineKeyboardMarkup:
     """Ростер для пост-leson отметки. items — (person, attended, promised_answer).
-    Отображает: ✅/❌/☐ слева + ✓/✗/— promise в скобках. Постранично по PAGE_SIZE."""
+    Отображает: ✅/❌/☐ слева + ✓/✗/— promise в скобках. Постранично по PAGE_SIZE.
+    supports — (claim_id, name, attended) согласившихся саппортов, отдельной
+    секцией 🆘 (помечаем кто реально пришёл — от этого считается «помог N раз»)."""
     page_items, page, total = _page_slice(items, page)
     rows: list[list[InlineKeyboardButton]] = []
     for person, attended, promised in page_items:
-        if attended is True:
-            mark = "✅"
-        elif attended is False:
-            mark = "❌"
-        else:
-            mark = "☐"
         if promised == "yes":
             hint = "✓"
         elif promised == "no":
@@ -155,7 +175,7 @@ def attendance_mark_keyboard(
         else:
             hint = "—"
         rows.append([InlineKeyboardButton(
-            text=f"{mark} {person.full_name} ({hint})",
+            text=f"{_attended_mark(attended)} {person.full_name} ({hint})",
             callback_data=(
                 f"atntog:{survey_id}:{person.id}:{_attended_code(attended)}:{page}"
             ),
@@ -163,10 +183,34 @@ def attendance_mark_keyboard(
     nav = _pagination_row(page, total, f"atnpg:{survey_id}:{group_id}")
     if nav:
         rows.append(nav)
+    for claim_id, name, attended in supports or []:
+        rows.append([InlineKeyboardButton(
+            text=f"{_attended_mark(attended)} 🆘 {name}",
+            callback_data=(
+                f"supatt:{survey_id}:{claim_id}:{_attended_code(attended)}:{page}"
+            ),
+        )])
     rows.append([InlineKeyboardButton(
         text="➕ Был ещё кто-то (walk-in)",
         callback_data=f"atnwk:{survey_id}:{group_id}",
     )])
+    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_admins_keyboard(
+    group_id: int, members: list[tuple[int, str, bool]]
+) -> InlineKeyboardMarkup:
+    """Назначение ответственных за группу. members — (admin_id, name, assigned).
+    Тап переключает ✅/☐. Уведомления группы идут назначенным; если никто не
+    отмечен — всем членам школы."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text=f"{'✅' if assigned else '☐'} {name}",
+            callback_data=f"grpadmtog:{group_id}:{admin_id}",
+        )]
+        for admin_id, name, assigned in members
+    ]
     rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -217,12 +261,16 @@ def school_card_keyboard(
     """Карточка школы. Owner видит больше (пригласить, настройки, переименовать,
     timezone, удалить); co-admin — только посмотреть состав и выйти."""
     rows: list[list[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton(
+        text="📋 Группы школы", callback_data=f"schgroups:{school_id}",
+    )])
+    # Создавать группы может любой член школы (owner и co-admin).
+    rows.append([InlineKeyboardButton(
+        text="➕ Новая группа", callback_data=f"schnewgroup:{school_id}",
+    )])
     if is_owner:
         rows.append([InlineKeyboardButton(
             text="➕ Пригласить co-админа", callback_data=f"schlink:{school_id}",
-        )])
-        rows.append([InlineKeyboardButton(
-            text="⚙ Настройки автодобора", callback_data=f"schcfg:{school_id}",
         )])
         rows.append([InlineKeyboardButton(
             text="🌐 Часовой пояс", callback_data=f"schtz:{school_id}",
@@ -279,30 +327,8 @@ def school_tz_keyboard(school_id: int, current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def school_config_keyboard(
-    school_id: int, threshold: int, cutoff_hours: int
-) -> InlineKeyboardMarkup:
-    """Двухстрочный picker: «перекос» (1..5) и «за сколько часов проверяем» (2..24).
-    Текущее значение помечено ✅."""
-    th_row = [
-        InlineKeyboardButton(
-            text=f"{'✅' if n == threshold else ''} {n}",
-            callback_data=f"schcfgt:{school_id}:{n}",
-        )
-        for n in (1, 2, 3, 4, 5)
-    ]
-    cut_row = [
-        InlineKeyboardButton(
-            text=f"{'✅' if h == cutoff_hours else ''} {h}ч",
-            callback_data=f"schcfgc:{school_id}:{h}",
-        )
-        for h in (2, 4, 6, 8, 12, 24)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[
-        th_row,
-        cut_row,
-        [InlineKeyboardButton(text="◀ К школе", callback_data=f"schcard:{school_id}")],
-    ])
+EVENING_TIMES = ("18:00", "19:00", "20:00", "21:00", "22:00")
+TOPUP_HOURS = (0, 3, 4, 6)
 
 
 def school_members_keyboard(
@@ -471,17 +497,30 @@ def _gender_glyph(gender: Gender | None) -> str:
     return "·"
 
 
-def students_keyboard(group_id: int, members: list[Person]) -> InlineKeyboardMarkup:
-    """Group roster — each name is a button opening the person card."""
-    kb = InlineKeyboardBuilder()
-    for p in members:
-        glyph = _gender_glyph(p.gender)
-        lvl = f" · ур.{p.support_level}" if p.support_level else ""
-        kb.button(text=f"{glyph} {p.full_name}{lvl}", callback_data=f"pcard:{group_id}:{p.id}")
-    kb.button(text="📨 Пригласить ещё", callback_data=f"grpinv:{group_id}")
-    kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
-    kb.adjust(1)
-    return kb.as_markup()
+def students_keyboard(
+    group_id: int, members: list[Person], page: int = 0
+) -> InlineKeyboardMarkup:
+    """Group roster — each name is a button opening the person card. Постранично."""
+    page_items, page, total = _page_slice(members, page)
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text=f"{_gender_glyph(p.gender)} {p.full_name}",
+            callback_data=f"pcard:{group_id}:{p.id}",
+        )]
+        for p in page_items
+    ]
+    nav = _pagination_row(page, total, f"stupg:{group_id}")
+    if nav:
+        rows.append(nav)
+    if len(members) > PAGE_SIZE:
+        rows.append([InlineKeyboardButton(
+            text="🔍 Поиск по имени", callback_data=f"search:students:{group_id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="📨 Пригласить ещё", callback_data=f"grpinv:{group_id}",
+    )])
+    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def person_card_keyboard(
@@ -628,37 +667,93 @@ def attended_from_code(code: str) -> bool | None:
     return None
 
 
-def pool_keyboard(persons: list[Person], page: int = 0) -> InlineKeyboardMarkup:
+def pool_keyboard(
+    persons: list[Person], levels: dict[int, int], page: int = 0
+) -> InlineKeyboardMarkup:
+    """Личный пул препода. `levels` — {person_id: уровень} ЭТОГО препода."""
     page_items, page, total = _page_slice(persons, page)
     rows: list[list[InlineKeyboardButton]] = []
     for p in page_items:
-        if p.support_level is None:
+        lvl = levels.get(p.id)
+        if lvl is None:
             label = f"☐ {p.full_name}"
         else:
             helped = f" · помог {p.helped_count}" if p.helped_count else ""
-            label = f"✅ {p.full_name} · ур.{p.support_level}{helped}"
+            label = f"✅ {p.full_name} · ур.{lvl}{helped}"
         # state и page в callback_data: idempotency-guard + возврат на ту же
         # страницу после toggle.
         rows.append([InlineKeyboardButton(
             text=label,
-            callback_data=f"tpool:{p.id}:{_lvl_code(p.support_level)}:{page}",
+            callback_data=f"tpool:{p.id}:{_lvl_code(lvl)}:{page}",
         )])
     nav = _pagination_row(page, total, "poolpg")
     if nav:
         rows.append(nav)
+    if len(persons) > PAGE_SIZE:
+        rows.append([InlineKeyboardButton(
+            text="🔍 Поиск по имени", callback_data="search:pool",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="📨 Пригласить саппорта", callback_data="poolinvite",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="⚙ Настройки добора", callback_data="poolcfg",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def support_pick_keyboard(
-    call_id: int, candidates: list[Person], selected: set[int]
+def recruit_config_keyboard(
+    threshold: int, evening_time: str, topup_hours: int
 ) -> InlineKeyboardMarkup:
+    """Личные настройки автодобора препода (3 ряда: перекос / время / добор).
+    Колбэки admin-scoped — пишут в Admin звонящего, без school_id."""
+    th_row = [
+        InlineKeyboardButton(
+            text=f"{'✅' if n == threshold else ''} {n}",
+            callback_data=f"rcfgt:{n}",
+        )
+        for n in (1, 2, 3, 4, 5)
+    ]
+    eve_row = [
+        InlineKeyboardButton(
+            text=f"{'✅' if t == evening_time else ''} {t}",
+            callback_data=f"rcfge:{t.replace(':', '')}",
+        )
+        for t in EVENING_TIMES
+    ]
+    topup_row = [
+        InlineKeyboardButton(
+            text=f"{'✅' if h == topup_hours else ''} "
+            + ("выкл" if h == 0 else f"{h}ч"),
+            callback_data=f"rcfgc:{h}",
+        )
+        for h in TOPUP_HOURS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[th_row, eve_row, topup_row, [
+        InlineKeyboardButton(text="◀ К пулу", callback_data="poolback"),
+    ]])
+
+
+def support_pick_keyboard(
+    call_id: int,
+    candidates: list[Person],
+    selected: set[int],
+    levels: dict[int, int] | None = None,
+    *,
+    can_expand: bool = False,
+) -> InlineKeyboardMarkup:
+    """Picker добора. `levels` — {person_id: уровень} из пула lead'а (у саппов
+    коллег уровня нет). `can_expand` — показать кнопку «➕ из пула коллег»."""
+    levels = levels or {}
     kb = InlineKeyboardBuilder()
     for p in candidates:
         mark = "✅" if p.id in selected else "☐"
-        lvl = f" · ур.{p.support_level}" if p.support_level else ""
+        lvl = f" · ур.{levels[p.id]}" if p.id in levels else ""
         kb.button(
             text=f"{mark} {p.full_name}{lvl}", callback_data=f"pick:{call_id}:{p.id}"
         )
+    if can_expand:
+        kb.button(text="➕ из пула коллег", callback_data=f"pickmore:{call_id}")
     kb.button(text=f"📨 Позвать ({len(selected)})", callback_data=f"picksend:{call_id}")
     kb.adjust(1)
     return kb.as_markup()
@@ -707,17 +802,33 @@ MENU_TEXTS = frozenset({
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     """Persistent bottom menu for the admin — instead of typing slash-commands."""
+    # «Новая группа» уехала в карточку школы, «Экспорт» — в /stats.
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
             [KeyboardButton(text=MENU_STATS), KeyboardButton(text=MENU_POOL)],
-            [KeyboardButton(text=MENU_NEWGROUP), KeyboardButton(text=MENU_SCHOOL)],
-            [KeyboardButton(text=MENU_EXPORT), KeyboardButton(text=MENU_NAME)],
+            [KeyboardButton(text=MENU_SCHOOL), KeyboardButton(text=MENU_NAME)],
             [KeyboardButton(text=MENU_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def stats_keyboard(scope: str) -> InlineKeyboardMarkup:
+    """Переключатель охвата статистики (школа ↔ мои группы) + экспорт CSV."""
+    if scope == "school":
+        toggle = InlineKeyboardButton(
+            text="👥 Только мои группы", callback_data="statsscope:mine",
+        )
+    else:
+        toggle = InlineKeyboardButton(
+            text="🏫 По всей школе", callback_data="statsscope:school",
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [toggle],
+        [InlineKeyboardButton(text="📤 Экспорт CSV", callback_data="statsexport")],
+    ])
 
 
 def onboarding_menu_keyboard() -> ReplyKeyboardMarkup:

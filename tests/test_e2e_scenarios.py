@@ -519,6 +519,11 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
 
 async def test_support_oversubscription(db, monkeypatch) -> None:
     bot = FakeBot()
+    # Пиним часы recruit-хендлера к «за 2ч до занятия», иначе join-гард
+    # (lesson_at <= utc_now → добор закрыт) рубит claim'ы, когда LESSON в прошлом.
+    monkeypatch.setattr(
+        "app.bot.handlers.recruit.utc_now", lambda: LESSON - timedelta(hours=2)
+    )
     group_id = await _create_group_via_wizard(bot, monkeypatch)
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)

@@ -85,6 +85,12 @@ async def _join_via_link(
 
 async def test_full_recruit_scenario(db, monkeypatch) -> None:
     bot = FakeBot()
+    # Пиним часы recruit-хендлера к «за 2ч до занятия», чтобы join-гард
+    # (lesson_at <= utc_now → добор закрыт) не срабатывал, когда LESSON в прошлом
+    # относительно реального времени.
+    monkeypatch.setattr(
+        "app.bot.handlers.recruit.utc_now", lambda: LESSON - timedelta(hours=2)
+    )
 
     # 1. Teacher creates a group via the /newgroup wizard.
     group_id = await _create_group_via_wizard(bot, monkeypatch)

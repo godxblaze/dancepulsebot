@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.schedule import (
     evening_fix_at,
+    format_weekday_long,
     format_weekdays,
     next_lesson_at,
     parse_weekdays,
@@ -32,6 +33,16 @@ def test_format_weekdays() -> None:
     assert format_weekdays("0,2") == "Пн, Ср"
     assert format_weekdays("") == "—"
     assert format_weekdays("6") == "Вс"
+
+
+def test_format_weekday_long() -> None:
+    # 2026-05-20 — среда по МСК
+    assert format_weekday_long(_msk(2026, 5, 20, 19, 0), tz="Europe/Moscow") == "среда"
+    # 00:30 четверга по МСК (= 21:30 UTC среды) — день берётся в школьном TZ,
+    # а не в UTC, иначе было бы «среда»
+    assert (
+        format_weekday_long(_msk(2026, 5, 21, 0, 30), tz="Europe/Moscow") == "четверг"
+    )
 
 
 def test_next_lesson_today_later() -> None:

@@ -30,6 +30,7 @@ from app.services.schedule import (
     as_utc,
     evening_fix_at,
     format_lesson_at,
+    format_weekday_long,
     next_lesson_at,
     utc_now,
 )
@@ -78,14 +79,16 @@ async def _poll_group(
     place = format_place(group, venue)
     lines = [
         f"💓 <b>{escape(format_group_title(group))}</b>",
-        f"Занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}.",
+        f"📅 <b>{format_weekday_long(lesson_at, tz=tz)}, "
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
     ]
-    if place:
-        lines.append(f"📍 {escape(place)}")
     if group.teachers_note:
         lines.append(f"👤 {escape(group.teachers_note)}")
     lines.append("")
     lines.append("Придёшь?")
+    if place:
+        lines.append("")
+        lines.append(f"📍 {escape(place)}")
     text = "\n".join(lines)
     sent = 0
     for p in to_poll:
@@ -451,14 +454,17 @@ async def _maybe_remind(
     place = format_place(group, venue)
     lines = [
         f"⏰ <b>{escape(format_group_title(group))}</b>",
-        f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}.",
+        f"📅 <b>{format_weekday_long(lesson_at, tz=tz)}, "
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
+        "Напоминаю, что скоро занятие.",
     ]
-    if place:
-        lines.append(f"📍 {escape(place)}")
     if group.teachers_note:
         lines.append(f"👤 {escape(group.teachers_note)}")
     lines.append("")
     lines.append("Придёшь?")
+    if place:
+        lines.append("")
+        lines.append(f"📍 {escape(place)}")
     text = "\n".join(lines)
 
     sent = 0

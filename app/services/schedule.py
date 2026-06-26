@@ -73,6 +73,18 @@ def format_weekdays(weekdays: str) -> str:
     return ", ".join(names[d] for d in days) if days else "—"
 
 
+def format_weekday_long(dt: datetime, *, tz: str | None = None) -> str:
+    """День недели прописью для aware UTC в школьном TZ. Без strftime('%A') —
+    оно зависит от локали рантайма."""
+    names = [
+        "понедельник", "вторник", "среда", "четверг",
+        "пятница", "суббота", "воскресенье",
+    ]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return names[dt.astimezone(school_tz_zone(tz)).weekday()]
+
+
 def next_lesson_at(
     weekdays: str,
     lesson_time: str,

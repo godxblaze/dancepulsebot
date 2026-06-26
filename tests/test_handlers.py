@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.bot.handlers.survey import on_attendance
-from app.db.models import SurveyKind
+from app.db.models import Gender, SurveyKind
 from app.db.session import session_scope
 from app.services import admins, groups, persons, surveys
 
@@ -51,6 +51,65 @@ async def test_attendance_answer_recorded(db) -> None:
     async with session_scope() as s:
         summary = await surveys.summarize(s, survey_id)
     assert (summary.yes, summary.no) == (1, 0)
+
+
+async def test_attendance_shows_who_is_coming_by_gender(db) -> None:
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 1, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        boris, _ = await persons.add_to_group(s, g, 700, "u", "Боря")
+        await persons.set_gender(s, boris.id, Gender.male)
+        anya, _ = await persons.add_to_group(s, g, 701, "u", "Аня")
+        await persons.set_gender(s, anya.id, Gender.female)
+        masha, _ = await persons.add_to_group(s, g, 702, "u", "Маша")
+        await persons.set_gender(s, masha.id, Gender.female)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        await surveys.ensure_responses(s, survey.id, [boris.id, anya.id, masha.id])
+        survey_id = survey.id
+
+    call = None
+    for uid in (700, 701, 702):
+        call = FakeCallback(f"att:{survey_id}:yes", user_id=uid)
+        await on_attendance(call)
+
+    text = call.message.text
+    assert "Идут (3)" in text
+    assert "👨 1: Боря" in text
+    assert "👩 2:" in text
+    assert "Аня" in text and "Маша" in text
+
+
+async def test_attendance_no_answer_shows_others_excludes_self(db) -> None:
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 1, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        boris, _ = await persons.add_to_group(s, g, 700, "u", "Боря")
+        await persons.set_gender(s, boris.id, Gender.male)
+        oleg, _ = await persons.add_to_group(s, g, 701, "u", "Олег")
+        await persons.set_gender(s, oleg.id, Gender.male)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        await surveys.ensure_responses(s, survey.id, [boris.id, oleg.id])
+        survey_id = survey.id
+
+    await on_attendance(FakeCallback(f"att:{survey_id}:yes", user_id=700))  # Боря идёт
+    call = FakeCallback(f"att:{survey_id}:no", user_id=701)  # Олег — нет
+    await on_attendance(call)
+    assert "не придёшь" in call.message.text
+    assert "Идут (1):" in call.message.text and "👨 1: Боря" in call.message.text
+    assert "Олег" not in call.message.text  # но не себя
+
+
+async def test_attendance_no_answer_empty_roster_no_placeholder(db) -> None:
+    survey_id = await _survey_with_member()  # один участник, ещё никто не идёт
+    call = FakeCallback(f"att:{survey_id}:no", user_id=700)
+    await on_attendance(call)
+    assert "не придёшь" in call.message.text
+    assert "Идут" not in call.message.text
+    assert "будь первым" not in call.message.text
 
 
 async def test_attendance_rejects_non_member(db) -> None:

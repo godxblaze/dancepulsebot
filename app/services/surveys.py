@@ -31,6 +31,20 @@ class SurveySummary:
     actual_marked: int = 0  # сколько вообще получили attendance-метку
 
 
+@dataclass
+class ComingRoster:
+    """Имена ответивших «приду», разбитые по полу — для соц-доказательства
+    в опросе («кто ещё идёт»). Пол может быть не указан → bucket unknown."""
+
+    male: list[str]
+    female: list[str]
+    unknown: list[str]
+
+    @property
+    def total(self) -> int:
+        return len(self.male) + len(self.female) + len(self.unknown)
+
+
 async def get_survey(session: AsyncSession, survey_id: int) -> Survey | None:
     return await session.get(Survey, survey_id)
 
@@ -129,6 +143,27 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
         actual_attended=actual_attended if actual_marked else None,
         actual_marked=actual_marked,
     )
+
+
+async def coming_by_gender(session: AsyncSession, survey_id: int) -> ComingRoster:
+    """Имена ответивших «приду» по этому опросу, разбитые по полу (по имени)."""
+    stmt = (
+        select(Person)
+        .join(Response, Response.person_id == Person.id)
+        .where(Response.survey_id == survey_id, Response.answer == Answer.yes)
+        .order_by(Person.full_name)
+    )
+    male: list[str] = []
+    female: list[str] = []
+    unknown: list[str] = []
+    for person in (await session.execute(stmt)).scalars().all():
+        if person.gender == Gender.male:
+            male.append(person.full_name)
+        elif person.gender == Gender.female:
+            female.append(person.full_name)
+        else:
+            unknown.append(person.full_name)
+    return ComingRoster(male, female, unknown)
 
 
 async def close_past_surveys(session: AsyncSession, now: datetime) -> int:

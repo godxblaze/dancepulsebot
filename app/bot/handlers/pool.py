@@ -12,9 +12,11 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from app.bot import ui
 from app.bot.keyboards import (
     EVENING_TIMES,
     MENU_POOL,
+    RECRUIT_MODE_LABELS,
     TOPUP_HOURS,
     lvl_from_code,
     pool_keyboard,
@@ -32,7 +34,7 @@ router = Router()
 
 _MAX_LEVEL = 3
 _POOL_HEAD = (
-    "🆘 Личный пул саппортов.\n"
+    f"{ui.SUPPORT} Личный пул саппортов.\n"
     "Уровень — приоритет в picker'е при автодоборе: "
     "ур.3 первым, ур.1 последним.\n"
     "Тап по человеку: 1 → 2 → 3 → убрать из пула."
@@ -86,10 +88,10 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
         person = await s.get(Person, person_id)
         if teacher is None or person is None or person.school_id is None:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         if not await schools_svc.is_member(s, person.school_id, teacher.id):
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         levels = await persons_svc.admin_pool_levels(s, teacher.id)
         current = levels.get(person_id)
@@ -161,20 +163,33 @@ async def cb_pool_invite(call: CallbackQuery, bot: Bot) -> None:
 
 def _topup_line(topup: int) -> str:
     return (
-        f"☀️ В день занятия за {topup} ч добью остаток."
+        f"{ui.DAY} В день занятия за {topup} ч добью остаток."
         if topup > 0
-        else "☀️ Добор в день занятия выключен."
+        else f"{ui.DAY} Добор в день занятия выключен."
     )
 
 
+# Человеческое описание каждого режима — показывается под выбранным режимом.
+_MODE_DESC: dict[str, str] = {
+    "curated": "покажу список — сам выбираю, кого позвать.",
+    "open_race": "сразу зову весь подходящий пул, кто первый — тот и выручает.",
+    "auto_top": "сам зову лучших по уровню (сколько не хватает), без твоего участия.",
+    "escalate": "сначала выбираешь сам, но если не успел — докину автоматически.",
+}
+
+
 async def _render_recruit_config(call: CallbackQuery, teacher) -> None:
+    mode_label = RECRUIT_MODE_LABELS.get(teacher.recruit_mode, teacher.recruit_mode)
+    mode_desc = _MODE_DESC.get(teacher.recruit_mode, "")
     text = (
-        "⚙ <b>Автодобор саппортов</b> (твои настройки)\n\n"
-        f"🌙 Накануне в <b>{teacher.recruit_evening_time}</b> покажу баланс пар "
+        f"{ui.SETTINGS} <b>Автодобор саппортов</b> (твои настройки)\n\n"
+        f"{ui.EVENING} Накануне в <b>{teacher.recruit_evening_time}</b> покажу баланс пар "
         "и кого позвать.\n"
         f"{_topup_line(teacher.support_cutoff_hours)}\n"
-        f"⚖️ Зову, если без пары останутся ≥ <b>{teacher.support_threshold}</b> чел.\n\n"
-        "Строки ниже: ⚖️ перекос · 🌙 разбор · ☀️ добор."
+        f"{ui.BALANCE} Зову, если без пары останутся ≥ "
+        f"<b>{teacher.support_threshold}</b> чел.\n\n"
+        f"{ui.SUPPORT} Режим: <b>{mode_label}</b> — {mode_desc}\n\n"
+        "Меняй кнопками ниже 👇"
     )
     if call.message:
         await call.message.edit_text(
@@ -184,6 +199,7 @@ async def _render_recruit_config(call: CallbackQuery, teacher) -> None:
                 teacher.support_threshold,
                 teacher.recruit_evening_time,
                 teacher.support_cutoff_hours,
+                teacher.recruit_mode,
             ),
         )
 
@@ -252,3 +268,20 @@ async def cb_cfg_evening(call: CallbackQuery) -> None:
             await s.refresh(teacher)
         await _render_recruit_config(call, teacher)
     await call.answer(f"Разбор: {value}")
+
+
+@router.callback_query(F.data.startswith("rcfgmode:"))
+async def cb_cfg_mode(call: CallbackQuery) -> None:
+    value = (call.data or "").split(":", 1)[1]
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if teacher is None:
+            await call.answer()
+            return
+        if teacher.recruit_mode != value:
+            if not await admins_svc.set_recruit_mode(s, teacher.id, value):
+                await call.answer()  # невалидное значение — без изменений
+                return
+            await s.refresh(teacher)
+        await _render_recruit_config(call, teacher)
+    await call.answer(RECRUIT_MODE_LABELS.get(value, value))

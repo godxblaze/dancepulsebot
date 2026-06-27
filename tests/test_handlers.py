@@ -15,9 +15,11 @@ LESSON = datetime(2026, 5, 25, 19, 0, tzinfo=_MSK).astimezone(UTC)
 class FakeCbMessage:
     def __init__(self) -> None:
         self.text: str | None = None
+        self.parse_mode: str | None = None
 
     async def edit_text(self, text, **kwargs) -> None:
         self.text = text
+        self.parse_mode = kwargs.get("parse_mode")
 
 
 class FakeCallback:
@@ -75,10 +77,32 @@ async def test_attendance_shows_who_is_coming_by_gender(db) -> None:
         await on_attendance(call)
 
     text = call.message.text
-    assert "Идут (3)" in text
-    assert "👨 1: Боря" in text
-    assert "👩 2:" in text
+    assert "Идут 3 человека" in text
+    assert "🕺 1: Боря" in text
+    assert "💃 2:" in text
     assert "Аня" in text and "Маша" in text
+
+
+async def test_attendance_message_is_html_and_escapes_names(db) -> None:
+    """Пост-ответ редактируется в HTML-режиме, имена со спец-символами
+    экранируются (регрессия Phase 3: escape без parse_mode ломал отображение)."""
+    from aiogram.enums import ParseMode
+
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 1, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        tom, _ = await persons.add_to_group(s, g, 700, "u", "Tom & Jerry")
+        await persons.set_gender(s, tom.id, Gender.male)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        await surveys.ensure_responses(s, survey.id, [tom.id])
+        survey_id = survey.id
+
+    call = FakeCallback(f"att:{survey_id}:yes", user_id=700)
+    await on_attendance(call)
+    assert call.message.parse_mode == ParseMode.HTML
+    assert "Tom &amp; Jerry" in call.message.text  # экранировано, не сырое «&»
 
 
 async def test_attendance_no_answer_shows_others_excludes_self(db) -> None:
@@ -99,7 +123,7 @@ async def test_attendance_no_answer_shows_others_excludes_self(db) -> None:
     call = FakeCallback(f"att:{survey_id}:no", user_id=701)  # Олег — нет
     await on_attendance(call)
     assert "не придёшь" in call.message.text
-    assert "Идут (1):" in call.message.text and "👨 1: Боря" in call.message.text
+    assert "Идёт 1 человек:" in call.message.text and "🕺 1: Боря" in call.message.text
     assert "Олег" not in call.message.text  # но не себя
 
 

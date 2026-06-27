@@ -99,6 +99,18 @@ async def unclaim(
     return True
 
 
+async def set_picker_ref(
+    session: AsyncSession, call_id: int, chat_id: int, message_id: int
+) -> None:
+    """B8: запомнить (chat_id, message_id) recruit-сообщения lead'а — чтобы потом
+    обновлять в нём баланс-строку при claim/skip."""
+    call = await session.get(SupportCall, call_id)
+    if call is not None:
+        call.picker_chat_id = chat_id
+        call.picker_message_id = message_id
+        await session.flush()
+
+
 async def mark_invited(session: AsyncSession, call_id: int) -> None:
     """Инвайты только что отправлены: статус → open, таймер «тишины» считаем с
     этого момента (created_at = now), флаг no_reply_notified сбрасываем."""

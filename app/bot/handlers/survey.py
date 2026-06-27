@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery
 
+from app.bot import ui
 from app.bot.keyboards import flip_answer_keyboard
 from app.bot.utils import format_group_title
 from app.db.models import Answer, SurveyStatus
@@ -17,21 +20,6 @@ from app.services.schedule import format_lesson_at
 
 log = logging.getLogger(__name__)
 router = Router()
-
-
-def _format_coming(roster: surveys_svc.ComingRoster) -> str:
-    """Блок «кто ещё идёт» с разбивкой по полу — соц-доказательство для ученика.
-    Пустая строка, если пока никто не идёт (нечего показывать)."""
-    if roster.total == 0:
-        return ""
-    lines = [f"Идут ({roster.total}):"]
-    if roster.male:
-        lines.append(f"👨 {len(roster.male)}: {', '.join(roster.male)}")
-    if roster.female:
-        lines.append(f"👩 {len(roster.female)}: {', '.join(roster.female)}")
-    if roster.unknown:
-        lines.append(f"• {len(roster.unknown)}: {', '.join(roster.unknown)}")
-    return "\n".join(lines)
 
 
 @router.callback_query(F.data.startswith("att:"))
@@ -56,7 +44,7 @@ async def on_attendance(call: CallbackQuery) -> None:
         await surveys_svc.record_answer(s, survey_id, person.id, answer)
         roster = await surveys_svc.coming_by_gender(s, survey_id)
         group = await groups_svc.get_group(s, survey.group_id)
-        title = format_group_title(group) if group is not None else "занятие"
+        title = escape(format_group_title(group)) if group is not None else "занятие"
         lesson_at = survey.lesson_at
         tz_name = (
             await schools_svc.get_timezone(s, group.school_id)
@@ -64,18 +52,22 @@ async def on_attendance(call: CallbackQuery) -> None:
         )
 
     when = format_lesson_at(lesson_at, tz=tz_name)
+    # B2: на «не приду» — мягкий commitment-нудж (флип-кнопка ниже остаётся).
     text = (
-        f"✅ Записал: придёшь на «{title}» {when}."
+        f"{ui.YES} Записал: придёшь на «{title}» {when}. Партнёр будет рад!"
         if answer == Answer.yes
-        else f"❌ Записал: не придёшь на «{title}» {when}."
+        else f"{ui.NO} Записал: не придёшь на «{title}» {when}.\n"
+        f"Жаль! {ui.COMMITMENT} Передумаешь — жми ниже."
     )
-    coming = _format_coming(roster)
+    coming = ui.format_coming(roster)
     if coming:
         text += "\n\n" + coming
     if call.message:
         try:
             await call.message.edit_text(
-                text, reply_markup=flip_answer_keyboard(survey_id, choice)
+                text,
+                reply_markup=flip_answer_keyboard(survey_id, choice),
+                parse_mode=ParseMode.HTML,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not edit survey message: %s", e)

@@ -5,7 +5,7 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Admin
+from app.db.models import Admin, RecruitMode
 
 
 async def get_by_tg_id(session: AsyncSession, tg_user_id: int) -> Admin | None:
@@ -68,6 +68,19 @@ async def set_recruit_evening_time(
     if admin is not None:
         admin.recruit_evening_time = value
         await session.flush()
+
+
+async def set_recruit_mode(session: AsyncSession, admin_id: int, mode: str) -> bool:
+    """Режим автодобора (B16). Валидирует против RecruitMode — невалидное значение
+    не пишет. Возвращает True если значение применено."""
+    if mode not in {m.value for m in RecruitMode}:
+        return False
+    admin = await session.get(Admin, admin_id)
+    if admin is None:
+        return False
+    admin.recruit_mode = mode
+    await session.flush()
+    return True
 
 
 async def get_or_create_support_code(session: AsyncSession, admin_id: int) -> str | None:

@@ -12,6 +12,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import DialogManager, StartMode
 
+from app.bot import ui
 from app.bot.commands import grant_admin_commands
 from app.bot.dialogs import RenameSchoolSG
 from app.bot.handlers._access import demote_to_student_if_empty
@@ -61,8 +62,8 @@ async def _render_school_card(
         group_count = len(await groups_svc.school_groups(s, school_id))
     is_owner = role.value == "owner"
     lines = [
-        f"🏫 <b>{escape(school.name)}</b>",
-        f"Групп: {group_count}",
+        ui.title(ui.SCHOOL, escape(school.name)),
+        f"{ui.GROUP} {ui.plural_with_count(group_count, 'группа', 'группы', 'групп')}",
     ]
     if is_owner and school.name == schools_svc.DEFAULT_NAME:
         lines.append("")
@@ -93,7 +94,7 @@ async def _render_school_list(
         school, _ = all_schools[0]
         await _render_school_card(target, school.id, admin_id, edit=edit)
         return
-    text = "🏫 Твои школы — выбери, какую открыть:"
+    text = f"{ui.SCHOOL} Твои школы — выбери, какую открыть:"
     markup = school_picker_keyboard(all_schools)
     if edit:
         await target.edit_text(text, reply_markup=markup)
@@ -150,7 +151,7 @@ async def cb_school_groups(call: CallbackQuery) -> None:
     if call.message:
         if groups:
             await call.message.edit_text(
-                "📋 Группы школы:",
+                f"{ui.GROUP} Группы школы:",
                 reply_markup=groups_keyboard(groups, origin_school_id=school_id),
             )
         else:
@@ -233,7 +234,7 @@ async def _render_school_tz(call: CallbackQuery, school_id: int) -> None:
     label_map = dict(TZ_OPTIONS)
     current_label = label_map.get(current, current)
     text = (
-        f"🌐 <b>Часовой пояс школы «{escape(school_name)}»</b>\n\n"
+        f"{ui.TIMEZONE} <b>Часовой пояс школы «{escape(school_name)}»</b>\n\n"
         f"Сейчас: <b>{escape(current_label)}</b>\n\n"
         "Расписание (Пн/Вт/19:00) и отображение всех времён — в этом TZ. "
         "Тап чтобы сменить."
@@ -313,7 +314,8 @@ async def cb_school_delete_confirm(call: CallbackQuery) -> None:
         name = school.name if school else "—"
     await call.message.edit_text(
         f"⚠️ Удалить школу «{escape(name)}»?\n"
-        f"Внутри {group_count} групп(ы) — они тоже будут удалены вместе с "
+        f"В ней {ui.plural_with_count(group_count, 'группа', 'группы', 'групп')} — "
+        f"они тоже будут удалены вместе с "
         f"учениками, опросами и пулом саппортов. Это необратимо.",
         parse_mode=ParseMode.HTML,
         reply_markup=confirm_school_delete_keyboard(school_id),
@@ -338,7 +340,7 @@ async def cb_school_delete(call: CallbackQuery, bot: Bot) -> None:
         members = await schools_svc.members_of(s, school_id)
         affected_tgs = [(a.id, a.tg_user_id) for a, _ in members]
         await schools_svc.delete_school(s, school)
-    await call.message.edit_text(f"🗑 Школа «{escape(name)}» удалена.")
+    await call.message.edit_text(f"🗑 Школа «{name}» удалена.")
     await call.answer()
     for admin_id, tg_id in affected_tgs:
         await demote_to_student_if_empty(bot, admin_id, tg_id)
@@ -386,7 +388,7 @@ async def cb_school_leave(call: CallbackQuery, bot: Bot) -> None:
         name = school.name if school else "—"
         admin_id_to_demote = admin.id
         tg_to_demote = call.from_user.id
-    await call.message.edit_text(f"↩ Вышел из школы «{escape(name)}».")
+    await call.message.edit_text(f"↩ Вышел из школы «{name}».")
     if admin_id_to_demote is not None and tg_to_demote is not None:
         await demote_to_student_if_empty(bot, admin_id_to_demote, tg_to_demote)
     await call.answer()
@@ -446,7 +448,7 @@ async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
         log.warning("Could not set admin commands for %s: %s", tg.id, e)
     if call.message:
         await call.message.edit_text(
-            f"✅ Готово, ты теперь co-админ школы «{escape(name)}»."
+            f"✅ Готово, ты теперь co-админ школы «{name}»."
         )
     try:
         await bot.send_message(

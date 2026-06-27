@@ -12,6 +12,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.bot import ui
 from app.bot.handlers._access import accessible_group
 from app.bot.keyboards import (
     MENU_TEXTS,
@@ -226,6 +227,8 @@ async def _do_cancel_lesson(
 
     return (
         f"🚫 Занятие «{title}» {when_str} отменено. "
-        f"Уведомления отправлены ({len(yes_tg_ids)} ученикам, "
-        f"{len(support_tg_ids)} саппортам, {len(coadmin_tg_ids)} админам школы)."
+        "Уведомления отправлены ("
+        f"{ui.plural_with_count(len(yes_tg_ids), 'ученику', 'ученикам', 'ученикам')}, "
+        f"{ui.plural_with_count(len(support_tg_ids), 'саппорту', 'саппортам', 'саппортам')}, "
+        f"{ui.plural_with_count(len(coadmin_tg_ids), 'админу', 'админам', 'админам')} школы)."
     )

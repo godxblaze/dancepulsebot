@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
+from app.bot import ui
 from app.bot.keyboards import (
-    support_ask_keyboard,
     support_flip_keyboard,
     support_pick_keyboard,
 )
 from app.bot.utils import format_group_title, format_place
-from app.db.models import Person, SupportCallStatus
+from app.db.models import Gender, Person, SupportCallStatus
 from app.db.session import session_scope
+from app.scheduler.scheduler import send_support_invites
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
@@ -78,6 +81,44 @@ async def _call_context(session, call_id: int):
     survey = await surveys_svc.get_survey(session, call.survey_id)
     group = await groups_svc.get_group(session, survey.group_id) if survey else None
     return call, survey, group
+
+
+def _balance_text(group, lesson_at, male: int, female: int,
+                  claimed: int, needed: int, tz: str | None) -> str:
+    """Текст recruit-сообщения lead'а с актуальным балансом (B8 живой бар)."""
+    lines = [
+        f"{ui.SUPPORT} <b>{escape(format_group_title(group))}</b> · "
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} {group.lesson_time}",
+        "баланс пар:",
+        ui.balance_bars(male, female),
+    ]
+    if needed > 0 and claimed >= needed:
+        lines.append("Набор закрыт ✅")
+    else:
+        lines.append(f"откликнулись {claimed}/{needed}")
+    return "\n".join(lines)
+
+
+async def _refresh_balance(
+    bot: Bot, *, picker_chat_id, picker_message_id, group, lesson_at,
+    gender, male: int, female: int, claimed: int, needed: int, tz: str | None,
+) -> None:
+    """B8: обновить баланс-строку сохранённого recruit-сообщения lead'а после
+    claim/skip. Graceful: нет ref или сообщение удалено → молча выходим."""
+    if picker_chat_id is None or picker_message_id is None:
+        return
+    eff_male = male + (claimed if gender == Gender.male else 0)
+    eff_female = female + (claimed if gender == Gender.female else 0)
+    text = _balance_text(group, lesson_at, eff_male, eff_female, claimed, needed, tz)
+    try:
+        await bot.edit_message_text(
+            text,
+            chat_id=picker_chat_id,
+            message_id=picker_message_id,
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("B8 balance refresh skipped (msg gone?): %s", e)
 
 
 @router.callback_query(F.data.startswith("pick:"))
@@ -196,23 +237,11 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
             if group.school_id else None
         )
 
-    text_lines = [
-        "🆘 Нужна помощь!",
-        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m', tz=tz_name)} в {lesson_time}.",
-    ]
-    if place:
-        text_lines.append(f"📍 {place}")
-    if teachers_note:
-        text_lines.append(f"👤 {teachers_note}")
-    text_lines.append("Не хватает пары — сможешь подойти выручить?")
-    text = "\n".join(text_lines)
-    for tg_id, _name in invited:
-        try:
-            await bot.send_message(
-                tg_id, text, reply_markup=support_ask_keyboard(call_id)
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("Could not invite support %s: %s", tg_id, e)
+    await send_support_invites(
+        bot, call_id=call_id, invited=invited, title=title, place=place,
+        teachers_note=teachers_note, lesson_time=lesson_time,
+        lesson_at=lesson_at, tz=tz_name,
+    )
     if call.message:
         names = ", ".join(n for _, n in invited)
         await call.message.edit_text(
@@ -253,6 +282,13 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
         group_name = group.name
         lesson_at = survey.lesson_at
         tz_name = await schools_svc.get_timezone(s, group.school_id)
+        # B8: данные для живого баланс-бара в recruit-сообщении lead'а.
+        picker_chat_id = sc.picker_chat_id
+        picker_message_id = sc.picker_message_id
+        call_gender = sc.gender
+        call_needed = sc.needed
+        male_yes, female_yes = await surveys_svc.gender_yes_counts(s, sc.survey_id)
+        claimed_total = await supports_svc.count_claims(s, call_id)
 
     when = format_lesson_at(lesson_at, tz=tz_name)
     if not accepted:
@@ -291,6 +327,12 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             )
         except Exception:  # noqa: BLE001
             pass
+    await _refresh_balance(
+        bot, picker_chat_id=picker_chat_id, picker_message_id=picker_message_id,
+        group=group, lesson_at=lesson_at, gender=call_gender,
+        male=male_yes, female=female_yes, claimed=claimed_total,
+        needed=call_needed, tz=tz_name,
+    )
 
 
 @router.callback_query(F.data.startswith("sup:skip:"))
@@ -302,6 +344,13 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
     title = "занятие"
     when = ""
     group_name = ""
+    # B8: состояние для живого баланс-бара.
+    picker_chat_id = picker_message_id = None
+    call_gender = None
+    male_yes = female_yes = 0
+    lesson_at_val = None
+    group_obj = None
+    tz_name: str | None = None
     async with session_scope() as s:
         sc = await supports_svc.get_call(s, call_id)
         survey = await surveys_svc.get_survey(s, sc.survey_id) if sc else None
@@ -324,6 +373,14 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                     notify_tgs = await groups_svc.group_admin_tg_ids(
                         s, group.id, group.school_id
                     )
+                    picker_chat_id = sc.picker_chat_id
+                    picker_message_id = sc.picker_message_id
+                    call_gender = sc.gender
+                    male_yes, female_yes = await surveys_svc.gender_yes_counts(
+                        s, sc.survey_id
+                    )
+                    lesson_at_val = survey.lesson_at
+                    group_obj = group
 
     if call.message:
         text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
@@ -342,6 +399,11 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                 )
             except Exception:  # noqa: BLE001
                 pass
+        await _refresh_balance(
+            bot, picker_chat_id=picker_chat_id, picker_message_id=picker_message_id,
+            group=group_obj, lesson_at=lesson_at_val, gender=call_gender,
+            male=male_yes, female=female_yes, claimed=filled, needed=needed, tz=tz_name,
+        )
 
 
 async def _is_already_claimed(call_id: int, person_id: int) -> bool:

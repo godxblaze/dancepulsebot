@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Answer,
     Gender,
+    Membership,
     Person,
     Response,
     Survey,
@@ -196,6 +198,52 @@ async def recent_closed_surveys(
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def lapsed_members(
+    session: AsyncSession, group_id: int, k: int = 2
+) -> list[Person]:
+    """Текущие члены группы, пропустившие последние `k` ЗАКРЫТЫХ опросов подряд
+    (B5 реактивация). «Пришёл» = actually_attended True, либо (не отмечено и
+    ответил «приду»). Учитываются только те, у кого есть Response во всех `k`
+    последних опросах — у новичка без такой истории ложного срабатывания нет."""
+    recent = list((await session.execute(
+        select(Survey.id)
+        .where(
+            Survey.group_id == group_id,
+            Survey.kind == SurveyKind.attendance,
+            Survey.status == SurveyStatus.closed,
+        )
+        .order_by(Survey.lesson_at.desc())
+        .limit(k)
+    )).scalars().all())
+    if len(recent) < k:
+        return []  # у группы ещё недостаточно истории
+    member_ids = select(Membership.person_id).where(Membership.group_id == group_id)
+    rows = (await session.execute(
+        select(Response.person_id, Response.answer, Response.actually_attended)
+        .where(
+            Response.survey_id.in_(recent),
+            Response.person_id.in_(member_ids),
+        )
+    )).all()
+    by_person: dict[int, list[tuple]] = defaultdict(list)
+    for pid, ans, att in rows:
+        by_person[pid].append((ans, att))
+
+    def _attended(ans, att) -> bool:
+        return att is True or (att is None and ans == Answer.yes)
+
+    lapsed_ids = [
+        pid
+        for pid, resps in by_person.items()
+        if len(resps) >= k and not any(_attended(a, t) for a, t in resps)
+    ]
+    if not lapsed_ids:
+        return []
+    return list((await session.execute(
+        select(Person).where(Person.id.in_(lapsed_ids)).order_by(Person.full_name)
+    )).scalars().all())
 
 
 async def pending_persons(session: AsyncSession, survey_id: int) -> list[Person]:

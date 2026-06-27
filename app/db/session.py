@@ -53,8 +53,12 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("admins", "support_threshold", "INTEGER DEFAULT 2 NOT NULL"),
     ("admins", "support_cutoff_hours", "INTEGER DEFAULT 3 NOT NULL"),
     ("admins", "recruit_evening_time", "VARCHAR(5) DEFAULT '20:00' NOT NULL"),
+    ("admins", "recruit_mode", "VARCHAR(16) DEFAULT 'curated' NOT NULL"),
     ("admins", "support_code", "VARCHAR(32)"),
     ("groups", "recruit_lead_admin_id", "INTEGER REFERENCES admins(id) ON DELETE SET NULL"),
+    ("persons", "last_reactivation_at", "DATETIME"),
+    ("support_calls", "picker_chat_id", "BIGINT"),
+    ("support_calls", "picker_message_id", "BIGINT"),
 )
 
 

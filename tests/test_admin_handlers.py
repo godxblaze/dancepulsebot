@@ -201,7 +201,7 @@ async def test_stats_with_closed_surveys(db) -> None:
     msg = FakeMessage(user_id=10)
     await cmd_stats(msg)
     text = msg.replies[0]
-    assert "последние 2 занятий" in text
+    assert "последние 2 занятия" in text  # plural fix: 2 → «занятия», не «занятий»
     assert "средний отклик (обещали): <b>100%</b>" in text
 
 
@@ -259,7 +259,7 @@ async def test_cb_group_card_shows_student_count(db) -> None:
     call = FakeCallback(f"grp:{gid}", 10)
     await cb_group_card(call)
     assert call.message.text is not None
-    assert "Учеников: 2" in call.message.text
+    assert "2 ученика" in call.message.text  # plural: 👥 2 ученика
 
 
 async def test_cb_group_card_rejects_non_owner(db) -> None:

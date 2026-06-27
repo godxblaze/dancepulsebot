@@ -6,6 +6,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
+from app.bot import ui
 from app.bot.handlers._access import accessible_group
 from app.bot.keyboards import (
     attendance_mark_keyboard,
@@ -46,7 +47,7 @@ async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
         return
     items = [(s.id, format_lesson_at(s.lesson_at, tz=tz_name)) for s in surveys]
     await call.message.edit_text(
-        f"✏️ Какое занятие «{title}» отметить?",
+        f"{ui.EDIT} Какое занятие «{title}» отметить?",
         reply_markup=closed_surveys_keyboard(group_id, items),
     )
     await call.answer()
@@ -79,12 +80,12 @@ async def _render_attendance_roster(
             if group.school_id else None
         )
     head = (
-        f"✏️ «{title}» — {format_lesson_at(survey.lesson_at, tz=tz_name)}\n"
-        f"Тап по имени — переключить: ☐ → ✅ → ❌ → ☐.\n"
+        f"{ui.EDIT} «{title}» — {format_lesson_at(survey.lesson_at, tz=tz_name)}\n"
+        f"Тап по имени — переключить: {ui.BOX} → {ui.YES} → {ui.NO} → {ui.BOX}.\n"
         f"В скобках: ✓ обещал, ✗ отказался, — молчал."
     )
     if support_items:
-        head += "\n🆘 — саппорты; отметь, кто реально пришёл выручить."
+        head += f"\n{ui.SUPPORT} — саппорты; отметь, кто реально пришёл выручить."
     await call.message.edit_text(
         head,
         reply_markup=attendance_mark_keyboard(
@@ -170,7 +171,7 @@ async def cb_walk_in_add(call: CallbackQuery) -> None:
             return
         person = await s.get(Person, person_id)
         if person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         # Walk-in — разовый гость, без Membership; постоянная запись —
         # отдельной кнопкой в карточке ученика (pcardadd).

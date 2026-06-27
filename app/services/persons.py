@@ -111,6 +111,17 @@ async def set_gender(session: AsyncSession, person_id: int, gender: Gender) -> N
         await session.flush()
 
 
+async def mark_reactivated(
+    session: AsyncSession, person_id: int, when: datetime
+) -> None:
+    """Отметить момент последнего реактивационного пинга (B5 throttle). `when` —
+    naive UTC."""
+    person = await session.get(Person, person_id)
+    if person is not None:
+        person.last_reactivation_at = when
+        await session.flush()
+
+
 async def set_name_everywhere(
     session: AsyncSession, tg_user_id: int, full_name: str
 ) -> int:
@@ -319,6 +330,19 @@ async def support_candidates(
         .order_by(SupportPoolEntry.level.desc(), Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def top_candidates(
+    session: AsyncSession,
+    admin_id: int,
+    gender: Gender,
+    exclude_group_id: int,
+    n: int,
+) -> list[Person]:
+    """Топ-N кандидатов личного пула препода по уровню (для режима auto_top).
+    support_candidates уже сортирует по уровню desc, так что берём префикс."""
+    cands = await support_candidates(session, admin_id, gender, exclude_group_id)
+    return cands[: max(0, n)]
 
 
 async def school_pool_candidates(

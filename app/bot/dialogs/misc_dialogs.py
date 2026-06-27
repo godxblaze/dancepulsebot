@@ -17,6 +17,7 @@ from aiogram_dialog.widgets.input import TextInput
 from aiogram_dialog.widgets.kbd import Button, Cancel
 from aiogram_dialog.widgets.text import Const, Format
 
+from app.bot import ui
 from app.bot.dialogs.states import (
     BroadcastSG,
     CreateSchoolSG,
@@ -222,7 +223,8 @@ async def _broadcast_preview_getter(dialog_manager: DialogManager, **_: Any) -> 
             if group is not None:
                 count = await persons_svc.count_members(s, int(group_id))
                 title = format_group_title(group)
-    return {"count": count, "title": escape(title), "text": escape(text)}
+    count_phrase = ui.plural_with_count(count, "ученику", "ученикам", "ученикам")
+    return {"count_phrase": count_phrase, "title": escape(title), "text": escape(text)}
 
 
 async def _on_broadcast_text_typed(
@@ -293,7 +295,7 @@ broadcast_dialog = Dialog(
     ),
     Window(
         Format(
-            "📢 Будет отправлено {count} ученикам «{title}»:\n\n<i>{text}</i>"
+            "📢 Будет отправлено {count_phrase} «{title}»:\n\n<i>{text}</i>"
         ),
         Button(Const("📨 Отправить"), id="bc_send", on_click=_on_broadcast_send),
         Cancel(Const("◀ Отмена")),

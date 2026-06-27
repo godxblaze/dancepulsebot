@@ -8,6 +8,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.bot import ui
 from app.db.models import Admin, Gender, Group, Person, School, SchoolMemberRole, Venue
 
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -39,6 +40,26 @@ def _pagination_row(
     if page < total_pages - 1:
         row.append(InlineKeyboardButton(text="▶", callback_data=f"{cb_prefix}:{page + 1}"))
     return row
+
+
+def _pack_buttons(
+    buttons: list[InlineKeyboardButton], *, max_label: int = 16
+) -> list[list[InlineKeyboardButton]]:
+    """Пакует кнопки по 2 в ряд, НО кнопку с длинной подписью (> max_label)
+    ставит на всю ширину. Так на телефоне короткие действия идут парами, а
+    длинные не сжимаются в нечитаемые столбики."""
+    rows: list[list[InlineKeyboardButton]] = []
+    i = 0
+    while i < len(buttons):
+        cur = buttons[i]
+        nxt = buttons[i + 1] if i + 1 < len(buttons) else None
+        if len(cur.text) <= max_label and nxt is not None and len(nxt.text) <= max_label:
+            rows.append([cur, nxt])
+            i += 2
+        else:
+            rows.append([cur])
+            i += 1
+    return rows
 
 
 def weekdays_keyboard(selected: set[int]) -> InlineKeyboardMarkup:
@@ -114,11 +135,10 @@ def group_actions_keyboard(
         flat.append(InlineKeyboardButton(
             text="🗑 Удалить", callback_data=f"grpdel:{group_id}",
         ))
-    # Пакуем по 2 в ряд.
-    rows: list[list[InlineKeyboardButton]] = [
-        flat[i:i + 2] for i in range(0, len(flat), 2)
-    ]
-    rows.append([InlineKeyboardButton(text=back_label, callback_data=back_cb)])
+    # Пакуем по 2 в ряд, но длинные подписи (>16) — на всю ширину, чтобы на
+    # телефоне кнопки не сжимались и текст не переносился криво.
+    rows = _pack_buttons(flat, max_label=16)
+    rows.append(ui.back_row(back_cb, back_label))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -194,7 +214,7 @@ def attendance_mark_keyboard(
         text="➕ Был ещё кто-то (walk-in)",
         callback_data=f"atnwk:{survey_id}:{group_id}",
     )])
-    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    rows.append(ui.back_row(f"grp:{group_id}", "◀ К группе"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -211,7 +231,7 @@ def group_admins_keyboard(
         )]
         for admin_id, name, assigned in members
     ]
-    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    rows.append(ui.back_row(f"grp:{group_id}", "◀ К группе"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -329,6 +349,14 @@ def school_tz_keyboard(school_id: int, current: str) -> InlineKeyboardMarkup:
 
 EVENING_TIMES = ("18:00", "19:00", "20:00", "21:00", "22:00")
 TOPUP_HOURS = (0, 3, 4, 6)
+# Человекочитаемые подписи режимов автодобора (B16). Порядок = порядок кнопок;
+# ключи = RecruitMode значения.
+RECRUIT_MODE_LABELS: dict[str, str] = {
+    "curated": "🙋 Сам выбираю",
+    "open_race": "🏁 Открытая гонка",
+    "auto_top": "🎯 Авто топ-N",
+    "escalate": "⏱ Авто-фолбэк",
+}
 
 
 def school_members_keyboard(
@@ -437,17 +465,33 @@ def attendance_keyboard(survey_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def _flip_keyboard(
+    current: str,
+    positive_token: str,
+    offer_when_positive: tuple[str, str],
+    offer_when_negative: tuple[str, str],
+) -> InlineKeyboardMarkup:
+    """One-tap «передумал» single-button keyboard. Offers the opposite of the
+    current answer: if `current == positive_token` we currently hold the positive
+    answer, so the button offers the negative option, and vice versa."""
+    text, data = (
+        offer_when_positive if current == positive_token else offer_when_negative
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]]
+    )
+
+
 def flip_answer_keyboard(survey_id: int, current_answer: str) -> InlineKeyboardMarkup:
     """Shown after a student answers — one tap to flip to the opposite answer.
 
     `current_answer` is "yes" or "no"; the button offers the other one.
     """
-    if current_answer == "yes":
-        text, data = "❌ Передумал, не приду", f"att:{survey_id}:no"
-    else:
-        text, data = "✅ Передумал, приду", f"att:{survey_id}:yes"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]]
+    return _flip_keyboard(
+        current_answer,
+        "yes",
+        ("❌ Передумал, не приду", f"att:{survey_id}:no"),
+        ("✅ Передумал, приду", f"att:{survey_id}:yes"),
     )
 
 
@@ -519,7 +563,7 @@ def students_keyboard(
     rows.append([InlineKeyboardButton(
         text="📨 Пригласить ещё", callback_data=f"grpinv:{group_id}",
     )])
-    rows.append([InlineKeyboardButton(text="◀ К группе", callback_data=f"grp:{group_id}")])
+    rows.append(ui.back_row(f"grp:{group_id}", "◀ К группе"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -570,7 +614,7 @@ def person_card_keyboard(
                 callback_data=f"pcardgnd:{group_id}:{person_id}:{_gender_code(gender)}",
             )],
             [membership_btn],
-            [InlineKeyboardButton(text="◀ К списку учеников", callback_data=f"grpstu:{group_id}")],
+            ui.back_row(f"grpstu:{group_id}", "◀ К списку учеников"),
         ]
     )
 
@@ -703,35 +747,54 @@ def pool_keyboard(
 
 
 def recruit_config_keyboard(
-    threshold: int, evening_time: str, topup_hours: int
+    threshold: int, evening_time: str, topup_hours: int, recruit_mode: str
 ) -> InlineKeyboardMarkup:
-    """Личные настройки автодобора препода (3 ряда: перекос / время / добор).
+    """Личные настройки автодобора препода. Каждая настройка — заголовок-ряд
+    (self-labeling, чтобы не сверяться с текстом) + ряд вариантов под ним.
     Колбэки admin-scoped — пишут в Admin звонящего, без school_id."""
+    def _header(text: str) -> list[InlineKeyboardButton]:
+        return [InlineKeyboardButton(text=text, callback_data="noop")]
+
     th_row = [
         InlineKeyboardButton(
-            text=f"{'✅' if n == threshold else ''} {n}",
+            text=f"{'✅' if n == threshold else ''} {n}".strip(),
             callback_data=f"rcfgt:{n}",
         )
         for n in (1, 2, 3, 4, 5)
     ]
     eve_row = [
         InlineKeyboardButton(
-            text=f"{'✅' if t == evening_time else ''} {t}",
+            text=f"{'✅' if t == evening_time else ''} {t}".strip(),
             callback_data=f"rcfge:{t.replace(':', '')}",
         )
         for t in EVENING_TIMES
     ]
     topup_row = [
         InlineKeyboardButton(
-            text=f"{'✅' if h == topup_hours else ''} "
-            + ("выкл" if h == 0 else f"{h}ч"),
+            text=(f"{'✅' if h == topup_hours else ''} "
+                  + ("выкл" if h == 0 else f"{h}ч")).strip(),
             callback_data=f"rcfgc:{h}",
         )
         for h in TOPUP_HOURS
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[th_row, eve_row, topup_row, [
-        InlineKeyboardButton(text="◀ К пулу", callback_data="poolback"),
-    ]])
+    mode_rows = [
+        [InlineKeyboardButton(
+            text=f"{'✅ ' if value == recruit_mode else ''}{label}",
+            callback_data=f"rcfgmode:{value}",
+        )]
+        for value, label in RECRUIT_MODE_LABELS.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        _header(f"{ui.BALANCE} Зову, если без пары останутся ≥"),
+        th_row,
+        _header(f"{ui.EVENING} Вечерний разбор накануне в"),
+        eve_row,
+        _header(f"{ui.DAY} Добор в день занятия за"),
+        topup_row,
+        _header(f"{ui.SUPPORT} Режим автодобора"),
+        *mode_rows,
+        ui.back_row("poolback", "◀ К пулу"),
+    ])
 
 
 def support_pick_keyboard(
@@ -776,12 +839,11 @@ def support_ask_keyboard(call_id: int) -> InlineKeyboardMarkup:
 
 def support_flip_keyboard(call_id: int, current: str) -> InlineKeyboardMarkup:
     """One-tap «передумал» — flips the saved answer to the opposite one."""
-    if current == "join":
-        text, data = "✗ Передумал, не смогу", f"sup:skip:{call_id}"
-    else:
-        text, data = "✅ Передумал, приду помочь", f"sup:join:{call_id}"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]]
+    return _flip_keyboard(
+        current,
+        "join",
+        ("✗ Передумал, не смогу", f"sup:skip:{call_id}"),
+        ("✅ Передумал, приду помочь", f"sup:join:{call_id}"),
     )
 
 

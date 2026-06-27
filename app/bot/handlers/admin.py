@@ -11,6 +11,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram_dialog import DialogManager
 
+from app.bot import ui
 from app.bot.commands import grant_admin_commands, revoke_admin_commands
 from app.bot.handlers._access import (
     accessible_group as _accessible_group,
@@ -48,7 +49,6 @@ from app.bot.keyboards import (
     today_ping_keyboard,
 )
 from app.bot.utils import (
-    bar,
     format_group_title,
     get_bot_username,
     qr_png,
@@ -111,49 +111,52 @@ async def _partner_link(bot: Bot, code: str) -> str:
     return f"https://t.me/{username}?start=partner_{code}"
 
 
+async def _with_admin_school(session, admin, call, empty):
+    """Resolve the admin's owned school, then `await call(school_id)`. If the admin
+    owns no school, return `empty` instead. Shared guard for the `_*_for` helpers."""
+    school = await schools_svc.get_owned_school(session, admin.id)
+    if school is None:
+        return empty
+    return await call(school.id)
+
+
 async def _styles_for(session, admin) -> list[str]:
     """Style-подсказки из собственной школы admin'а — используются в мастере
     при создании/редактировании группы."""
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return []
-    return await groups_svc.school_styles(session, school.id)
+    return await _with_admin_school(
+        session, admin, lambda sid: groups_svc.school_styles(session, sid), []
+    )
 
 
 async def _venues_for(session, admin) -> list:
     """Venues собственной школы admin'а — для venue-picker'а."""
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return []
-    return await venues_svc.school_venues(session, school.id)
+    return await _with_admin_school(
+        session, admin, lambda sid: venues_svc.school_venues(session, sid), []
+    )
 
 
 async def _top_supports_for(session, admin, limit: int = 3) -> list:
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return []
-    return await persons_svc.top_supports(session, school.id, limit=limit)
+    return await _with_admin_school(
+        session, admin, lambda sid: persons_svc.top_supports(session, sid, limit=limit), []
+    )
 
 
 async def _long_absent_for(session, admin, since) -> list:
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return []
-    return await persons_svc.long_absent(session, school.id, since)
+    return await _with_admin_school(
+        session, admin, lambda sid: persons_svc.long_absent(session, sid, since), []
+    )
 
 
 async def _students_csv_for(session, admin) -> bytes:
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return b""
-    return await exports_svc.students_csv(session, school.id)
+    return await _with_admin_school(
+        session, admin, lambda sid: exports_svc.students_csv(session, sid), b""
+    )
 
 
 async def _attendance_csv_for(session, admin) -> bytes:
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
-        return b""
-    return await exports_svc.attendance_csv(session, school.id)
+    return await _with_admin_school(
+        session, admin, lambda sid: exports_svc.attendance_csv(session, sid), b""
+    )
 
 
 # ── registration & help ──────────────────────────────────────────────
@@ -327,23 +330,21 @@ async def _build_today_view(teacher_id: int, span: str):
             else:
                 when = format_lesson_at(lesson_at, "%d.%m (%a)", tz=tz_name)
             survey = await surveys_svc.find_attendance_survey(s, g.id, lesson_at)
+            head = f"{ui.title(ui.PAIR, escape(format_group_title(g)))} · {when} {g.lesson_time}"
             if survey is None:
-                blocks.append(
-                    f"👯 <b>{escape(format_group_title(g))}</b> · {when} {g.lesson_time}\n"
-                    f"опрос ещё не разослан"
-                )
+                blocks.append(f"{head}\nопрос ещё не разослан")
                 continue
             summary = await surveys_svc.summarize(s, survey.id)
             pct = round(100 * summary.yes / summary.total) if summary.total else 0
             lines = [
-                f"👯 <b>{escape(format_group_title(g))}</b> · {when} {g.lesson_time}",
+                head,
                 f"придут <b>{summary.yes}/{summary.total}</b> ({pct}%)  "
-                f"{bar(summary.yes, summary.total)}",
+                f"{ui.bar(summary.yes, summary.total)}",
             ]
             if summary.no_names:
-                lines.append(f"❌ {escape(', '.join(summary.no_names))}")
+                lines.append(f"{ui.NO} {escape(', '.join(summary.no_names))}")
             if summary.pending_names:
-                lines.append(f"⏳ {escape(', '.join(summary.pending_names))}")
+                lines.append(f"{ui.PENDING} {escape(', '.join(summary.pending_names))}")
             blocks.append("\n".join(lines))
             if summary.pending > 0:
                 pending_by_group.append((g.name, survey.id, summary.pending))
@@ -412,15 +413,19 @@ async def _build_stats_text(teacher, scope: str) -> str | None:
             closed = await surveys_svc.recent_closed_surveys(s, g.id, limit=5)
             if not closed:
                 blocks.append(
-                    f"📊 <b>{escape(g.name)}</b> — пока нет завершённых опросов"
+                    f"{ui.title(ui.STATS, escape(format_group_title(g)))}"
+                    " — пока нет завершённых опросов"
                 )
                 continue
             tz_name = (
                 await schools_svc.get_timezone(s, g.school_id) if g.school_id else None
             )
+            n_closed = len(closed)
+            adj = ui.plural(n_closed, "последнее", "последние", "последние")
+            word = ui.plural(n_closed, "занятие", "занятия", "занятий")
             lines = [
-                f"📊 <b>{escape(format_group_title(g))}</b> — "
-                f"последние {len(closed)} занятий:"
+                f"{ui.title(ui.STATS, escape(format_group_title(g)))} — "
+                f"{adj} {n_closed} {word}:"
             ]
             total_yes = total_all = 0
             total_actual_attended = total_actual_marked = 0
@@ -430,7 +435,7 @@ async def _build_stats_text(teacher, scope: str) -> str | None:
                 total_all += summary.total
                 when_str = format_lesson_at(survey.lesson_at, "%d.%m", tz=tz_name)
                 line = (
-                    f"{bar(summary.yes, summary.total)}  "
+                    f"{ui.bar(summary.yes, summary.total)}  "
                     f"{when_str} · обещали {summary.yes}/{summary.total}"
                 )
                 if summary.actual_attended is not None:
@@ -454,13 +459,13 @@ async def _build_stats_text(teacher, scope: str) -> str | None:
             blocks.append("\n".join(lines))
 
     if top_helpers:
-        top_lines = ["🏆 <b>Топ саппортов</b>"]
+        top_lines = [f"{ui.TROPHY} <b>Топ саппортов</b>"]
         for p in top_helpers:
             top_lines.append(f"• {escape(p.full_name)} — помог {p.helped_count}")
         blocks.append("\n".join(top_lines))
 
     if absent:
-        ab_lines = ["💤 <b>Давно не приходили</b> (≥4 недель или вообще ни разу)"]
+        ab_lines = [f"{ui.SLEEP} <b>Давно не приходили</b> (≥4 недель или вообще ни разу)"]
         for person, last in absent[:10]:
             tail = f"последний раз {last:%d.%m.%Y}" if last else "ни разу не отмечен"
             ab_lines.append(f"• {escape(person.full_name)} — {tail}")
@@ -468,7 +473,9 @@ async def _build_stats_text(teacher, scope: str) -> str | None:
             ab_lines.append(f"… и ещё {len(absent) - 10}")
         blocks.append("\n".join(ab_lines))
 
-    header = "📊 Вся школа" if scope == "school" else "📊 Только мои группы"
+    header = (
+        f"{ui.STATS} Вся школа" if scope == "school" else f"{ui.STATS} Только мои группы"
+    )
     return f"<b>{header}</b>\n\n" + "\n\n".join(blocks)
 
 
@@ -543,7 +550,7 @@ async def _format_group_summary(session, group: Group) -> str:
     """Multi-line description used in the group card and after creation."""
     lines = [f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"]
     if group.style:
-        lines.append(f"Направление: {group.style}")
+        lines.append(f"Направление: {escape(group.style)}")
     if group.level is not None:
         lines.append(f"Уровень: {group.level}")
     if group.venue_id is not None:
@@ -554,11 +561,11 @@ async def _format_group_summary(session, group: Group) -> str:
                 place += f" — {venue.address}"
             if group.room:
                 place += f", {group.room}"
-            lines.append(f"Где: {place}")
+            lines.append(f"Где: {escape(place)}")
     elif group.room:
-        lines.append(f"Зал: {group.room}")
+        lines.append(f"Зал: {escape(group.room)}")
     if group.teachers_note:
-        lines.append(f"Ведут: {group.teachers_note}")
+        lines.append(f"Ведут: {escape(group.teachers_note)}")
     # Co-админы теперь живут на уровне школы — см. карточку школы. Сюда
     # не дублируем, чтобы карточка группы оставалась компактной.
     return "\n".join(lines)
@@ -606,7 +613,7 @@ async def _send_groups_list(target: Message) -> None:
     if not groups:
         await target.answer(_NO_MY_GROUPS)
         return
-    await target.answer("👥 Мои группы:", reply_markup=groups_keyboard(groups))
+    await target.answer(f"{ui.GROUP} Мои группы:", reply_markup=groups_keyboard(groups))
 
 
 @router.message(Command("groups"))
@@ -631,7 +638,9 @@ async def cb_groups_list(call: CallbackQuery) -> None:
     if not groups:
         await call.message.edit_text(_NO_MY_GROUPS)
     else:
-        await call.message.edit_text("👥 Мои группы:", reply_markup=groups_keyboard(groups))
+        await call.message.edit_text(
+            f"{ui.GROUP} Мои группы:", reply_markup=groups_keyboard(groups)
+        )
     await call.answer()
 
 
@@ -659,12 +668,15 @@ async def cb_group_card(call: CallbackQuery) -> None:
         title = format_group_title(group)
         is_active = group.active
         has_upcoming, has_closed = await _group_card_extras(s, group)
-        paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
+        paused_line = (
+            "" if is_active
+            else f"\n{ui.PAUSE} <b>на паузе</b> — опросы не рассылаются"
+        )
         text = (
-            f"📋 «{title}»\n"
+            f"{ui.title(ui.GROUP, escape(title))}\n"
             f"{summary}{paused_line}\n"
             f"Опрос приходит за {group.lead_hours} ч до занятия\n"
-            f"Учеников: {count}"
+            f"{ui.STUDENTS} {ui.plural_with_count(count, 'ученик', 'ученика', 'учеников')}"
         )
     await call.message.edit_text(
         text,
@@ -756,10 +768,10 @@ async def cb_group_students(call: CallbackQuery) -> None:
         has_upcoming, has_closed = await _group_card_extras(s, group)
     title = format_group_title(group)
     if members:
-        text = f"👥 Ученики «{title}» ({len(members)}). Тап по имени — карточка:"
+        text = f"{ui.STUDENTS} Ученики «{title}» ({len(members)}). Тап по имени — карточка:"
         await call.message.edit_text(text, reply_markup=students_keyboard(group_id, members))
     else:
-        text = f"👥 В группе «{title}» пока нет учеников. Перешли им ссылку-приглашение."
+        text = f"{ui.STUDENTS} В группе «{title}» пока нет учеников. Перешли им ссылку-приглашение."
         await call.message.edit_text(
             text,
             reply_markup=group_actions_keyboard(
@@ -829,7 +841,7 @@ async def cb_person_card(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         groups = await persons_svc.person_groups(s, person.id)
         in_group = group in groups
@@ -856,7 +868,7 @@ async def cb_person_card_level(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         teacher_id, level = await _viewer_pool_level(s, call.from_user.id, person_id)
         stale = len(parts) > 3 and level != expected
@@ -891,7 +903,7 @@ async def cb_person_gender_toggle(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         stale = len(parts) > 3 and person.gender != expected
         if not stale:
@@ -926,7 +938,7 @@ async def cb_person_add_to_group(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         await persons_svc.add_to_group(
             s, group, person.tg_user_id, person.tg_username, person.full_name,
@@ -952,7 +964,7 @@ async def cb_person_remove_confirm(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         name = person.full_name
         group_name = format_group_title(group)
@@ -973,7 +985,7 @@ async def cb_person_remove(call: CallbackQuery) -> None:
         group = await _accessible_group(s, group_id, call.from_user.id)
         person = await s.get(Person, person_id)
         if group is None or person is None or person.school_id != group.school_id:
-            await call.answer("Не найдено", show_alert=True)
+            await call.answer("Не найдено или нет доступа", show_alert=True)
             return
         removed = await persons_svc.remove_from_group(s, person_id, group_id)
         name = person.full_name
@@ -983,7 +995,7 @@ async def cb_person_remove(call: CallbackQuery) -> None:
         await call.answer("Уже не в группе", show_alert=True)
         return
     if members:
-        text = f"👥 Ученики «{group_name}» ({len(members)}). Тап по имени — карточка:"
+        text = f"{ui.STUDENTS} Ученики «{group_name}» ({len(members)}). Тап по имени — карточка:"
         await call.message.edit_text(text, reply_markup=students_keyboard(group_id, members))
     else:
         async with session_scope() as s:
@@ -993,7 +1005,10 @@ async def cb_person_remove(call: CallbackQuery) -> None:
             has_upcoming, has_closed = (
                 await _group_card_extras(s, group) if group else (False, False)
             )
-        text = f"👥 В группе «{group_name}» больше никого нет. Перешли ссылку-приглашение."
+        text = (
+            f"{ui.STUDENTS} В группе «{group_name}» больше никого нет. "
+            "Перешли ссылку-приглашение."
+        )
         await call.message.edit_text(
             text,
             reply_markup=group_actions_keyboard(
@@ -1058,7 +1073,7 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
     text = (
         f"⏰ <b>{escape(group_name)}</b>\n"
         f"Напоминаю: занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz_name)} "
-        f"в {lesson_time}.\n\nПридёшь?"
+        f"в {lesson_time}.\n{ui.COMMITMENT}\n\nПридёшь?"
     )
     sent = 0
     for p in pending:
@@ -1152,12 +1167,15 @@ async def _set_group_active(call: CallbackQuery, group_id: int, active: bool) ->
         title = format_group_title(group)
         is_active = group.active
         has_upcoming, has_closed = await _group_card_extras(s, group)
-        paused_line = "" if is_active else "\n⏸ <b>на паузе</b> — опросы не рассылаются"
+        paused_line = (
+            "" if is_active
+            else f"\n{ui.PAUSE} <b>на паузе</b> — опросы не рассылаются"
+        )
         text = (
-            f"📋 «{title}»\n"
+            f"{ui.title(ui.GROUP, escape(title))}\n"
             f"{summary}{paused_line}\n"
             f"Опрос приходит за {group.lead_hours} ч до занятия\n"
-            f"Учеников: {count}"
+            f"{ui.STUDENTS} {ui.plural_with_count(count, 'ученик', 'ученика', 'учеников')}"
         )
     if call.message:
         await call.message.edit_text(

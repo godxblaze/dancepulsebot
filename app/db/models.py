@@ -47,6 +47,22 @@ class SupportCallStatus(enum.StrEnum):
     closed = "closed"  # filled, declined, or nothing was needed
 
 
+class RecruitMode(enum.StrEnum):
+    """Режим автодобора саппортов, личный у каждого препода (lead'а).
+
+    curated — как было: бот предлагает picker, lead сам выбирает кого позвать.
+    open_race — открытая гонка: приглашения сразу всему подходящему пулу (lead +
+        коллеги), кто первый откликнулся.
+    auto_top — бот сам зовёт топ-N по уровню пула (N = дефицит).
+    escalate — curated, но если lead не разобрал за ESCALATE_LEAD до занятия,
+        бот авто-докидывает open-race."""
+
+    curated = "curated"
+    open_race = "open_race"
+    auto_top = "auto_top"
+    escalate = "escalate"
+
+
 class SchoolMemberRole(enum.StrEnum):
     """Роли админа внутри школы. Owner — создатель, может всё включая удалить
     школу и убрать co-admin'ов; coadmin — равные операционные права, но не
@@ -79,6 +95,10 @@ class Admin(Base):
     support_threshold: Mapped[int] = mapped_column(Integer, default=2)
     support_cutoff_hours: Mapped[int] = mapped_column(Integer, default=3)  # фаза 2, 0=выкл
     recruit_evening_time: Mapped[str] = mapped_column(String(5), default="20:00")  # фаза 1
+    # Режим автодобора (B16) — личный у препода. Дефолт curated = прежнее поведение.
+    recruit_mode: Mapped[str] = mapped_column(
+        String(16), default=RecruitMode.curated.value
+    )
     # Персональная переиспользуемая ссылка-приглашение саппорта (start=support_<code>).
     support_code: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     # True если человек хоть раз прошёл onboarding (создал свою школу либо
@@ -216,6 +236,11 @@ class Person(Base):
     )
     # support_level переехал в SupportPoolEntry (per-teacher pool).
     helped_count: Mapped[int] = mapped_column(Integer, default=0)
+    # B5: когда последний раз слали реактивационный пинг (throttle от спама).
+    # Naive UTC. None — ещё ни разу.
+    last_reactivation_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -326,6 +351,10 @@ class SupportCall(Base):
     pending_notified: Mapped[bool] = mapped_column(Boolean, default=False)
     # Фаза 2 уже отрабатывала на этом занятии (добор остатка делается один раз).
     topup_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    # B8: ссылка на recruit-сообщение lead'а (picker/heads-up) с баланс-строкой —
+    # чтобы обновлять баланс в реальном времени при claim/skip. None — не сохранено.
+    picker_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    picker_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -10,14 +10,24 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.bot import ui
 from app.bot.keyboards import (
     attendance_keyboard,
     lesson_card_keyboard,
+    support_ask_keyboard,
     support_pick_keyboard,
 )
-from app.bot.utils import bar, format_group_title, format_place
+from app.bot.utils import format_group_title, format_place
 from app.core.config import settings
-from app.db.models import Admin, Gender, Group, SupportCallStatus, SurveyKind, SurveyStatus
+from app.db.models import (
+    Admin,
+    Gender,
+    Group,
+    RecruitMode,
+    SupportCallStatus,
+    SurveyKind,
+    SurveyStatus,
+)
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
@@ -40,6 +50,22 @@ log = logging.getLogger(__name__)
 # Опрос должен уйти не позже чем за столько до вечернего разбора, чтобы к
 # фиксации у людей было время ответить (иначе фаза 1 считает пустой опрос).
 POLL_BEFORE_FIX = timedelta(hours=4)
+# Режим escalate: если lead не разобрал pending-picker, а до занятия осталось не
+# больше этого — бот авто-докидывает (open-race fallback). Используется в _maybe_recruit.
+ESCALATE_LEAD = timedelta(hours=6)
+
+
+def _answer_deadline(
+    lesson_at: datetime, evening_time: str | None, now: datetime, tz: str | None
+) -> str | None:
+    """«HH:MM» — дедлайн ответа = время вечерней фиксации lead'а (в школьном TZ).
+    None, если вечерний разбор не задан или дедлайн уже прошёл."""
+    if not evening_time:
+        return None
+    fix = evening_fix_at(lesson_at, evening_time, tz=tz)
+    if fix <= now:
+        return None
+    return format_lesson_at(fix, "%H:%M", tz=tz)
 
 
 async def _poll_group(
@@ -49,6 +75,7 @@ async def _poll_group(
     now: datetime,
     *,
     tz: str | None = None,
+    evening_time: str | None = None,
 ) -> None:
     """Ensure the survey exists, then message everyone who hasn't been polled yet.
 
@@ -66,6 +93,7 @@ async def _poll_group(
         members = await persons_svc.group_members(s, group.id)
         await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
         to_poll = await surveys_svc.persons_without_message(s, survey.id)
+        coming = await surveys_svc.coming_by_gender(s, survey.id)
         survey_id = survey.id
         venue = (
             await venues_svc.get_venue(s, group.venue_id)
@@ -77,19 +105,27 @@ async def _poll_group(
         return  # all members already polled
 
     place = format_place(group, venue)
-    lines = [
-        f"💓 <b>{escape(format_group_title(group))}</b>",
-        f"📅 <b>{format_weekday_long(lesson_at, tz=tz)}, "
+    meta = [
+        f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
     ]
     if group.teachers_note:
-        lines.append(f"👤 {escape(group.teachers_note)}")
-    lines.append("")
-    lines.append("Придёшь?")
-    if place:
-        lines.append("")
-        lines.append(f"📍 {escape(place)}")
-    text = "\n".join(lines)
+        meta.append(f"{ui.TEACHER} {escape(group.teachers_note)}")
+    # B1: соц-доказательство «кто уже идёт» (до ответа). B3: дедлайн ответа.
+    body_lines: list[str] = []
+    coming_block = ui.format_coming(coming)
+    if coming_block:
+        body_lines.extend(coming_block.split("\n"))
+    deadline = _answer_deadline(lesson_at, evening_time, now, tz)
+    if deadline:
+        body_lines.append(f"{ui.PENDING} ответь до {deadline}")
+    body_lines.append("Придёшь?")
+    text = ui.card(
+        ui.title(ui.BRAND, escape(format_group_title(group))),
+        meta=meta,
+        body=body_lines,
+        footer=f"{ui.PLACE} {escape(place)}" if place else None,
+    )
     sent = 0
     for p in to_poll:
         try:
@@ -160,20 +196,25 @@ def _format_summary(
     lesson_at: datetime,
     summary: surveys_svc.SurveySummary,
     *,
+    coming: surveys_svc.ComingRoster | None = None,
     tz: str | None = None,
 ) -> str:
-    lines = [
-        f"💓 <b>{escape(group.name)}</b> — итоги опроса",
-        f"занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}",
-        "",
+    body = [
         f"придут <b>{summary.yes}/{summary.total}</b>  "
-        f"{bar(summary.yes, summary.total)}",
+        f"{ui.bar(summary.yes, summary.total)}",
     ]
+    coming_block = ui.format_coming(coming) if coming is not None else ""
+    if coming_block:
+        body.extend(coming_block.split("\n"))
     if summary.no_names:
-        lines.append(f"❌ не придут: {escape(', '.join(summary.no_names))}")
+        body.append(f"{ui.NO} не придут: {escape(', '.join(summary.no_names))}")
     if summary.pending_names:
-        lines.append(f"⏳ молчат: {escape(', '.join(summary.pending_names))}")
-    return "\n".join(lines)
+        body.append(f"{ui.PENDING} молчат: {escape(', '.join(summary.pending_names))}")
+    return ui.card(
+        ui.title(ui.BRAND, escape(format_group_title(group))) + " — итоги опроса",
+        meta=f"занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}",
+        body=body,
+    )
 
 
 async def _maybe_send_summary(
@@ -194,6 +235,7 @@ async def _maybe_send_summary(
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
             return
         summary = await surveys_svc.summarize(s, survey.id)
+        coming = await surveys_svc.coming_by_gender(s, survey.id)
         admin_tg_ids = await groups_svc.group_admin_tg_ids(
             s, group.id, group.school_id
         )
@@ -201,7 +243,7 @@ async def _maybe_send_summary(
 
     if not admin_tg_ids:
         return
-    text = _format_summary(group, lesson_at, summary, tz=tz)
+    text = _format_summary(group, lesson_at, summary, coming=coming, tz=tz)
     markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
     delivered = 0
     terminal = 0
@@ -229,6 +271,45 @@ def _gender_plural(gender: Gender) -> str:
     return "парни" if gender == Gender.male else "девушки"
 
 
+async def send_support_invites(
+    bot: Bot,
+    *,
+    call_id: int,
+    invited: list[tuple[int, str]],
+    title: str,
+    place: str | None,
+    teachers_note: str | None,
+    lesson_time: str,
+    lesson_at: datetime,
+    tz: str | None,
+) -> int:
+    """Единый путь рассылки приглашений «нужна помощь» саппортам. Используется
+    и ручным picker'ом (recruit.py), и авто-режимами open_race/auto_top. Шлёт
+    plain-text (без HTML, как и прежний picker-invite). Возвращает число
+    успешно отправленных."""
+    text_lines = [
+        "🆘 Нужна помощь!",
+        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {lesson_time}.",
+    ]
+    if place:
+        text_lines.append(f"📍 {place}")
+    if teachers_note:
+        text_lines.append(f"👤 {teachers_note}")
+    text_lines.append("Не хватает пары — сможешь подойти выручить?")
+    text = "\n".join(text_lines)
+    sent = 0
+    for tg_id, _name in invited:
+        try:
+            await bot.send_message(
+                tg_id, text, reply_markup=support_ask_keyboard(call_id)
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not invite support %s: %s", tg_id, e)
+            continue
+        sent += 1
+    return sent
+
+
 async def _send_recruit_picker(
     bot: Bot,
     *,
@@ -249,19 +330,17 @@ async def _send_recruit_picker(
 ) -> None:
     """Шлёт lead'у группы сводку баланса + picker его пула (или «пул пуст»).
     Используется обеими фазами добора; первый разобравший выигрывает."""
-    total_pairs = male + female
-    header = "🆘 Добор остатка" if phase2 else "🆘"
+    header = f"{ui.SUPPORT} Добор остатка" if phase2 else ui.SUPPORT
     head_lines = [
         f"{header} <b>{escape(format_group_title(group))}</b> · "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} {group.lesson_time}",
     ]
     place = format_place(group, venue)
     if place:
-        head_lines.append(f"📍 {escape(place)}")
+        head_lines.append(f"{ui.PLACE} {escape(place)}")
     head_lines.extend([
         "баланс пар:",
-        f"🕺 {bar(male, total_pairs)} {male}",
-        f"💃 {bar(female, total_pairs)} {female}",
+        ui.balance_bars(male, female),
         f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.",
     ])
     head = "\n".join(head_lines)
@@ -276,13 +355,64 @@ async def _send_recruit_picker(
     else:
         body = head + "\n\nВ пуле нет подходящих саппортов — добавь через /pool."
         markup = None
+    sent_ref: tuple[int, int] | None = None
     for tg in teacher_tgs:
         try:
-            await bot.send_message(
+            msg = await bot.send_message(
                 tg, body, reply_markup=markup, parse_mode=ParseMode.HTML
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not ask admin %s about supports: %s", tg, e)
+            continue
+        mid = getattr(msg, "message_id", None)
+        if sent_ref is None and mid is not None:
+            sent_ref = (tg, mid)
+    # B8: запоминаем сообщение с баланс-строкой, чтобы обновлять его при claim/skip.
+    if sent_ref is not None:
+        async with session_scope() as s:
+            await supports_svc.set_picker_ref(s, call_id, sent_ref[0], sent_ref[1])
+
+
+def _auto_recruit_plan(
+    group: Group,
+    call_id: int,
+    to_invite: list,
+    lead_tgs: list[int],
+    gender_needed: Gender,
+    deficit: int,
+    male: int,
+    female: int,
+    *,
+    kind: str,
+) -> dict:
+    """План авто-рассылки (open_race/auto_top): кого пригласить + текст lead'у
+    с баланс-строкой (B8 — обновляется в реальном времени при claim/skip).
+    Пустой пул — lead получает понятный «добавь через /pool»."""
+    title = escape(format_group_title(group))
+    balance = ui.balance_bars(male, female)
+    if not to_invite:
+        lead_text = (
+            f"{ui.SUPPORT} «{title}»: в пуле нет подходящих саппортов — "
+            f"добавь через /pool."
+        )
+    elif kind == "auto_top":
+        names = ", ".join(escape(p.full_name) for p in to_invite)
+        lead_text = (
+            f"{ui.SUPPORT} Позвал автоматически на «{title}»: {names}.\n"
+            f"баланс пар:\n{balance}\nНапишу, как откликнутся."
+        )
+    else:  # open_race
+        lead_text = (
+            f"{ui.SUPPORT} Запустил открытый добор на «{title}»: нужны "
+            f"{deficit} — {_gender_plural(gender_needed)}.\n"
+            f"баланс пар:\n{balance}\nПервый откликнувшийся выручает."
+        )
+    return dict(
+        call_id=call_id,
+        invited=[(p.tg_user_id, p.full_name) for p in to_invite],
+        lead_tgs=lead_tgs,
+        lead_text=lead_text,
+    )
 
 
 async def _maybe_recruit(
@@ -305,6 +435,7 @@ async def _maybe_recruit(
     if group.school_id is None:
         return
     send_kwargs: dict | None = None
+    auto_plan: dict | None = None
     async with session_scope() as s:
         # Добор ведёт «куратор» группы (lead) — его настройки, его пул, ему picker.
         lead = await groups_svc.resolve_recruit_lead(s, group)
@@ -314,6 +445,7 @@ async def _maybe_recruit(
         threshold = lead.support_threshold
         topup_hours = lead.support_cutoff_hours
         evening_time = lead.recruit_evening_time
+        mode = lead.recruit_mode
         targets = [lead.tg_user_id]
 
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
@@ -339,21 +471,77 @@ async def _maybe_recruit(
                 )
                 return
             gender_needed = Gender.male if male < female else Gender.female
-            new_call = await supports_svc.create_call(
-                s, survey_id, gender_needed, deficit, SupportCallStatus.pending
-            )
+            if mode == RecruitMode.auto_top.value:
+                # Бот сам зовёт топ-N (N=дефицит) из пула lead'а по уровню.
+                new_call = await supports_svc.create_call(
+                    s, survey_id, gender_needed, deficit, SupportCallStatus.open
+                )
+                to_invite = await persons_svc.top_candidates(
+                    s, lead_id, gender_needed, group.id, deficit
+                )
+                auto_plan = _auto_recruit_plan(
+                    group, new_call.id, to_invite, targets, gender_needed,
+                    deficit, male, female, kind="auto_top",
+                )
+            elif mode == RecruitMode.open_race.value:
+                # Открытая гонка: приглашения сразу всему подходящему пулу.
+                new_call = await supports_svc.create_call(
+                    s, survey_id, gender_needed, deficit, SupportCallStatus.open
+                )
+                candidates = await persons_svc.support_candidates(
+                    s, lead_id, gender_needed, group.id
+                )
+                colleagues = await persons_svc.school_pool_candidates(
+                    s, group.school_id, gender_needed, group.id,
+                    {c.id for c in candidates}, exclude_admin_id=lead_id,
+                )
+                auto_plan = _auto_recruit_plan(
+                    group, new_call.id, candidates + colleagues, targets,
+                    gender_needed, deficit, male, female, kind="open_race",
+                )
+            else:
+                # curated (дефолт) и escalate до окна эскалации — picker lead'у.
+                new_call = await supports_svc.create_call(
+                    s, survey_id, gender_needed, deficit, SupportCallStatus.pending
+                )
+                candidates = await persons_svc.support_candidates(
+                    s, lead_id, gender_needed, group.id
+                )
+                levels = await persons_svc.admin_pool_levels(s, lead_id)
+                colleagues = await persons_svc.school_pool_candidates(
+                    s, group.school_id, gender_needed, group.id,
+                    {c.id for c in candidates}, exclude_admin_id=lead_id,
+                )
+                send_kwargs = dict(
+                    teacher_tgs=targets, call_id=new_call.id,
+                    gender_needed=gender_needed, deficit=deficit, male=male,
+                    female=female, candidates=candidates, venue=venue,
+                    levels=levels, can_expand=bool(colleagues), phase2=False,
+                )
+        elif (
+            mode == RecruitMode.escalate.value
+            and call.status == SupportCallStatus.pending
+        ):
+            # ── Режим escalate: human-first picker, авто-фолбэк при бездействии ──
+            if now < lesson_at - ESCALATE_LEAD:
+                return  # до окна эскалации — как curated (picker уже у lead'а)
+            # lead не разобрал pending за окно до занятия → авто open-race fallback.
             candidates = await persons_svc.support_candidates(
-                s, lead_id, gender_needed, group.id
+                s, lead_id, call.gender, group.id
             )
-            levels = await persons_svc.admin_pool_levels(s, lead_id)
             colleagues = await persons_svc.school_pool_candidates(
-                s, group.school_id, gender_needed, group.id,
+                s, group.school_id, call.gender, group.id,
                 {c.id for c in candidates}, exclude_admin_id=lead_id,
             )
-            send_kwargs = dict(
-                teacher_tgs=targets, call_id=new_call.id, gender_needed=gender_needed,
-                deficit=deficit, male=male, female=female, candidates=candidates,
-                venue=venue, levels=levels, can_expand=bool(colleagues), phase2=False,
+            # status pending→open = гард от повторной эскалации на следующем tick'е.
+            call.status = SupportCallStatus.open
+            call.created_at = datetime.now(UTC).replace(tzinfo=None)
+            call.no_reply_notified = False
+            await s.flush()
+            esc_male, esc_female = await surveys_svc.gender_yes_counts(s, survey_id)
+            auto_plan = _auto_recruit_plan(
+                group, call.id, candidates + colleagues, targets,
+                call.gender, call.needed, esc_male, esc_female, kind="open_race",
             )
         else:
             # ── Фаза 2: добор остатка в день занятия ──
@@ -414,6 +602,31 @@ async def _maybe_recruit(
         await _send_recruit_picker(
             bot, group=group, lesson_at=lesson_at, tz=tz, **send_kwargs
         )
+    if auto_plan is not None:
+        if auto_plan["invited"]:
+            await send_support_invites(
+                bot, call_id=auto_plan["call_id"], invited=auto_plan["invited"],
+                title=format_group_title(group), place=format_place(group, venue),
+                teachers_note=group.teachers_note, lesson_time=group.lesson_time,
+                lesson_at=lesson_at, tz=tz,
+            )
+        lead_ref: tuple[int, int] | None = None
+        for tg in auto_plan["lead_tgs"]:
+            try:
+                msg = await bot.send_message(
+                    tg, auto_plan["lead_text"], parse_mode=ParseMode.HTML
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Could not send recruit heads-up to lead %s: %s", tg, e)
+                continue
+            mid = getattr(msg, "message_id", None)
+            if lead_ref is None and mid is not None:
+                lead_ref = (tg, mid)
+        if lead_ref is not None:
+            async with session_scope() as s:
+                await supports_svc.set_picker_ref(
+                    s, auto_plan["call_id"], lead_ref[0], lead_ref[1]
+                )
 
 
 async def _maybe_remind(
@@ -452,20 +665,20 @@ async def _maybe_remind(
         return
 
     place = format_place(group, venue)
-    lines = [
-        f"⏰ <b>{escape(format_group_title(group))}</b>",
-        f"📅 <b>{format_weekday_long(lesson_at, tz=tz)}, "
+    meta = [
+        f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
         "Напоминаю, что скоро занятие.",
     ]
     if group.teachers_note:
-        lines.append(f"👤 {escape(group.teachers_note)}")
-    lines.append("")
-    lines.append("Придёшь?")
-    if place:
-        lines.append("")
-        lines.append(f"📍 {escape(place)}")
-    text = "\n".join(lines)
+        meta.append(f"{ui.TEACHER} {escape(group.teachers_note)}")
+    # B2: commitment-копирайт — мягкий акцент на последствиях для пары.
+    text = ui.card(
+        ui.title(ui.REMINDER, escape(format_group_title(group))),
+        meta=meta,
+        body=[ui.COMMITMENT, "Придёшь?"],
+        footer=f"{ui.PLACE} {escape(place)}" if place else None,
+    )
 
     sent = 0
     for p in to_remind:
@@ -499,6 +712,79 @@ SUPPORT_NO_REPLY_AFTER = timedelta(hours=1)
 # Pending-call (owner получил picker, но не нажал «Позвать») напоминаем, когда
 # до занятия осталось не больше этого.
 PENDING_NUDGE_LEAD = timedelta(hours=12)
+# B5 реактивация: пропуск последних N занятий → мягкий пинг, не чаще раза в окно.
+REACTIVATE_MISSES = 2
+REACTIVATE_THROTTLE = timedelta(days=14)
+
+
+async def _maybe_reactivate(
+    bot: Bot,
+    group: Group,
+    lesson_at: datetime,
+    now: datetime,
+    *,
+    tz: str | None = None,
+) -> None:
+    """B5: мягкий персональный пинг тем, кто пропустил последние
+    `REACTIVATE_MISSES` занятий. Throttle — не чаще раза в `REACTIVATE_THROTTLE`.
+    Не трогает тех, кто уже ответил на ближайший опрос."""
+    if group.school_id is None:
+        return
+    now_naive = (
+        now.replace(tzinfo=None) if now.tzinfo is None
+        else now.astimezone(UTC).replace(tzinfo=None)
+    )
+    cutoff = now_naive - REACTIVATE_THROTTLE
+    async with session_scope() as s:
+        survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
+        if survey is None:
+            return
+        survey_id = survey.id
+        lapsed = await surveys_svc.lapsed_members(s, group.id, k=REACTIVATE_MISSES)
+        pending_ids = {p.id for p in await surveys_svc.pending_persons(s, survey_id)}
+        venue = (
+            await venues_svc.get_venue(s, group.venue_id)
+            if group.venue_id is not None
+            else None
+        )
+        targets = [
+            (p.tg_user_id, p.id)
+            for p in lapsed
+            if p.id in pending_ids
+            and (p.last_reactivation_at is None or p.last_reactivation_at <= cutoff)
+        ]
+
+    if not targets:
+        return
+    place = format_place(group, venue)
+    meta = [
+        f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
+        "Давно тебя не было — соскучились!",
+    ]
+    text = ui.card(
+        ui.title(ui.BRAND, escape(format_group_title(group))),
+        meta=meta,
+        body=[ui.COMMITMENT, "Придёшь?"],
+        footer=f"{ui.PLACE} {escape(place)}" if place else None,
+    )
+    for tg_id, pid in targets:
+        try:
+            await bot.send_message(
+                tg_id, text,
+                reply_markup=attendance_keyboard(survey_id),
+                parse_mode=ParseMode.HTML,
+            )
+        except (TelegramForbiddenError, TelegramNotFound):
+            # Заблокировал/недоступен — всё равно помечаем, чтобы не долбить.
+            async with session_scope() as s:
+                await persons_svc.mark_reactivated(s, pid, now_naive)
+            continue
+        except Exception as e:  # noqa: BLE001
+            log.warning("reactivate: send to %s failed, will retry: %s", tg_id, e)
+            continue
+        async with session_scope() as s:
+            await persons_svc.mark_reactivated(s, pid, now_naive)
 
 
 async def _stale_call_context(s, call, *, survey=None):
@@ -631,10 +917,13 @@ async def tick(bot: Bot) -> None:
             async with session_scope() as s:
                 if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                     continue
-            await _poll_group(bot, group, lesson_at, now, tz=tz)
+            await _poll_group(
+                bot, group, lesson_at, now, tz=tz, evening_time=evening_time
+            )
             await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
             await _maybe_remind(bot, group, lesson_at, now, tz=tz)
             await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
+            await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
 
 
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
@@ -22,6 +23,7 @@ from app.bot.keyboards import (
 )
 from app.bot.states import JoinFlow
 from app.bot.utils import format_group_title, format_place
+from app.core.config import settings
 from app.db.models import Gender, Group
 from app.db.session import session_scope
 from app.services import admins as admins_svc
@@ -272,6 +274,20 @@ async def show_student_home(message: Message) -> None:
     async with session_scope() as s:
         person = await persons_svc.find_by_tg(s, tg.id)
         if person is None:
+            contact = settings.developer_contact.strip()
+            if contact:
+                teacher_line = (
+                    "<b>Если ты преподаватель или администратор школы</b> — "
+                    f"напиши {escape(contact)}, он подключит тебя. "
+                    f"Твой Telegram ID, если попросят: <code>{tg.id}</code>."
+                )
+            else:
+                teacher_line = (
+                    "<b>Если ты преподаватель или администратор школы</b> — "
+                    "передай свой Telegram ID администратору бота: "
+                    f"<code>{tg.id}</code>. Он выдаст доступ, и сможешь создать "
+                    "свою школу."
+                )
             await message.answer(
                 "👋 <b>Это Dance Pulse</b> — бот посещаемости для танцевальных школ.\n\n"
                 "Перед каждым занятием спрашиваю учеников «придёшь?» и показываю "
@@ -280,9 +296,7 @@ async def show_student_home(message: Message) -> None:
                 "<b>Если ты ученик</b> — попроси у своего преподавателя ссылку-"
                 "приглашение или QR-код. Без ссылки я не знаю в какую группу "
                 "тебя записать.\n\n"
-                "<b>Если ты преподаватель или администратор школы</b> — передай "
-                f"свой Telegram ID разработчику: <code>{tg.id}</code>. "
-                "Он выдаст тебе админ-статус, и сможешь создать свою школу.",
+                + teacher_line,
                 parse_mode=ParseMode.HTML,
                 reply_markup=onboarding_menu_keyboard(),
             )

@@ -6,7 +6,7 @@ Run once with the bot stopped (it sends real Telegram messages).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
@@ -40,14 +40,17 @@ async def main() -> None:
     await init_db()
     bot = build_bot()
     tz = ZoneInfo(settings.timezone)
-    now = datetime.now(tz).replace(microsecond=0)
+    now_local = datetime.now(tz).replace(microsecond=0)
 
     # Lesson ~2 hours from now — pick a real future minute so next_lesson_at
-    # picks today, not «next week's midnight».
-    lesson_at = (now + timedelta(hours=2)).replace(second=0, microsecond=0)
-    lesson_at = lesson_at.replace(tzinfo=None)  # scheduler uses naive datetimes
-    weekday_today = str(lesson_at.weekday())
-    lesson_time_str = lesson_at.strftime("%H:%M")
+    # picks today, not «next week's midnight». weekdays/lesson_time живут в
+    # школьном TZ, поэтому считаем их по локальному времени...
+    lesson_local = (now_local + timedelta(hours=2)).replace(second=0, microsecond=0)
+    weekday_today = str(lesson_local.weekday())
+    lesson_time_str = lesson_local.strftime("%H:%M")
+    # ...а scheduler-функции работают в aware UTC — конвертируем.
+    now = now_local.astimezone(UTC)
+    lesson_at = lesson_local.astimezone(UTC)
 
     try:
         async with session_scope() as s:
@@ -136,11 +139,11 @@ async def main() -> None:
             g_bachata = await groups_svc.get_group(s, bachata_id)
             g_salsa = await groups_svc.get_group(s, salsa_id)
             g_hustle = await groups_svc.get_group(s, hustle_id)
-        await _poll_group(bot, g_bachata, lesson_at)
-        await _poll_group(bot, g_salsa, lesson_at)
+        await _poll_group(bot, g_bachata, lesson_at, now, tz=settings.timezone)
+        await _poll_group(bot, g_salsa, lesson_at, now, tz=settings.timezone)
 
         # 7. for the hustle group: poll, mark every girl as "yes", then recruit
-        await _poll_group(bot, g_hustle, lesson_at)
+        await _poll_group(bot, g_hustle, lesson_at, now, tz=settings.timezone)
         async with session_scope() as s:
             survey = await surveys_svc.find_attendance_survey(
                 s, hustle_id, lesson_at
@@ -151,7 +154,7 @@ async def main() -> None:
 
         # 8. recruit drive — picker goes to Godblazer
         recruit_now = lesson_at - timedelta(hours=2)
-        await _maybe_recruit(bot, g_hustle, lesson_at, recruit_now)
+        await _maybe_recruit(bot, g_hustle, lesson_at, recruit_now, tz=settings.timezone)
 
         # 9. shortcut: open the call and message Anubis directly,
         #    so the user can answer right away instead of tapping the picker.

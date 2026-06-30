@@ -256,9 +256,20 @@ async def _maybe_send_summary(
             terminal += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to send auto-summary to admin %s: %s", tg, e)
-    if delivered == 0 and terminal == 0:
-        return  # все попытки транзиентно упали — попробуем на следующем tick
-    # Хотя бы один админ получил, или все заблокировали бота — больше нет смысла пытаться.
+    if delivered == 0:
+        # Никто не получил. Не метим summary_sent — дошлём на следующих tick'ах.
+        # Транзиентные сбои само собой ретраятся. Terminal (препод заблокировал
+        # бота / ещё не нажал Start — типичный старт пилота) тоже ретраим: как
+        # только препод станет доступен, сводка доедет. Окно ограничено — survey
+        # закроется после занятия и этот код перестанет срабатывать.
+        if terminal:
+            log.warning(
+                "Auto-summary survey %s: все %d админ(ов) недоступны "
+                "(заблокировали бота / не нажали Start). Повторю на след. tick.",
+                survey_id, terminal,
+            )
+        return
+    # Хотя бы один админ получил — больше слать не нужно.
     async with session_scope() as s:
         await surveys_svc.mark_summary_sent(s, survey_id)
     log.info(
@@ -327,6 +338,7 @@ async def _send_recruit_picker(
     levels: dict[int, int] | None = None,
     can_expand: bool = False,
     phase2: bool = False,
+    unknown: int = 0,
 ) -> None:
     """Шлёт lead'у группы сводку баланса + picker его пула (или «пул пуст»).
     Используется обеими фазами добора; первый разобравший выигрывает."""
@@ -343,6 +355,11 @@ async def _send_recruit_picker(
         ui.balance_bars(male, female),
         f"не хватает {deficit} — нужны {_gender_plural(gender_needed)}.",
     ])
+    if unknown:
+        # Ответившие «приду» без пола не попадают в баланс — бар может врать.
+        head_lines.append(
+            f"⚠️ ещё {unknown} без пола — не в балансе; проставь в карточке ученика."
+        )
     head = "\n".join(head_lines)
     if candidates:
         body = head + "\n\nОтметь, кого позвать:"
@@ -517,6 +534,7 @@ async def _maybe_recruit(
                     gender_needed=gender_needed, deficit=deficit, male=male,
                     female=female, candidates=candidates, venue=venue,
                     levels=levels, can_expand=bool(colleagues), phase2=False,
+                    unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                 )
         elif (
             mode == RecruitMode.escalate.value
@@ -596,6 +614,7 @@ async def _maybe_recruit(
                 deficit=deficit, male=eff_male, female=eff_female,
                 candidates=candidates, venue=venue, levels=levels,
                 can_expand=bool(colleagues), phase2=True,
+                unknown=await surveys_svc.unknown_yes_count(s, survey_id),
             )
 
     if send_kwargs is not None:
@@ -899,31 +918,42 @@ async def tick(bot: Bot) -> None:
             group_evening[group.id] = admin_evening[lead_id]
 
     for group in groups:
-        tz = tz_cache.get(group.school_id) if group.school_id else None
-        lesson_at = next_lesson_at(group.weekdays, group.lesson_time, now, tz=tz)
-        if lesson_at is None or now >= lesson_at:
+        # Изоляция по группам: сбой в одной (битые данные, None lead, упавший
+        # send) не должен лишать остальные группы этого tick'а. Логируем и идём
+        # дальше — иначе одна проблемная группа молча стопорит весь tick каждые
+        # 15 минут.
+        try:
+            tz = tz_cache.get(group.school_id) if group.school_id else None
+            lesson_at = next_lesson_at(group.weekdays, group.lesson_time, now, tz=tz)
+            if lesson_at is None or now >= lesson_at:
+                continue
+            # Окно активности группы открывается за lead_hours до занятия, но если у
+            # lead'а включён вечерний разбор — не позже чем за POLL_BEFORE_FIX до него,
+            # чтобы к фиксации опрос уже разошёлся и были ответы.
+            window_start = lesson_at - timedelta(hours=group.lead_hours)
+            evening_time = group_evening.get(group.id)
+            if evening_time:
+                window_start = min(
+                    window_start,
+                    evening_fix_at(lesson_at, evening_time, tz=tz) - POLL_BEFORE_FIX,
+                )
+            if window_start <= now:
+                async with session_scope() as s:
+                    if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
+                        continue
+                await _poll_group(
+                    bot, group, lesson_at, now, tz=tz, evening_time=evening_time
+                )
+                await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
+                await _maybe_remind(bot, group, lesson_at, now, tz=tz)
+                await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
+                await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "tick: группа «%s» (id=%s) упала — пропускаю до след. tick'а",
+                group.name, group.id,
+            )
             continue
-        # Окно активности группы открывается за lead_hours до занятия, но если у
-        # lead'а включён вечерний разбор — не позже чем за POLL_BEFORE_FIX до него,
-        # чтобы к фиксации опрос уже разошёлся и были ответы.
-        window_start = lesson_at - timedelta(hours=group.lead_hours)
-        evening_time = group_evening.get(group.id)
-        if evening_time:
-            window_start = min(
-                window_start,
-                evening_fix_at(lesson_at, evening_time, tz=tz) - POLL_BEFORE_FIX,
-            )
-        if window_start <= now:
-            async with session_scope() as s:
-                if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
-                    continue
-            await _poll_group(
-                bot, group, lesson_at, now, tz=tz, evening_time=evening_time
-            )
-            await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
-            await _maybe_remind(bot, group, lesson_at, now, tz=tz)
-            await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
-            await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
 
 
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -935,6 +965,12 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="attendance_tick",
         next_run_time=datetime.now(ZoneInfo(settings.timezone)),
+        # Гигиена: долгий tick (большой фан-аут / rate-limit) не должен молча
+        # терять следующий запуск (misfire_grace_time), запускаться параллельно
+        # сам с собой (max_instances=1) или копить пропущенные прогоны (coalesce).
+        misfire_grace_time=300,
+        max_instances=1,
+        coalesce=True,
     )
     log.info("Scheduler built — attendance tick every 15 min")
     return sched

@@ -260,6 +260,36 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
         log.warning("Could not notify new admin %s: %s", target_id, e)
 
 
+@router.message(Command("claim"))
+async def cmd_claim(message: Message, command: CommandObject, bot: Bot) -> None:
+    """Self-serve онбординг препода по секрету из .env (OWNER_CLAIM_SECRET).
+    Снимает ручной /grant разработчиком на пилоте: владелец школы пишет боту
+    `/claim <секрет>` и сразу получает доступ."""
+    tg = message.from_user
+    secret = settings.owner_claim_secret
+    if not tg or not secret:
+        return  # фича выключена — молчим, не палим существование команды
+    arg = (command.args or "").strip()
+    if arg != secret:
+        await message.answer("Неверный код. Возьми актуальный у администратора бота.")
+        return
+    async with session_scope() as s:
+        if await admins_svc.get_by_tg_id(s, tg.id) is not None:
+            await message.answer("Ты уже преподаватель — нажми /start.")
+            return
+        await admins_svc.get_or_create(
+            s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
+        )
+    try:
+        await grant_admin_commands(bot, tg.id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("claim: could not set teacher commands for %s: %s", tg.id, e)
+    await message.answer(
+        "✅ Готово, ты преподаватель!\n\n"
+        "Нажми /start — я попрошу название твоей школы, и можно работать."
+    )
+
+
 @router.message(Command("today"))
 @router.message(F.text == MENU_TODAY)
 async def cmd_today(message: Message) -> None:

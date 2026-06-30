@@ -20,3 +20,8 @@ build/
 .idea/
 .vscode/
 .supergoal/
+# e2e
+e2e/web/.profile/
+.playwright-mcp/
+*.session
+*.session-journal

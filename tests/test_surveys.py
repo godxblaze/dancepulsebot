@@ -109,3 +109,27 @@ async def test_mark_summary_sent(db) -> None:
     async with session_scope() as s:
         survey = await surveys.get_survey(s, survey_id)
         assert survey is not None and survey.summary_sent is True
+
+
+async def test_unknown_yes_count(db) -> None:
+    """Ответившие «приду» без пола считаются отдельно и НЕ попадают в
+    gender_yes_counts — баланс добора их не видит."""
+    from app.db.models import Gender
+
+    group_id, person_ids = await _setup_group()
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        survey_id = survey.id
+        # Аня — девушка, Боря — парень, Вика — без пола; все «приду».
+        await persons.set_gender(s, person_ids[0], Gender.female)
+        await persons.set_gender(s, person_ids[1], Gender.male)
+        for pid in person_ids:
+            await surveys.record_answer(s, survey_id, pid, Answer.yes)
+
+    async with session_scope() as s:
+        male, female = await surveys.gender_yes_counts(s, survey_id)
+        unknown = await surveys.unknown_yes_count(s, survey_id)
+    assert (male, female) == (1, 1)  # Вика без пола не учтена
+    assert unknown == 1

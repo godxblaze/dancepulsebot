@@ -142,10 +142,22 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 
 ```powershell
 # .env: BOT_TOKEN, DEVELOPER_ID (твой Telegram user_id). Без них стартовать запретит.
+# Для самостоятельного онбординга препода — OWNER_CLAIM_SECRET (см. ниже).
 # Опционально снести dev-фейков, если уже наполняли базу демо-данными:
 python -m scripts.purge_fakes --dry-run   # посмотреть кого тронем
 python -m scripts.purge_fakes             # реально удалить
+
+# Префлайт перед пилотом — ловит тихие поломки (люди без пола в пуле/ответах,
+# группы без дней недели/куратора, кривой timezone). Только чтение:
+python -m scripts.check_pilot
 ```
+
+**Онбординг первого преподавателя.** Чтобы владелец школы получил доступ без
+ручного `/grant`, задай в `.env` `OWNER_CLAIM_SECRET=<секрет>` и передай ему:
+«напиши боту `/claim <секрет>`». После этого он жмёт `/start` и называет школу.
+Для красивого приветствия нераспознанному пользователю можно задать
+`DEVELOPER_CONTACT=@твой_ник`. Альтернатива на одного-двух — старый путь:
+препод присылает свой `/myid`, ты делаешь `/grant <id>`.
 
 **Каждый день делай бэкап:**
 
@@ -153,7 +165,15 @@ python -m scripts.purge_fakes             # реально удалить
 python -m scripts.backup_db   # кладёт в backups/dance-YYYYMMDD-HHMMSS.sqlite3
 ```
 
-Подключи к Task Scheduler / cron, чтобы крутилось автоматически. Хранит 14 дней.
+Подключи к Task Scheduler / cron, чтобы крутилось автоматически. Хранит 14 дней,
+но всегда оставляет минимум 7 последних копий (даже при долгом простое).
+
+На Windows-хосте бэкап ставится одной командой (см. [scripts/install_backup_task.ps1](scripts/install_backup_task.ps1)):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
+# ежедневно в 03:00 → python -m scripts.backup_db
+```
 
 **Что вообще «является базой»** (что нужно копировать при переносе):
 - `dance.sqlite3` — собственно данные.
@@ -195,7 +215,7 @@ Type=simple
 WorkingDirectory=/srv/dancepulse
 EnvironmentFile=/srv/dancepulse/.env
 ExecStart=/srv/dancepulse/.venv/bin/python -m app.main
-Restart=on-failure
+Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
@@ -216,7 +236,22 @@ journalctl -u dancepulse -f       # хвост логов
 0 3 * * *  cd /srv/dancepulse && /srv/dancepulse/.venv/bin/python -m scripts.backup_db >> logs/backup.log 2>&1
 ```
 
-**Несколько админов на одну школу.** Owner-админ создаётся автоматически при первом `/start` → создании школы. Чтобы дать второму преподавателю co-admin-доступ, owner идёт в `/school` → «Пригласить co-admin'а» и пересылает кандидату одноразовую ссылку с TTL. Кандидат открывает её в боте и сразу становится co-admin'ом школы — никаких dev-скриптов.
+`Restart=always` поднимает бота после любого падения, OOM или перезагрузки —
+без этого процесс, упавший ночью, останется лежать до утра. На старте бот сам
+снимает залётный webhook и, если тот же токен уже запущен где-то ещё, пишет в лог
+и шлёт разработчику предупреждение о конфликте polling (иначе бот «молча мёртв»).
+
+**Windows-хост (пилот без VPS).** Те же гарантии даёт Task Scheduler — готовый
+установщик [scripts/install_bot_task.ps1](scripts/install_bot_task.ps1) (запускать
+от администратора):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_bot_task.ps1
+# автозапуск при старте системы + рестарт каждую минуту при падении
+Start-ScheduledTask -TaskName DancePulseBot   # поднять сейчас
+```
+
+**Несколько админов на одну школу.** Первый owner получает доступ через `/claim <секрет>` (или `/grant` от разработчика — см. «Онбординг первого преподавателя» выше), затем при `/start` называет школу. Чтобы дать второму преподавателю co-admin-доступ, owner идёт в `/school` → «Пригласить co-admin'а» и пересылает кандидату одноразовую ссылку с TTL. Кандидат открывает её в боте и сразу становится co-admin'ом школы — никаких dev-скриптов.
 
 После этого co-admin видит все группы школы в `/groups`, получает auto-summary, может пинговать молчащих и вести пул. Удалить школу, менять настройки автодобора и кикать других членов может только owner.
 
@@ -245,6 +280,20 @@ pytest tests/
 - `test_e2e_*.py` — сквозные сценарии поверх FakeBot.
 
 Тесты с БД используют временную базу через [conftest.py](tests/conftest.py).
+
+### E2E — настоящее прокликивание живого бота
+
+`tests/` гоняют хендлеры через `FakeBot` (быстро, без сети). Чтобы реально
+прокликать `@dancepulsebot` через настоящий Telegram — каталог [e2e/](e2e/):
+
+- **[e2e/live/](e2e/live/)** — Telethon: user-аккаунт по MTProto шлёт боту сообщения
+  и жмёт inline-кнопки программно. Headless, повторяемый suite. `pip install -e ".[e2e]"`,
+  одноразовый `python -m e2e.live.login`, затем `pytest e2e/live -v`.
+- **[e2e/web/](e2e/web/)** — Playwright MCP: клики в видимом web.telegram.org + скриншоты,
+  для визуальных спот-чеков (нужен Node.js).
+
+Оба — отдельным Telegram-аккаунтом-«тестером». Не подхватываются обычным `pytest` и
+Stop-hook'ом. Подробности и пререквизиты — [e2e/README.md](e2e/README.md).
 
 ## Контроль качества
 

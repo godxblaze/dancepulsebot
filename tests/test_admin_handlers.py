@@ -112,6 +112,48 @@ def freeze_today(monkeypatch):
     return _set
 
 
+# ── /claim (self-serve онбординг препода) ────────────────────────────
+
+
+async def test_claim_grants_teacher_with_correct_secret(db, monkeypatch) -> None:
+    from app.bot.handlers.admin import cmd_claim
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "owner_claim_secret", "S3CRET")
+    msg = FakeMessage(user_id=555, text="/claim S3CRET")
+    await cmd_claim(msg, SimpleNamespace(args="S3CRET"), SimpleNamespace())
+
+    assert any("преподаватель" in r for r in msg.replies)
+    async with session_scope() as s:
+        assert await admins.get_by_tg_id(s, 555) is not None
+
+
+async def test_claim_rejects_wrong_secret(db, monkeypatch) -> None:
+    from app.bot.handlers.admin import cmd_claim
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "owner_claim_secret", "S3CRET")
+    msg = FakeMessage(user_id=556, text="/claim nope")
+    await cmd_claim(msg, SimpleNamespace(args="nope"), SimpleNamespace())
+
+    assert any("Неверный код" in r for r in msg.replies)
+    async with session_scope() as s:
+        assert await admins.get_by_tg_id(s, 556) is None
+
+
+async def test_claim_disabled_when_no_secret(db, monkeypatch) -> None:
+    from app.bot.handlers.admin import cmd_claim
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "owner_claim_secret", "")
+    msg = FakeMessage(user_id=557, text="/claim anything")
+    await cmd_claim(msg, SimpleNamespace(args="anything"), SimpleNamespace())
+
+    assert msg.replies == []  # фича выключена — молчим
+    async with session_scope() as s:
+        assert await admins.get_by_tg_id(s, 557) is None
+
+
 # ── /today ───────────────────────────────────────────────────────────
 
 

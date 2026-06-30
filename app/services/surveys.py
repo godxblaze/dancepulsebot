@@ -361,6 +361,23 @@ async def mark_reminded(
     )
 
 
+async def unknown_yes_count(session: AsyncSession, survey_id: int) -> int:
+    """Сколько ответивших «приду» БЕЗ указанного пола. Они выпадают из
+    gender_yes_counts, значит баланс добора может быть посчитан неверно —
+    нужно, чтобы предупредить lead'а («N без пола, проставь в карточке»)."""
+    stmt = (
+        select(func.count())
+        .select_from(Response)
+        .join(Person, Person.id == Response.person_id)
+        .where(
+            Response.survey_id == survey_id,
+            Response.answer == Answer.yes,
+            Person.gender.is_(None),
+        )
+    )
+    return (await session.execute(stmt)).scalar_one() or 0
+
+
 async def gender_yes_counts(session: AsyncSession, survey_id: int) -> tuple[int, int]:
     """(male, female) — how many of each gender answered 'yes' to the survey."""
     stmt = (

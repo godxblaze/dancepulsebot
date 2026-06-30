@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     default_lead_hours: int = 18
     log_level: str = "INFO"
     developer_id: int = 0  # Telegram id allowed to grant admin status via /grant
+    # Самостоятельный онбординг препода на пилоте: если задан, любой может стать
+    # преподавателем командой `/claim <secret>` — без ручного /grant разработчиком.
+    # Пусто = фича выключена. Меняй/чисти секрет между пилотами.
+    owner_claim_secret: str = ""
+    # Куда отсылать нового препода за доступом (напр. "@username" или ссылка).
+    # Подставляется в приветствие нераспознанному пользователю. Пусто = дефолт.
+    developer_contact: str = ""
 
     @property
     def database_url(self) -> str:

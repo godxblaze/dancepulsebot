@@ -1,0 +1,14 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "isolated": false,
+    "userDataDir": "C:\\work\\vibedroch\\dance\\dancepulsebot\\e2e\\web\\.profile",
+    "launchOptions": {
+      "headless": false,
+      "args": ["--lang=en-US"]
+    },
+    "contextOptions": {
+      "locale": "en-US"
+    }
+  }
+}

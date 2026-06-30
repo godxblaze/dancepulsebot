@@ -164,6 +164,44 @@ async def test_tick_sends_auto_summary(db, freeze) -> None:
     assert len([m for m in bot.sent if m.chat_id == 111]) == 1
 
 
+async def test_auto_summary_retries_when_admin_blocked(db, freeze) -> None:
+    """Препод заблокировал бота / не нажал Start (terminal) — summary НЕ метится
+    sent, дойдёт на следующем tick'е, когда препод станет доступен."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    await _make_group()
+    freeze(datetime(2026, 5, 25, 11, 0))  # past the halfway point
+
+    class AdminBlockedOnce(FakeBot):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block_admin = True
+
+        async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+            if chat_id == 111 and self.block_admin:
+                raise TelegramForbiddenError(
+                    method=None, message="bot was blocked by the user"
+                )
+            return await super().send_message(chat_id, text, reply_markup, **kwargs)
+
+    bot = AdminBlockedOnce()
+    await sched.tick(bot)
+    assert [m for m in bot.sent if m.chat_id == 111] == []  # сводка не доставлена
+
+    bot.block_admin = False  # препод нажал Start
+    await sched.tick(bot)
+    summaries = [
+        m for m in bot.sent if m.chat_id == 111 and "итоги опроса" in m.text
+    ]
+    assert len(summaries) == 1  # дошла ретраем
+
+    await sched.tick(bot)  # и больше не дублируется
+    summaries = [
+        m for m in bot.sent if m.chat_id == 111 and "итоги опроса" in m.text
+    ]
+    assert len(summaries) == 1
+
+
 async def test_tick_no_poll_outside_window(db, freeze) -> None:
     await _make_group(lead_hours=18)
     freeze(datetime(2026, 5, 24, 9, 0))  # Sunday, ~34h before lesson

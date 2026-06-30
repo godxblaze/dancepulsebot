@@ -1,0 +1,24 @@
+# Регистрирует ежедневный бэкап базы Dance Pulse через Windows Task Scheduler.
+# Запуск из корня проекта в PowerShell (для записи в планировщик может
+# потребоваться запуск от администратора):
+#   powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
+# Опционально: -Time "03:00" -TaskName "DancePulseBackup"
+param(
+    [string]$Time = "03:00",
+    [string]$TaskName = "DancePulseBackup"
+)
+$ErrorActionPreference = "Stop"
+
+$proj = (Resolve-Path "$PSScriptRoot\..").Path
+$py = Join-Path $proj ".venv\Scripts\python.exe"
+if (-not (Test-Path $py)) { $py = "python" }
+
+$action  = New-ScheduledTaskAction -Execute $py -Argument "-m scripts.backup_db" -WorkingDirectory $proj
+$trigger = New-ScheduledTaskTrigger -Daily -At $Time
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Settings $settings -Force -Description "Daily Dance Pulse SQLite backup" | Out-Null
+
+Write-Host "OK: задача '$TaskName' зарегистрирована — ежедневно в $Time запускает 'python -m scripts.backup_db'."
+Write-Host "Проверить: Get-ScheduledTask -TaskName '$TaskName' ; запустить вручную: Start-ScheduledTask -TaskName '$TaskName'"

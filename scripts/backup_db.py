@@ -16,6 +16,10 @@ from pathlib import Path
 from app.core.config import settings
 
 KEEP_DAYS = 14
+# Всегда держим минимум столько самых свежих копий — даже если все они старше
+# KEEP_DAYS (напр. бот простоял дольше двух недель). Иначе долгий простой
+# подчистую сметает всё, кроме последней.
+KEEP_MIN = 7
 BACKUP_DIR = Path("backups")
 
 
@@ -36,8 +40,14 @@ def make_backup() -> Path:
 
 def prune_old() -> int:
     cutoff = datetime.now() - timedelta(days=KEEP_DAYS)
+    # Сначала самые свежие; первые KEEP_MIN не трогаем независимо от возраста.
+    backups = sorted(
+        BACKUP_DIR.glob("*.sqlite3"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     removed = 0
-    for p in BACKUP_DIR.glob("*.sqlite3"):
+    for p in backups[KEEP_MIN:]:
         if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
             p.unlink()
             removed += 1

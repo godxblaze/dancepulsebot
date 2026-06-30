@@ -256,7 +256,17 @@ async def init_db() -> None:
         # ещё есть» (см. функцию). На боевой БД persons.support_level существует с
         # прошлой схемы, поэтому гейт по `added` тут не подходит.
         await _backfill_support_pool(conn)
-        await _migrate_lesson_at_to_utc(conn)
+        # lesson_at→UTC — РОВНО одноразовая конверсия legacy naive-local значений,
+        # гейтим через user_version. КРИТИЧНО: SQLite-слой хранит даже aware-UTC
+        # datetime как naive-строку (без TZ-маркера), поэтому проверка
+        # идемпотентности «есть ли маркер» внутри миграции не отличает легально
+        # сохранённое рантайм-значение от legacy — повторный прогон сдвинул бы
+        # корректные опросы на TZ-офсет при КАЖДОМ рестарте. user_version=1 после
+        # первого прогона навсегда выключает миграцию.
+        version = (await conn.execute(text("PRAGMA user_version"))).scalar() or 0
+        if version < 1:
+            await _migrate_lesson_at_to_utc(conn)
+            await conn.execute(text("PRAGMA user_version = 1"))
 
 
 @asynccontextmanager

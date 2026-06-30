@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -303,10 +303,16 @@ async def long_absent(
         .order_by(Person.full_name)
     )
     persons = list((await session.execute(persons_stmt)).scalars().all())
+    # lesson_at читается из SQLite naive-UTC; since прилетает aware (utc_now()).
+    # Нормализуем оба к aware-UTC перед сравнением — иначе TypeError, как только
+    # у активного ученика есть отмеченная явка (см. конвенцию в schedule.py).
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
     result: list[tuple[Person, datetime | None]] = []
     for p in persons:
         last = last_seen.get(p.id)
-        if last is None or last < since:
+        last_cmp = last.replace(tzinfo=UTC) if last is not None and last.tzinfo is None else last
+        if last is None or last_cmp < since:
             result.append((p, last))
     return result
 

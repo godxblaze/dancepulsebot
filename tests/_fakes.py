@@ -57,11 +57,23 @@ class SentMessage:
             self._bot.sent.append(msg)
         return msg
 
+    async def answer_document(
+        self, document: Any, caption: str | None = None, **_kwargs: Any  # noqa: ARG002
+    ) -> SentMessage:
+        msg = SentMessage(self._bot, self.chat_id, caption or "")
+        msg.document = document
+        self.replies.append(msg)
+        if self._bot is not None:
+            self._bot.sent.append(msg)
+        return msg
+
 
 class FakeBot:
     def __init__(self) -> None:
         self._next_id = 1000
         self.sent: list[SentMessage] = []
+        self.commands_set: list[Any] = []
+        self.commands_deleted = 0
 
     async def send_message(
         self, chat_id: int, text: str, reply_markup: Any = None, **_: Any
@@ -69,6 +81,24 @@ class FakeBot:
         msg = SentMessage(self, chat_id, text, reply_markup)
         self.sent.append(msg)
         return msg
+
+    async def get_me(self) -> SimpleNamespace:
+        return SimpleNamespace(username="dancepulsebot", id=1, full_name="Dance Pulse")
+
+    async def edit_message_text(
+        self, text: str, chat_id: int | None = None, message_id: int | None = None, **_: Any
+    ) -> SentMessage:
+        msg = SentMessage(self, chat_id if chat_id is not None else 0, text)
+        self.sent.append(msg)
+        return msg
+
+    async def set_my_commands(self, commands: Any, **_: Any) -> bool:
+        self.commands_set.append(commands)
+        return True
+
+    async def delete_my_commands(self, **_: Any) -> bool:
+        self.commands_deleted += 1
+        return True
 
     def last_to(self, chat_id: int) -> SentMessage:
         for m in reversed(self.sent):
@@ -110,6 +140,16 @@ class FakeMessage:
         self, photo: Any, caption: str | None = None, **_kwargs: Any  # noqa: ARG002
     ) -> SentMessage:
         msg = SentMessage(self.bot, self.chat.id, caption or "")
+        self.replies.append(msg)
+        if self.bot is not None:
+            self.bot.sent.append(msg)
+        return msg
+
+    async def answer_document(
+        self, document: Any, caption: str | None = None, **_kwargs: Any  # noqa: ARG002
+    ) -> SentMessage:
+        msg = SentMessage(self.bot, self.chat.id, caption or "")
+        msg.document = document
         self.replies.append(msg)
         if self.bot is not None:
             self.bot.sent.append(msg)

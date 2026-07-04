@@ -16,10 +16,10 @@ from app.bot.handlers.attendance import (
     cb_walk_in_pick,
 )
 from app.bot.handlers.lesson_cancel import (
-    cb_lesson_cancel_ask_reason,
     cb_lesson_cancel_confirm,
+    cb_lesson_cancel_execute,
+    cb_lesson_cancel_other,
     cb_lesson_cancel_pick,
-    cb_lesson_cancel_skip_reason,
     lesson_cancel_reason_cancel,
     lesson_cancel_reason_typed,
 )
@@ -223,7 +223,7 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
 
     ts = int(dt.timestamp())
 
-    # pick → confirm → ask-reason → typed reason → execute
+    # pick → confirm → «Другое» (FSM) → typed reason → execute
     pick = SentMessage(bot, TEACHER_TG, "")
     await cb_lesson_cancel_pick(cb(f"grpcancel:{gid}", TEACHER_TG, message=pick))
     assert "Отменить какое занятие" in pick.text
@@ -232,8 +232,8 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
     assert "Отменить занятие" in pick.text
 
     state = FakeFSM()
-    await cb_lesson_cancel_ask_reason(
-        cb(f"grpcancelok:{gid}:{ts}", TEACHER_TG, message=pick), state
+    await cb_lesson_cancel_other(
+        cb(f"grpcancelother:{gid}:{ts}", TEACHER_TG, message=pick), state
     )
     assert state.state == lc.CancelLesson.reason
 
@@ -252,7 +252,42 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
     assert any("отменил другой админ" in m.text for m in bot.sent_to(820))
 
 
-async def test_cancel_lesson_skip_reason(db, monkeypatch) -> None:
+async def test_cancel_lesson_notifies_claimants_of_filled_call(db, monkeypatch) -> None:
+    """Шаг 14: call закрыт по filled (успешный сценарий киллер-фичи) — отмена
+    всё равно уведомляет всех claim'еров, не только при open/pending."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+
+    async with session_scope() as s:
+        survey, _ = await surveys_svc.get_or_create_survey(s, gid, SurveyKind.attendance, dt)
+        group = await groups_svc.get_group(s, gid)
+        sup, _ = await persons_svc.add_to_group(s, group, 840, "u", "Настя")
+        await persons_svc.set_gender(s, sup.id, Gender.female)
+        # needed=1 → единственный claim заполняет call → status=closed ДО отмены
+        call = await supports_svc.create_call(
+            s, survey.id, Gender.female, 1, SupportCallStatus.open
+        )
+        accepted, filled, needed = await supports_svc.claim(s, call.id, sup.id)
+        assert accepted and filled == needed  # закрыт по filled
+        call_id = call.id
+
+    async with session_scope() as s:
+        assert (await supports_svc.get_call(s, call_id)).status == SupportCallStatus.closed
+
+    pick = SentMessage(bot, TEACHER_TG, "")
+    await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
+    await cb_lesson_cancel_execute(
+        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick), bot
+    )
+    assert any("больше не нужна" in m.text for m in bot.sent_to(840))
+
+
+async def test_cancel_lesson_no_reason_preset(db, monkeypatch) -> None:
+    """«Без причины» — тап пресета исполняет отмену немедленно, без FSM."""
     bot = FakeBot()
     gid, sid, code = await make_group()
     now = LESSON - timedelta(hours=2)
@@ -262,12 +297,8 @@ async def test_cancel_lesson_skip_reason(db, monkeypatch) -> None:
 
     pick = SentMessage(bot, TEACHER_TG, "")
     await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
-    state = FakeFSM()
-    await cb_lesson_cancel_ask_reason(
-        cb(f"grpcancelok:{gid}:{ts}", TEACHER_TG, message=pick), state
-    )
-    await cb_lesson_cancel_skip_reason(
-        cb("cnclreason:skip", TEACHER_TG, message=pick), state, bot
+    await cb_lesson_cancel_execute(
+        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick), bot
     )
     assert "отменено" in pick.text
     async with session_scope() as s:
@@ -277,6 +308,84 @@ async def test_cancel_lesson_skip_reason(db, monkeypatch) -> None:
     again = cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, ""))
     await cb_lesson_cancel_confirm(again)
     assert any("уже отменено" in a[0] for a in again.answers)
+
+
+async def test_cancel_lesson_preset_reason_in_notice(db, monkeypatch) -> None:
+    """Пресет «Болезнь препода» — тап исполняет отмену немедленно: LessonCancellation
+    создана, «приду»-ученик и саппорт (call ещё open, не filled) уведомлены."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+    await join_via_link(bot, code, 830, "Игорь", Gender.male)
+
+    async with session_scope() as s:
+        survey, _ = await surveys_svc.get_or_create_survey(s, gid, SurveyKind.attendance, dt)
+        igor = await persons_svc.find_by_tg(s, 830)
+        await surveys_svc.record_answer(s, survey.id, igor.id, Answer.yes)
+        group = await groups_svc.get_group(s, gid)
+        sup, _ = await persons_svc.add_to_group(s, group, 831, "u", "Соня")
+        await persons_svc.set_gender(s, sup.id, Gender.female)
+        call = await supports_svc.create_call(
+            s, survey.id, Gender.female, 2, SupportCallStatus.open
+        )
+        await supports_svc.claim(s, call.id, sup.id)
+
+    pick = SentMessage(bot, TEACHER_TG, "")
+    await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
+    await cb_lesson_cancel_execute(
+        cb(f"grpcancelreason:{gid}:{ts}:sick", TEACHER_TG, message=pick), bot
+    )
+    assert "отменено" in pick.text
+    async with session_scope() as s:
+        assert await cancellations_svc.is_cancelled(s, gid, dt)
+    assert any("отменено" in m.text for m in bot.sent_to(830))  # «приду»-ученик
+    assert any("больше не нужна" in m.text for m in bot.sent_to(831))  # саппорт
+
+
+async def test_cancel_confirm_screen_abandoned_no_cancel(db, monkeypatch) -> None:
+    """Confirm-экран без единого тапа по пресету не отменяет занятие — никакого
+    промежуточного state больше нет для этого пути."""
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+    bot = FakeBot()
+    pick = SentMessage(bot, TEACHER_TG, "")
+    await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
+    async with session_scope() as s:
+        assert not await cancellations_svc.is_cancelled(s, gid, dt)
+
+
+async def test_cancel_other_reason_stale_flow_does_not_cancel(db, monkeypatch) -> None:
+    """«Другое» → пользователь пропал >10 мин → случайный текст спустя час НЕ
+    исполняет отмену (протухший FSM-state)."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+
+    state = FakeFSM()
+    await cb_lesson_cancel_other(
+        cb(f"grpcancelother:{gid}:{ts}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, "")),
+        state,
+    )
+    assert state.state == lc.CancelLesson.reason
+
+    # час спустя — произвольный текст (в другом контексте, случайно совпавший
+    # со stale-state) не должен исполнить отмену.
+    _pin_now(monkeypatch, now + timedelta(hours=1))
+    msg = FakeMessage(fake_user(TEACHER_TG), text="Привет, как дела?", bot=bot)
+    await lesson_cancel_reason_typed(msg, state, bot)
+    assert msg.replies and "устарел" in msg.replies[0].text
+    assert state.state is None  # state всё равно очищен
+    async with session_scope() as s:
+        assert not await cancellations_svc.is_cancelled(s, gid, dt)
 
 
 async def test_cancel_lesson_aborted(db, monkeypatch) -> None:

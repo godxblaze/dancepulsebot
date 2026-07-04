@@ -264,13 +264,28 @@ def pick_lesson_to_cancel_keyboard(
 
 
 def confirm_cancel_lesson_keyboard(group_id: int, ts: int) -> InlineKeyboardMarkup:
+    """Пресеты причины отмены — каждый тап исполняет отмену НЕМЕДЛЕННО (кроме
+    «Другое», которая ведёт в текстовый шаг). Никакого промежуточного
+    подтверждения после тапа — брошенный флоу здесь не может отменить занятие."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grpcancel:{group_id}")],
             [InlineKeyboardButton(
-                text="🚫 Да, отменить занятие",
-                callback_data=f"grpcancelok:{group_id}:{ts}",
+                text="🤒 Болезнь препода",
+                callback_data=f"grpcancelreason:{group_id}:{ts}:sick",
             )],
+            [InlineKeyboardButton(
+                text="🏢 Зал недоступен",
+                callback_data=f"grpcancelreason:{group_id}:{ts}:venue",
+            )],
+            [InlineKeyboardButton(
+                text="📝 Другое (текстом)",
+                callback_data=f"grpcancelother:{group_id}:{ts}",
+            )],
+            [InlineKeyboardButton(
+                text="Без причины",
+                callback_data=f"grpcancelreason:{group_id}:{ts}:none",
+            )],
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grpcancel:{group_id}")],
         ]
     )
 

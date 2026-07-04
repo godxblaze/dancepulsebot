@@ -65,19 +65,36 @@ async def _owner_check(manager: DialogManager) -> bool:
 
 
 async def _patch_group(manager: DialogManager, **fields: Any) -> None:
-    """Обновить поля группы. Перевычислить name если меняется style/level."""
+    """Обновить поля группы. Перевычислить name если меняется style/level.
+    Правка lesson_time/weekdays может осиротить открытый Survey (см.
+    groups_svc.update_group) — уведомляем ответственных через bot диалога."""
     if not await _owner_check(manager):
         return
     group_id = _gid(manager)
+    notify_tgs: list[int] = []
+    title = ""
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
         if group is None:
             return
-        await groups_svc.update_group(s, group, **fields)
+        title = format_group_title(group)
+        notify_tgs = await groups_svc.update_group(s, group, **fields)
         if "style" in fields or "level" in fields:
             await groups_svc.update_group(
                 s, group, name=derive_group_name(group.style, group.level)
             )
+    if notify_tgs:
+        bot = manager.middleware_data.get("bot")
+        text = (
+            f"⚠️ Расписание группы «{escape(title)}» изменилось — открытый "
+            "опрос по старому времени закрыт, новый уйдёт по актуальному "
+            "расписанию."
+        )
+        for tg in notify_tgs:
+            try:
+                await bot.send_message(tg, text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("reschedule-notice to %s failed: %s", tg, e)
 
 
 # ── menu ──────────────────────────────────────────────────────────────

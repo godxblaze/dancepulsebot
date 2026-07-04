@@ -18,9 +18,11 @@ from app.core.config import settings
 from app.db.models import Gender
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import venues as venues_svc
+from app.services.schedule import format_lesson_at
 from tests._e2e_helpers import LESSON, TEACHER_TG, cb, join_via_link, make_group
 from tests._fakes import FakeBot, FakeFSM, FakeMessage, SentMessage, fake_user
 
@@ -68,6 +70,46 @@ async def test_student_home_and_today_with_group(db, monkeypatch) -> None:
     await show_student_today(today)
     assert today.replies
     assert "Полевик" in today.replies[0].text  # venue rendered via format_place
+
+
+async def test_student_today_shows_cancellation(db, monkeypatch) -> None:
+    """Шаг 15: «Сегодня» при отменённом занятии показывает отмену явно, а не
+    как живое занятие."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    await join_via_link(bot, code, 951, "Боря", Gender.male)
+    now = LESSON - timedelta(hours=4)
+    monkeypatch.setattr(student_mod, "utc_now", lambda: now)
+
+    async with session_scope() as s:
+        await cancellations_svc.cancel(s, gid, LESSON, reason="Болезнь")
+
+    today = FakeMessage(fake_user(951, full_name="Боря"), bot=bot)
+    await show_student_today(today)
+    assert today.replies
+    text = today.replies[0].text
+    assert "отменено" in text
+    assert "👯" not in text  # не показан как живое занятие
+
+
+async def test_student_home_nearest_skips_cancelled(db, monkeypatch) -> None:
+    """Шаг 15: «Ближайшее» на домашнем экране пропускает отменённый инстанс и
+    показывает следующее живое занятие (группа повторяется еженедельно)."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    await join_via_link(bot, code, 952, "Вера", Gender.female)
+    now = LESSON - timedelta(hours=10)
+    monkeypatch.setattr(student_mod, "utc_now", lambda: now)
+
+    async with session_scope() as s:
+        await cancellations_svc.cancel(s, gid, LESSON)
+
+    home = FakeMessage(fake_user(952, full_name="Вера"), bot=bot)
+    await show_student_home(home)
+    text = home.replies[0].text
+    assert "Ближайшее" in text
+    assert format_lesson_at(LESSON, "%d.%m в %H:%M") not in text
+    assert format_lesson_at(LESSON + timedelta(days=7), "%d.%m в %H:%M") in text
 
 
 async def test_student_today_no_lessons(db) -> None:

@@ -27,11 +27,18 @@ from app.core.config import settings
 from app.db.models import Gender, Group
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
 from app.services import venues as venues_svc
-from app.services.schedule import format_lesson_at, format_weekdays, next_lesson_at, utc_now
+from app.services.schedule import (
+    format_lesson_at,
+    format_weekdays,
+    next_lesson_at,
+    upcoming_lessons,
+    utc_now,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -252,17 +259,22 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await _notify_admin(bot, group, name, person_id)
 
 
-def _nearest_lesson(
-    groups: list[Group], tz_map: dict[int, str]
+async def _nearest_lesson(
+    session, groups: list[Group], tz_map: dict[int, str]
 ) -> tuple[Group, datetime] | None:
-    """The soonest upcoming lesson across the given groups. tz_map: school_id → tz."""
+    """The soonest upcoming, NOT cancelled lesson across the given groups.
+    tz_map: school_id → tz. Отменённые инстансы пропускаем — «Ближайшее» не
+    должно показывать занятие, которого не будет."""
     now = utc_now()
     best: tuple[Group, datetime] | None = None
     for g in groups:
         tz_name = tz_map.get(g.school_id) if g.school_id else None
-        dt = next_lesson_at(g.weekdays, g.lesson_time, now, tz=tz_name)
-        if dt is not None and (best is None or dt < best[1]):
-            best = (g, dt)
+        for dt in upcoming_lessons(g.weekdays, g.lesson_time, now, n=4, tz=tz_name):
+            if await cancellations_svc.is_cancelled(session, g.id, dt):
+                continue
+            if best is None or dt < best[1]:
+                best = (g, dt)
+            break
     return best
 
 
@@ -307,6 +319,7 @@ async def show_student_home(message: Message) -> None:
         for g in groups:
             if g.school_id is not None and g.school_id not in tz_map:
                 tz_map[g.school_id] = await schools_svc.get_timezone(s, g.school_id)
+        nearest = await _nearest_lesson(s, groups, tz_map) if groups else None
 
     lines = [f"👋 Привет, {name}!"]
     if groups:
@@ -316,7 +329,6 @@ async def show_student_home(message: Message) -> None:
                 f"• «{format_group_title(g)}» — "
                 f"{format_weekdays(g.weekdays)} в {g.lesson_time}"
             )
-        nearest = _nearest_lesson(groups, tz_map)
         if nearest is not None:
             g, dt = nearest
             tz_name = tz_map.get(g.school_id) if g.school_id else None
@@ -366,6 +378,12 @@ async def show_student_today(message: Message) -> None:
             if dt_local_date not in (today_local, tomorrow_local):
                 continue
             when = "сегодня" if dt_local_date == today_local else "завтра"
+            if await cancellations_svc.is_cancelled(s, g.id, dt):
+                blocks.append(
+                    f"🚫 «{format_group_title(g)}» — {when} в {g.lesson_time} "
+                    "— занятие отменено"
+                )
+                continue
             line = f"👯 «{format_group_title(g)}» — {when} в {g.lesson_time}"
             venue = (
                 await venues_svc.get_venue(s, g.venue_id)

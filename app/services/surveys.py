@@ -183,6 +183,24 @@ async def close_past_surveys(session: AsyncSession, now: datetime) -> int:
     return result.rowcount or 0
 
 
+async def close_open_surveys_for_group(session: AsyncSession, group_id: int) -> list[int]:
+    """Закрывает все открытые Survey этой группы — используется при правке
+    расписания (lesson_time/weekdays/TZ школы), где identity занятия
+    (пересчитываемый UTC-инстант) меняется и старый опрос осиротел бы (сводка/
+    напоминания/добор продолжат жить по старому расписанию). Возвращает id
+    закрытых surveys (пусто — нечего было закрывать)."""
+    ids = list((await session.execute(
+        select(Survey.id).where(
+            Survey.group_id == group_id, Survey.status == SurveyStatus.open
+        )
+    )).scalars().all())
+    if ids:
+        await session.execute(
+            update(Survey).where(Survey.id.in_(ids)).values(status=SurveyStatus.closed)
+        )
+    return ids
+
+
 async def mark_summary_sent(session: AsyncSession, survey_id: int) -> None:
     await session.execute(
         update(Survey).where(Survey.id == survey_id).values(summary_sent=True)

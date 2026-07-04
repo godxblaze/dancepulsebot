@@ -260,7 +260,7 @@ async def cb_school_tz(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("schtzset:"))
-async def cb_school_tz_set(call: CallbackQuery) -> None:
+async def cb_school_tz_set(call: CallbackQuery, bot: Bot) -> None:
     parts = (call.data or "").split(":", 2)
     school_id = int(parts[1])
     tz_name = parts[2]
@@ -278,9 +278,19 @@ async def cb_school_tz_set(call: CallbackQuery) -> None:
         if current == tz_name:
             await call.answer("Уже выбрано")
             return
-        await schools_svc.set_timezone(s, school_id, tz_name)
+        notify_tgs = await schools_svc.set_timezone(s, school_id, tz_name)
     await _render_school_tz(call, school_id)
     await call.answer(f"TZ: {tz_name}")
+    if notify_tgs:
+        text = (
+            "⚠️ Смена часового пояса школы закрыла открытые опросы по старому "
+            "времени — новые уйдут по актуальному расписанию."
+        )
+        for tg in notify_tgs:
+            try:
+                await bot.send_message(tg, text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("TZ reschedule-notice to %s failed: %s", tg, e)
 
 
 @router.callback_query(F.data.startswith("schren:"))

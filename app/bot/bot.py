@@ -27,6 +27,7 @@ from app.bot.handlers import (
     student,
     survey,
 )
+from app.bot.middlewares import ClearStaleCancelState
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,10 @@ def _build_storage() -> BaseStorage:
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=_build_storage())
+    # Нижнее меню — «безопасная гавань»: чистит зависший CancelLesson.reason
+    # до того, как апдейт дойдёт до любого хендлера (outer — гарантированно
+    # выполняется, даже если конкретный хендлер ниже не совпадёт по фильтру).
+    dp.message.outer_middleware(ClearStaleCancelState())
     # student first: it claims /start with a deep-link payload
     dp.include_router(student.router)
     dp.include_router(survey.router)

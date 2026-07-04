@@ -90,17 +90,21 @@ async def test_school_timezone(db) -> None:
     assert "Часовой пояс" in tz_msg.text
 
     # set a new TZ
-    await cb_school_tz_set(cb(f"schtzset:{sid}:Europe/Berlin", TEACHER_TG, message=tz_msg))
+    await cb_school_tz_set(
+        cb(f"schtzset:{sid}:Europe/Berlin", TEACHER_TG, message=tz_msg), bot
+    )
     async with session_scope() as s:
         assert await schools_svc.get_timezone(s, sid) == "Europe/Berlin"
 
     # setting the same again → "Уже выбрано", no error
     set_again = cb(f"schtzset:{sid}:Europe/Berlin", TEACHER_TG, message=tz_msg)
-    await cb_school_tz_set(set_again)
+    await cb_school_tz_set(set_again, bot)
     assert any("Уже выбрано" in a[0] for a in set_again.answers)
 
     # garbage TZ outside whitelist → silently ignored
-    await cb_school_tz_set(cb(f"schtzset:{sid}:Mars/Olympus", TEACHER_TG, message=tz_msg))
+    await cb_school_tz_set(
+        cb(f"schtzset:{sid}:Mars/Olympus", TEACHER_TG, message=tz_msg), bot
+    )
     async with session_scope() as s:
         assert await schools_svc.get_timezone(s, sid) == "Europe/Berlin"
 

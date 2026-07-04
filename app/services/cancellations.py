@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LessonCancellation
@@ -41,3 +41,16 @@ async def is_cancelled(
     session: AsyncSession, group_id: int, lesson_at: datetime
 ) -> bool:
     return await get(session, group_id, lesson_at) is not None
+
+
+async def delete_future(session: AsyncSession, group_id: int, now: datetime) -> int:
+    """Удаляет БУДУЩИЕ LessonCancellation этой группы — используется при правке
+    расписания (lesson_time/weekdays/TZ школы): identity занятия меняется,
+    старая отмена по старому расписанию не должна «воскреснуть» под новым."""
+    result = await session.execute(
+        delete(LessonCancellation).where(
+            LessonCancellation.group_id == group_id,
+            LessonCancellation.lesson_at > now,
+        )
+    )
+    return result.rowcount or 0

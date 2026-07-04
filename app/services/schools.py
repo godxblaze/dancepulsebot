@@ -116,13 +116,24 @@ async def rename_school(
 
 async def set_timezone(
     session: AsyncSession, school_id: int, tz_name: str
-) -> None:
+) -> list[int]:
     """Меняет IANA timezone школы. Валидность tz_name проверяется на стороне
-    вызывающего (UI-picker предлагает фиксированный список)."""
+    вызывающего (UI-picker предлагает фиксированный список). TZ входит в
+    identity занятия (пересчитываемый UTC-инстант) — смена осиротила бы открытые
+    Survey всех групп школы; закрывает их через groups_svc.close_orphaned_survey
+    (та же логика, что при правке lesson_time/weekdays одной группы). Возвращает
+    deduped admin tg_ids для уведомления — вызывающий шлёт через свой bot."""
     school = await session.get(School, school_id)
-    if school is not None:
-        school.timezone = tz_name
-        await session.flush()
+    if school is None:
+        return []
+    school.timezone = tz_name
+    await session.flush()
+    from app.services import groups as groups_svc
+
+    notify: set[int] = set()
+    for group in await groups_svc.school_groups(session, school_id):
+        notify.update(await groups_svc.close_orphaned_survey(session, group))
+    return list(notify)
 
 
 async def get_timezone(session: AsyncSession, school_id: int) -> str:

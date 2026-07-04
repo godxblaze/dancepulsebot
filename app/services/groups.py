@@ -79,6 +79,27 @@ async def resolve_recruit_lead(session: AsyncSession, group: Group) -> Admin | N
 _UNSET = object()
 
 
+async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int]:
+    """Правка lesson_time/weekdays группы (или TZ её школы) меняет identity
+    занятия — пересчитываемый UTC-инстант. Открытый Survey этой группы осиротел
+    бы (сводка/напоминания/добор продолжат жить по старому расписанию, ответы
+    потеряются, ученикам уйдёт второй «придёшь?»), а будущая LessonCancellation
+    «воскресла» бы под новым расписанием. Закрывает открытые Survey и чистит
+    будущие cancellation'ы. Возвращает admin tg_ids для уведомления — вызывающий
+    шлёт его через свой bot (см. group_admin_tg_ids)."""
+    from app.services import cancellations as cancellations_svc
+    from app.services import surveys as surveys_svc
+    from app.services.schedule import utc_now
+
+    closed = await surveys_svc.close_open_surveys_for_group(session, group.id)
+    if not closed:
+        return []
+    await cancellations_svc.delete_future(session, group.id, utc_now())
+    if group.school_id is None:
+        return []
+    return await group_admin_tg_ids(session, group.id, group.school_id)
+
+
 async def update_group(
     session: AsyncSession,
     group: Group,
@@ -91,9 +112,16 @@ async def update_group(
     venue_id: object = _UNSET,
     room: object = _UNSET,
     teachers_note: object = _UNSET,
-) -> None:
+) -> list[int]:
     """Patch arbitrary fields on a Group. Sentinel `_UNSET` distinguishes
-    «don't touch» from «set to None»."""
+    «don't touch» from «set to None». Возвращает admin tg_ids для уведомления,
+    если правка weekdays/lesson_time осиротила открытый Survey (см.
+    close_orphaned_survey) — иначе пусто."""
+    reschedule = (
+        weekdays is not _UNSET and weekdays != group.weekdays
+    ) or (
+        lesson_time is not _UNSET and lesson_time != group.lesson_time
+    )
     if name is not _UNSET:
         group.name = name  # type: ignore[assignment]
     if style is not _UNSET:
@@ -111,6 +139,9 @@ async def update_group(
     if teachers_note is not _UNSET:
         group.teachers_note = teachers_note  # type: ignore[assignment]
     await session.flush()
+    if reschedule:
+        return await close_orphaned_survey(session, group)
+    return []
 
 
 async def school_styles(session: AsyncSession, school_id: int) -> list[str]:

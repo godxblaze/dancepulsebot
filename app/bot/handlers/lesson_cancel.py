@@ -1,11 +1,15 @@
-"""Отмена одного занятия: 3-шаговый flow (pick → confirm → reason → execute).
+"""Отмена одного занятия: pick → confirm-with-reason-presets → execute.
 
-Извлечено из admin.py в рамках C1. Использует `_access.accessible_group`.
+Каждый пресет причины на confirm-экране исполняет отмену НЕМЕДЛЕННО — брошенный
+флоу не может отменить занятие, а зависший FSM-state не может выполнить отмену
+задним числом (единственный путь в FSM — «Другое», и он протухает через
+REASON_STALE_AFTER). Извлечено из admin.py в рамках C1. Использует
+`_access.accessible_group`.
 """
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -18,7 +22,6 @@ from app.bot.keyboards import (
     MENU_TEXTS,
     confirm_cancel_lesson_keyboard,
     pick_lesson_to_cancel_keyboard,
-    skip_keyboard,
 )
 from app.bot.states import CancelLesson
 from app.bot.utils import format_group_title
@@ -32,6 +35,16 @@ from app.services.schedule import format_lesson_at, upcoming_lessons, utc_now
 
 log = logging.getLogger(__name__)
 router = Router()
+
+# Пресеты причины (грpcancelreason:<gid>:<ts>:<preset>) — None = без причины.
+_REASON_PRESETS: dict[str, str | None] = {
+    "sick": "Болезнь преподавателя",
+    "venue": "Зал недоступен",
+    "none": None,
+}
+# «Другое» ведёт в текстовый FSM-шаг; если он не завершён за это время —
+# протухает (state.clear() вместо исполнения отмены по случайному тексту).
+REASON_STALE_AFTER = timedelta(minutes=10)
 
 
 @router.callback_query(F.data.startswith("grpcancel:"))
@@ -68,7 +81,8 @@ async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("grpcanceldt:"))
 async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
-    """Шаг 2: confirmation выбранной даты."""
+    """Шаг 2: confirm-экран с пресетами причины — каждый тап исполняет отмену
+    немедленно (шаг 13 аудита: брошенный флоу больше не может «почти отменить»)."""
     parts = (call.data or "").split(":")
     group_id, ts = int(parts[1]), int(parts[2])
     lesson_at = datetime.fromtimestamp(ts, UTC)
@@ -88,24 +102,37 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
     await call.message.edit_text(
         f"Отменить занятие «{title}» {format_lesson_at(lesson_at, tz=tz_name)}?\n\n"
         f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
-        f"уйдёт уведомление об отмене.",
+        f"уйдёт уведомление об отмене.\n\n"
+        f"Выбери причину — отмена исполнится сразу по тапу:",
         reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
     )
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("grpcancelok:"))
-async def cb_lesson_cancel_ask_reason(call: CallbackQuery, state: FSMContext) -> None:
-    """Шаг 3a: подтверждение получено — спрашиваем опциональную причину."""
+@router.callback_query(F.data.startswith("grpcancelreason:"))
+async def cb_lesson_cancel_execute(call: CallbackQuery, bot: Bot) -> None:
+    """Тап пресета причины — отмена исполняется немедленно, без FSM."""
+    parts = (call.data or "").split(":")
+    group_id, ts, preset = int(parts[1]), int(parts[2]), parts[3]
+    reason = _REASON_PRESETS.get(preset)
+    result = await _do_cancel_lesson(call.from_user.id, group_id, ts, reason, bot)
+    if call.message:
+        await call.message.edit_text(result)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpcancelother:"))
+async def cb_lesson_cancel_other(call: CallbackQuery, state: FSMContext) -> None:
+    """«Другое» — единственный путь в текстовый шаг причины; asked_at делает
+    его протухающим (см. lesson_cancel_reason_typed)."""
     parts = (call.data or "").split(":")
     group_id, ts = int(parts[1]), int(parts[2])
     await state.set_state(CancelLesson.reason)
-    await state.update_data(group_id=group_id, ts=ts)
+    await state.update_data(group_id=group_id, ts=ts, asked_at=utc_now().timestamp())
     if call.message:
         await call.message.edit_text(
-            "Хочешь приложить причину отмены? Напиши одной строкой — "
-            "она пойдёт в уведомление ученикам. Или «Пропустить».",
-            reply_markup=skip_keyboard("cnclreason:skip"),
+            "Напиши причину отмены одной строкой — она пойдёт в уведомление "
+            "ученикам."
         )
     await call.answer()
 
@@ -116,27 +143,19 @@ async def lesson_cancel_reason_cancel(message: Message, state: FSMContext) -> No
     await message.answer("Окей, отмену занятия отменил — ничего не изменилось.")
 
 
-@router.callback_query(CancelLesson.reason, F.data == "cnclreason:skip")
-async def cb_lesson_cancel_skip_reason(
-    call: CallbackQuery, state: FSMContext, bot: Bot
-) -> None:
-    data = await state.get_data()
-    await state.clear()
-    result = await _do_cancel_lesson(
-        call.from_user.id, int(data["group_id"]), int(data["ts"]), None, bot
-    )
-    if call.message:
-        await call.message.edit_text(result)
-    await call.answer()
-
-
 @router.message(CancelLesson.reason, F.text, ~F.text.in_(MENU_TEXTS))
 async def lesson_cancel_reason_typed(
     message: Message, state: FSMContext, bot: Bot
 ) -> None:
     data = await state.get_data()
-    reason = (message.text or "").strip() or None
+    asked_at = data.get("asked_at")
     await state.clear()
+    if asked_at is None or utc_now().timestamp() - asked_at > REASON_STALE_AFTER.total_seconds():
+        # Флоу протух (>10 мин без ответа) — не исполняем отмену по случайному
+        # тексту, введённому куда-то в другой момент.
+        await message.answer("Флоу отмены устарел — начни заново через карточку группы.")
+        return
+    reason = (message.text or "").strip() or None
     result = await _do_cancel_lesson(
         message.from_user.id, int(data["group_id"]), int(data["ts"]), reason, bot
     )
@@ -186,7 +205,10 @@ async def _do_cancel_lesson(
             )).scalars().all()
             yes_tg_ids = list(rows)
             sc = await supports_svc.get_call_for_survey(s, survey.id)
-            if sc is not None and sc.status != SupportCallStatus.closed:
+            if sc is not None:
+                # Независимо от call.status — в т.ч. closed по filled, ровно
+                # успешный сценарий киллер-фичи: заявившиеся саппорты должны
+                # узнать об отмене так же, как «приду»-ученики.
                 from app.db.models import SupportClaim
                 sup_rows = (await s.execute(
                     _sel(Person.tg_user_id)

@@ -20,9 +20,14 @@ $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+# SYSTEM + ServiceAccount — задача стартует без логина пользователя (иначе
+# ночной Windows Update ребут оставляет бота лежать до ручного логина).
+# SYSTEM должен иметь доступ к каталогу проекта и .env — WorkingDirectory
+# выше уже указывает на $proj, права на чтение файлов там по умолчанию есть.
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -RunLevel Highest -Force `
+    -Settings $settings -Principal $principal -Force `
     -Description "Dance Pulse bot — autostart + auto-restart" | Out-Null
 
 Write-Host "OK: задача '$TaskName' зарегистрирована — автозапуск при старте системы, рестарт каждую 1 мин при падении."

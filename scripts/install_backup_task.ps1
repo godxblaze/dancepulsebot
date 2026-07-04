@@ -16,9 +16,14 @@ if (-not (Test-Path $py)) { $py = "python" }
 $action  = New-ScheduledTaskAction -Execute $py -Argument "-m scripts.backup_db" -WorkingDirectory $proj
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+# SYSTEM + ServiceAccount — та же дыра, что и в install_bot_task.ps1: без
+# принципала задача требует залогиненного пользователя, и ночной бэкап после
+# ребута без логина не выполнится. SYSTEM должен иметь доступ к $proj и .env.
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Force -Description "Daily Dance Pulse SQLite backup" | Out-Null
+    -Settings $settings -Principal $principal -Force `
+    -Description "Daily Dance Pulse SQLite backup" | Out-Null
 
 Write-Host "OK: задача '$TaskName' зарегистрирована — ежедневно в $Time запускает 'python -m scripts.backup_db'."
 Write-Host "Проверить: Get-ScheduledTask -TaskName '$TaskName' ; запустить вручную: Start-ScheduledTask -TaskName '$TaskName'"

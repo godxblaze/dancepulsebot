@@ -3,11 +3,16 @@
 Запуск:
     python -m scripts.backup_db
 
-Кладёт файл в backups/dance-YYYYMMDD-HHMMSS.sqlite3 и удаляет копии старше KEEP_DAYS.
-Подключать через Windows Task Scheduler / cron — раз в сутки.
+Кладёт файл в backups/dance-YYYYMMDD-HHMMSS.sqlite3 (+ копии .env и *.fsm.json
+с тем же timestamp-суффиксом, если они существуют) и удаляет копии старше
+KEEP_DAYS. Подключать через Windows Task Scheduler / cron — раз в сутки.
+
+Секреты (.env с токеном бота) остаются в локальном backups/ — offsite-копия
+только в приватное хранилище, см. docs/PILOT_DAY0_CHECKLIST.md.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -35,23 +40,41 @@ def make_backup() -> Path:
 
     with sqlite3.connect(src) as src_conn, sqlite3.connect(dst) as dst_conn:
         src_conn.backup(dst_conn)
+
+    env = Path(".env")
+    if env.exists():
+        shutil.copy2(env, BACKUP_DIR / f"env-{stamp}.bak")
+    fsm = src.with_suffix(".fsm.json")
+    if fsm.exists():
+        shutil.copy2(fsm, BACKUP_DIR / f"{src.stem}-{stamp}.fsm.json")
     return dst
 
 
-def prune_old() -> int:
+def _prune_glob(pattern: str) -> int:
     cutoff = datetime.now() - timedelta(days=KEEP_DAYS)
     # Сначала самые свежие; первые KEEP_MIN не трогаем независимо от возраста.
-    backups = sorted(
-        BACKUP_DIR.glob("*.sqlite3"),
+    files = sorted(
+        BACKUP_DIR.glob(pattern),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
     removed = 0
-    for p in backups[KEEP_MIN:]:
+    for p in files[KEEP_MIN:]:
         if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
             p.unlink()
             removed += 1
     return removed
+
+
+def prune_old() -> int:
+    """БД, .env и fsm-снапшоты создаются в одном make_backup() с одинаковым
+    mtime, поэтому прунинг каждой серии тем же правилом (KEEP_MIN свежих
+    неприкосновенны) держит их в шаге друг с другом."""
+    return (
+        _prune_glob("*.sqlite3")
+        + _prune_glob("env-*.bak")
+        + _prune_glob("*.fsm.json")
+    )
 
 
 def main() -> None:

@@ -18,7 +18,10 @@ from app.bot.keyboards import (
     support_pick_keyboard,
 )
 from app.bot.utils import format_group_title, format_place
+from app.core.alerts import alert_developer
 from app.core.config import settings
+from app.core.logging import LOG_FILE
+from app.core.sentinel import ConflictSentinel
 from app.db.models import (
     Admin,
     Gender,
@@ -956,6 +959,13 @@ async def tick(bot: Bot) -> None:
             continue
 
 
+async def _conflict_sentinel_tick(bot: Bot, sentinel: ConflictSentinel) -> None:
+    async def _alert(text: str) -> None:
+        await alert_developer(bot, text)
+
+    await sentinel.check(datetime.now(UTC), _alert)
+
+
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone=settings.timezone)
     sched.add_job(
@@ -972,5 +982,15 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
-    log.info("Scheduler built — attendance tick every 15 min")
+    sched.add_job(
+        _conflict_sentinel_tick,
+        "interval",
+        minutes=5,
+        args=[bot, ConflictSentinel(LOG_FILE)],
+        id="conflict_sentinel",
+        misfire_grace_time=300,
+        max_instances=1,
+        coalesce=True,
+    )
+    log.info("Scheduler built — attendance tick every 15 min, conflict sentinel every 5 min")
     return sched

@@ -305,6 +305,23 @@ async def test_open_race_open_call_does_not_escalate(db) -> None:
     assert not any("Нужна помощь" in t for _, t in bot.sent)  # без повторной рассылки
 
 
+async def test_escalate_excludes_already_claimed_candidate(db) -> None:
+    """Фильтр эскалации (по образцу фазы-2, supports.claimed_person_ids): кто
+    уже согласился по этому call'у, повторный инвайт при авто-фолбэке не получает."""
+    ctx = await _lesson_needing_two_males("escalate")
+    await _escalate_pending(ctx)  # pending picker
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        claimed_person = await persons.get_person(s, ctx.group.school_id, ctx.pool[3])
+        accepted, _, _ = await supports.claim(s, call.id, claimed_person.id)
+        assert accepted is True  # pending — claim() это разрешает
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалация
+    invited = {chat for chat, t in bot.sent if "Нужна помощь" in t}
+    assert ctx.pool[3] not in invited  # уже согласившийся — не зван повторно
+    assert invited == {ctx.pool[2], ctx.pool[1], ctx.colleague_tg}
+
+
 async def test_escalate_coexists_with_topup(db) -> None:
     ctx = await _lesson_needing_two_males("escalate")  # topup 3ч включён (дефолт)
     await _escalate_pending(ctx)

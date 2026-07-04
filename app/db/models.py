@@ -355,6 +355,10 @@ class SupportCall(Base):
     # чтобы обновлять баланс в реальном времени при claim/skip. None — не сохранено.
     picker_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     picker_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Сообщение из picker_ref несёт живую inline-клавиатуру (picker с кнопками
+    # выбора саппортов), а не просто текст-хедсап — редактировать его текст без
+    # reply_markup нельзя, иначе кнопки пропадают (см. _refresh_balance).
+    picker_has_keyboard: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

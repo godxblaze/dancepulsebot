@@ -64,9 +64,13 @@ class FakeCallback:
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.edited: list[tuple[int, int]] = []  # (chat_id, message_id) — фиксирует edit-вызовы
 
     async def send_message(self, chat_id, text, **kwargs) -> None:
         self.sent.append((chat_id, text))
+
+    async def edit_message_text(self, text, chat_id=None, message_id=None, **kwargs) -> None:
+        self.edited.append((chat_id, message_id))
 
 
 async def _imbalanced_lesson(males_yes: int = 1, females_yes: int = 4):
@@ -190,6 +194,52 @@ async def test_claim_duplicate_not_double_counted(db) -> None:
         assert not accepted and filled == 1
     async with session_scope() as s:
         assert (await s.get(Person, pids[0])).helped_count == 0  # явка не отмечена
+
+
+async def test_claim_rejected_on_closed_call(db) -> None:
+    """Call закрыт (needed не доеден по count — напр. вручную выставленный
+    closed) → claim отказывает по статусу, не только по заполненности."""
+    cid, pids = await _open_call(needed=2)
+    async with session_scope() as s:
+        call = await supports.get_call(s, cid)
+        call.status = SupportCallStatus.closed  # закрыт, хотя filled(0) < needed(2)
+    async with session_scope() as s:
+        accepted, filled, needed = await supports.claim(s, cid, pids[0])
+        assert not accepted and filled == 0 and needed == 2
+    async with session_scope() as s:
+        assert await supports.count_claims(s, cid) == 0  # ничего не записалось
+        call = await supports.get_call(s, cid)
+        assert call.status == SupportCallStatus.closed  # статус не тронут
+
+
+async def test_claim_rejected_after_dismiss(db) -> None:
+    """dismiss_call() закрывает pending-call — claim по нему больше не проходит."""
+    ctx = await _call_with_pool_candidate()  # pending call
+    async with session_scope() as s:
+        assert await supports.dismiss_call(s, ctx.call_id) is True
+    async with session_scope() as s:
+        accepted, filled, _ = await supports.claim(s, ctx.call_id, ctx.sup_pid)
+        assert not accepted and filled == 0
+    async with session_scope() as s:
+        assert await supports.count_claims(s, ctx.call_id) == 0
+        call = await supports.get_call(s, ctx.call_id)
+        assert call.status == SupportCallStatus.closed  # dismiss не откатился
+
+
+async def test_late_claim_does_not_wipe_picker_keyboard(db) -> None:
+    """B: поздний claim по инвайту фазы-1 не должен снести клавиатуру
+    live picker'а фазы-2 (picker_ref теперь указывает на него). _refresh_balance
+    должен пропустить edit сообщения с picker_has_keyboard=True."""
+    cid, _pids = await _open_call(needed=2)  # tg_user_id саппортов — 201..204
+    async with session_scope() as s:
+        # phase-2 переставила picker_ref на свежий picker С клавиатурой.
+        await supports.set_picker_ref(s, cid, 100, 555, has_keyboard=True)
+    bot = FakeBot()
+    cb = FakeCallback(f"sup:join:{cid}", user_id=201)  # поздний саппорт фазы-1
+    await cb_support_join(cb, bot)
+    async with session_scope() as s:
+        assert await supports.count_claims(s, cid) == 1  # claim прошёл
+    assert bot.edited == []  # picker-сообщение (chat=100, msg=555) не редактировалось
 
 
 # ── scheduler _maybe_recruit ─────────────────────────────────────────
@@ -589,6 +639,42 @@ async def test_claim_after_lesson_rejected(db) -> None:
     async with session_scope() as s:
         assert await supports.count_claims(s, call_id) == 0
     assert cb.message.text and "уже началось" in cb.message.text.lower()
+
+
+async def test_skip_after_lesson_rejected(db) -> None:
+    """Поздний «не смогу» после начала занятия не стирает явку задним числом —
+    зеркало гарда в cb_support_join (join-гард уже покрыт test_claim_after_lesson_rejected)."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.open
+        )
+        p, _ = await persons.add_to_group(s, g, 700, "u", "Саппорт")
+        await supports.claim(s, call.id, p.id)
+        call_id, survey_id, p_id = call.id, survey.id, p.id
+    # занятие «прошло» — сдвигаем lesson_at в прошлое, как в test_claim_after_lesson_rejected
+    async with session_scope() as s:
+        survey = await surveys.get_survey(s, survey_id)
+        survey.lesson_at = datetime.now(UTC) - timedelta(hours=1)
+    bot = FakeBot()
+    cb = FakeCallback(f"sup:skip:{call_id}", user_id=700)
+    await cb_support_skip(cb, bot)
+    async with session_scope() as s:
+        assert await supports.count_claims(s, call_id) == 1  # claim жив
+        claim_row = (await s.execute(
+            select(supports.SupportClaim).where(
+                supports.SupportClaim.support_call_id == call_id,
+                supports.SupportClaim.person_id == p_id,
+            )
+        )).scalar_one()
+        assert claim_row.attended is None  # не тронут
+        assert (await s.get(Person, p_id)).helped_count == 0  # не тронут
+    assert bot.sent == []  # лиду НЕ ушёл «передумал»-пуш
+    assert cb.message.text and "прошло" in cb.message.text.lower()
 
 
 # ── #3: таймер «тишины» считается от отправки инвайтов ───────────────

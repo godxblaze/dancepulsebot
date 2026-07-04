@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Gender, Person, SupportCall, SupportCallStatus, SupportClaim
+from app.db.models import Gender, Person, SupportCall, SupportCallStatus, SupportClaim, Survey
+from app.services.schedule import as_utc
 
 # Однопроцессный бот (polling) обрабатывает апдейты конкурентными задачами: два
 # «Приду помочь» на последний слот могут прочитать одинаковый count и перебрать
@@ -111,11 +112,15 @@ async def claimed_person_ids(session: AsyncSession, call_id: int) -> set[int]:
 
 
 async def unclaim(
-    session: AsyncSession, call_id: int, person_id: int
+    session: AsyncSession, call_id: int, person_id: int, *, now: datetime
 ) -> bool:
     """Revert a person's claim. Re-opens a closed call so the freed slot is
     available again, and recomputes helped_count. Returns True if anything changed.
-    """
+
+    Defense-in-depth: отказывает, если занятие уже прошло (`now` — момент,
+    которым сам вызывающий уже гейтит хендлер-гвард в cb_support_skip; сервис
+    перепроверяет его же, а не доверяет хендлеру вслепую — claim() зеркально
+    гардит по call.status)."""
     row = (
         await session.execute(
             select(SupportClaim).where(
@@ -126,10 +131,14 @@ async def unclaim(
     ).scalar_one_or_none()
     if row is None:
         return False
+    call = await session.get(SupportCall, call_id)
+    if call is not None:
+        survey = await session.get(Survey, call.survey_id)
+        if survey is not None and as_utc(survey.lesson_at) <= now:
+            return False  # занятие уже прошло — не откатываем явку задним числом
     await session.delete(row)
     await session.flush()
     await _recount_helped(session, person_id)
-    call = await session.get(SupportCall, call_id)
     if call is not None and call.status == SupportCallStatus.closed:
         call.status = SupportCallStatus.open
     await session.flush()
@@ -137,14 +146,22 @@ async def unclaim(
 
 
 async def set_picker_ref(
-    session: AsyncSession, call_id: int, chat_id: int, message_id: int
+    session: AsyncSession,
+    call_id: int,
+    chat_id: int,
+    message_id: int,
+    *,
+    has_keyboard: bool = False,
 ) -> None:
     """B8: запомнить (chat_id, message_id) recruit-сообщения lead'а — чтобы потом
-    обновлять в нём баланс-строку при claim/skip."""
+    обновлять в нём баланс-строку при claim/skip. has_keyboard=True — сообщение
+    несёт живой picker (кнопки выбора саппортов), не просто текст-хедсап; такое
+    сообщение _refresh_balance не трогает (см. app/bot/handlers/recruit.py)."""
     call = await session.get(SupportCall, call_id)
     if call is not None:
         call.picker_chat_id = chat_id
         call.picker_message_id = message_id
+        call.picker_has_keyboard = has_keyboard
         await session.flush()
 
 
@@ -238,12 +255,17 @@ async def claim(
     """Record a support claim if there is room.
 
     Returns (accepted, filled, needed). `accepted` is False if the slot is already
-    full or the person claimed before. Closes the call and bumps the person's
-    helped_count when the claim succeeds.
+    full, the person claimed before, or the call is closed (filled elsewhere or
+    dismissed). Closes the call and bumps the person's helped_count when the
+    claim succeeds.
     """
     call = await session.get(SupportCall, call_id)
     if call is None:
         return False, 0, 0
+    if call.status not in (SupportCallStatus.pending, SupportCallStatus.open):
+        # Закрыт (заполнен либо dismiss'нут лидом) — новые отклики не принимаем.
+        filled = await count_claims(session, call_id)
+        return False, filled, call.needed
     dup = await session.execute(
         select(SupportClaim).where(
             SupportClaim.support_call_id == call_id,

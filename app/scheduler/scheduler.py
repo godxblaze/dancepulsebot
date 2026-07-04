@@ -388,9 +388,13 @@ async def _send_recruit_picker(
         if sent_ref is None and mid is not None:
             sent_ref = (tg, mid)
     # B8: запоминаем сообщение с баланс-строкой, чтобы обновлять его при claim/skip.
+    # has_keyboard: markup не None → это живой picker (кнопки выбора саппортов),
+    # его текст _refresh_balance трогать не должен (см. recruit.py).
     if sent_ref is not None:
         async with session_scope() as s:
-            await supports_svc.set_picker_ref(s, call_id, sent_ref[0], sent_ref[1])
+            await supports_svc.set_picker_ref(
+                s, call_id, sent_ref[0], sent_ref[1], has_keyboard=markup is not None
+            )
 
 
 def _auto_recruit_plan(
@@ -547,12 +551,16 @@ async def _maybe_recruit(
             if now < lesson_at - ESCALATE_LEAD:
                 return  # до окна эскалации — как curated (picker уже у lead'а)
             # lead не разобрал pending за окно до занятия → авто open-race fallback.
-            candidates = await persons_svc.support_candidates(
+            # Фильтруем уже согласившихся (по образцу фазы-2) — иначе эскалация
+            # повторно зовёт того, кто уже claim'нул этот call.
+            claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
+            cands = await persons_svc.support_candidates(
                 s, lead_id, call.gender, group.id
             )
+            candidates = [c for c in cands if c.id not in claimed_ids]
             colleagues = await persons_svc.school_pool_candidates(
                 s, group.school_id, call.gender, group.id,
-                {c.id for c in candidates}, exclude_admin_id=lead_id,
+                {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
             )
             # status pending→open = гард от повторной эскалации на следующем tick'е.
             call.status = SupportCallStatus.open

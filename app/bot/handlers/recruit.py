@@ -100,12 +100,17 @@ def _balance_text(group, lesson_at, male: int, female: int,
 
 
 async def _refresh_balance(
-    bot: Bot, *, picker_chat_id, picker_message_id, group, lesson_at,
-    gender, male: int, female: int, claimed: int, needed: int, tz: str | None,
+    bot: Bot, *, picker_chat_id, picker_message_id, picker_has_keyboard: bool,
+    group, lesson_at, gender, male: int, female: int, claimed: int, needed: int,
+    tz: str | None,
 ) -> None:
     """B8: обновить баланс-строку сохранённого recruit-сообщения lead'а после
-    claim/skip. Graceful: нет ref или сообщение удалено → молча выходим."""
-    if picker_chat_id is None or picker_message_id is None:
+    claim/skip. Graceful: нет ref или сообщение удалено → молча выходим.
+
+    picker_has_keyboard=True — сообщение несёт живой picker (кнопки выбора
+    саппортов); edit_message_text без reply_markup снял бы их, поэтому такое
+    сообщение не трогаем вовсе (баланс просто не обновится в нём вживую)."""
+    if picker_chat_id is None or picker_message_id is None or picker_has_keyboard:
         return
     eff_male = male + (claimed if gender == Gender.male else 0)
     eff_female = female + (claimed if gender == Gender.female else 0)
@@ -308,6 +313,15 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
                     )
                 await call.answer()
                 return
+            if sc.status not in (SupportCallStatus.pending, SupportCallStatus.open):
+                # Заполнен elsewhere либо lead дал отбой (dismiss) — новый отклик
+                # не принимаем, claim() отказал бы тем же гардом.
+                if call.message:
+                    await call.message.edit_text(
+                        "Добор уже закрыт, спасибо, что откликнулся!"
+                    )
+                await call.answer()
+                return
             person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
             if person is None:
                 await call.answer()
@@ -322,6 +336,7 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             # B8: данные для живого баланс-бара в recruit-сообщении lead'а.
             picker_chat_id = sc.picker_chat_id
             picker_message_id = sc.picker_message_id
+            picker_has_keyboard = sc.picker_has_keyboard
             call_gender = sc.gender
             call_needed = sc.needed
             male_yes, female_yes = await surveys_svc.gender_yes_counts(s, sc.survey_id)
@@ -366,8 +381,8 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
             pass
     await _refresh_balance(
         bot, picker_chat_id=picker_chat_id, picker_message_id=picker_message_id,
-        group=group, lesson_at=lesson_at, gender=call_gender,
-        male=male_yes, female=female_yes, claimed=claimed_total,
+        picker_has_keyboard=picker_has_keyboard, group=group, lesson_at=lesson_at,
+        gender=call_gender, male=male_yes, female=female_yes, claimed=claimed_total,
         needed=call_needed, tz=tz_name,
     )
 
@@ -381,8 +396,10 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
     title = "занятие"
     when = ""
     group_name = ""
+    lesson_over = False
     # B8: состояние для живого баланс-бара.
     picker_chat_id = picker_message_id = None
+    picker_has_keyboard = False
     call_gender = None
     male_yes = female_yes = 0
     lesson_at_val = None
@@ -403,28 +420,39 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                 tz_name = await schools_svc.get_timezone(s, group.school_id)
                 when = format_lesson_at(survey.lesson_at, tz=tz_name)
                 group_name = group.name
-                person = await persons_svc.get_person(
-                    s, group.school_id, call.from_user.id
-                )
-                if person is not None and sc is not None:
-                    if await supports_svc.unclaim(s, call_id, person.id):
-                        reverted_name = person.full_name
-                        filled = await supports_svc.count_claims(s, call_id)
-                        needed = sc.needed
-                        notify_tgs = await groups_svc.group_admin_tg_ids(
-                            s, group.id, group.school_id
-                        )
-                        picker_chat_id = sc.picker_chat_id
-                        picker_message_id = sc.picker_message_id
-                        call_gender = sc.gender
-                        male_yes, female_yes = await surveys_svc.gender_yes_counts(
-                            s, sc.survey_id
-                        )
-                        lesson_at_val = survey.lesson_at
-                        group_obj = group
+                if as_utc(survey.lesson_at) <= utc_now():
+                    # Занятие уже началось/прошло — поздний «не смогу» не должен
+                    # стирать явку задним числом (зеркало гарда в cb_support_join).
+                    lesson_over = True
+                else:
+                    person = await persons_svc.get_person(
+                        s, group.school_id, call.from_user.id
+                    )
+                    if person is not None and sc is not None:
+                        if await supports_svc.unclaim(
+                            s, call_id, person.id, now=utc_now()
+                        ):
+                            reverted_name = person.full_name
+                            filled = await supports_svc.count_claims(s, call_id)
+                            needed = sc.needed
+                            notify_tgs = await groups_svc.group_admin_tg_ids(
+                                s, group.id, group.school_id
+                            )
+                            picker_chat_id = sc.picker_chat_id
+                            picker_message_id = sc.picker_message_id
+                            picker_has_keyboard = sc.picker_has_keyboard
+                            call_gender = sc.gender
+                            male_yes, female_yes = await surveys_svc.gender_yes_counts(
+                                s, sc.survey_id
+                            )
+                            lesson_at_val = survey.lesson_at
+                            group_obj = group
 
     if call.message:
-        text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
+        if lesson_over:
+            text = f"Занятие «{title}» {when} уже прошло — спасибо, что откликнулся!"
+        else:
+            text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
         await call.message.edit_text(
             text, reply_markup=support_flip_keyboard(call_id, "skip")
         )
@@ -442,8 +470,9 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                 pass
         await _refresh_balance(
             bot, picker_chat_id=picker_chat_id, picker_message_id=picker_message_id,
-            group=group_obj, lesson_at=lesson_at_val, gender=call_gender,
-            male=male_yes, female=female_yes, claimed=filled, needed=needed, tz=tz_name,
+            picker_has_keyboard=picker_has_keyboard, group=group_obj,
+            lesson_at=lesson_at_val, gender=call_gender, male=male_yes,
+            female=female_yes, claimed=filled, needed=needed, tz=tz_name,
         )
 
 

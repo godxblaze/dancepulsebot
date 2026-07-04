@@ -245,6 +245,14 @@ async def _on_broadcast_text_typed(
 async def _on_broadcast_send(
     call: CallbackQuery, _btn: Button, manager: DialogManager
 ) -> None:
+    # Кнопка «Отправить» живёт до manager.done() после всего цикла send'ов —
+    # даблтап до этого момента запустил бы рассылку дважды. Флаг ставится
+    # синхронно (без await до него) — второй тап в том же loop'е видит его
+    # гарантированно, module-level Lock не нужен (обе таски в одном loop'е).
+    if manager.dialog_data.get("sending"):
+        await call.answer("Уже отправляю…")
+        return
+    manager.dialog_data["sending"] = True
     text = manager.dialog_data.get("text")
     group_id = manager.dialog_data.get("group_id") or _group_id_from_start(manager)
     if not text or group_id is None:

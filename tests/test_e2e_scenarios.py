@@ -610,7 +610,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
         ),
         bot,
     )
-    assert "Уже набрали" in invite3.text
+    assert "уже закрыт" in invite3.text.lower()  # call.status guard (block B/3)
 
     async with session_scope() as s:
         assert (await s.get(Person, sup3_pid)).helped_count == helped_3  # unchanged

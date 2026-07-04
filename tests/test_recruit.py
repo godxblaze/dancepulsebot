@@ -376,6 +376,18 @@ async def test_pick_nope_dismisses_call(db) -> None:
     assert cb.message.text and "не нужен" in cb.message.text.lower()
 
 
+async def test_pick_nope_dismiss_text_is_honest(db) -> None:
+    """Dismiss терминален — ответ не обещает несуществующий путь «передумать»."""
+    ctx = await _call_with_pool_candidate()
+    cb = FakeCallback(f"picknope:{ctx.call_id}", user_id=100)
+    await cb_support_pick_nope(cb)
+    assert cb.message.text
+    text = cb.message.text.lower()
+    assert "позову сам" in text
+    assert "передумаешь" not in text
+    assert "🆘" not in cb.message.text
+
+
 async def test_pick_nope_rejects_foreign_teacher(db) -> None:
     ctx = await _call_with_pool_candidate()
     async with session_scope() as s:

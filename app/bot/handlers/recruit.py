@@ -278,7 +278,7 @@ async def cb_support_pick_nope(call: CallbackQuery) -> None:
     if call.message:
         await call.message.edit_text(
             "Ок, в этот раз добор не нужен — баланс сложился. "
-            "Если передумаешь: 🆘 Саппорты."
+            "Если баланс снова перекосит — позову сам."
         )
     await call.answer()
 

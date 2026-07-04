@@ -818,6 +818,7 @@ def support_pick_keyboard(
     if can_expand:
         kb.button(text="➕ из пула коллег", callback_data=f"pickmore:{call_id}")
     kb.button(text=f"📨 Позвать ({len(selected)})", callback_data=f"picksend:{call_id}")
+    kb.button(text="✗ Не сейчас · баланс ок", callback_data=f"picknope:{call_id}")
     kb.adjust(1)
     return kb.as_markup()
 

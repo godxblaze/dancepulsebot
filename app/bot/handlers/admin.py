@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram_dialog import DialogManager
+from sqlalchemy import func, select
 
 from app.bot import ui
 from app.bot.commands import grant_admin_commands, revoke_admin_commands
@@ -54,7 +55,16 @@ from app.bot.utils import (
     qr_png,
 )
 from app.core.config import settings
-from app.db.models import Gender, Group, Person, SurveyStatus
+from app.db.models import (
+    Gender,
+    Group,
+    Person,
+    School,
+    SupportCall,
+    SupportCallStatus,
+    Survey,
+    SurveyStatus,
+)
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import exports as exports_svc
@@ -287,6 +297,46 @@ async def cmd_claim(message: Message, command: CommandObject, bot: Bot) -> None:
     await message.answer(
         "✅ Готово, ты преподаватель!\n\n"
         "Нажми /start — я попрошу название твоей школы, и можно работать."
+    )
+
+
+async def _health_snapshot(s) -> dict[str, int]:
+    """Быстрый DB-хелсчек для /status разработчика."""
+    async def _count(model, *where) -> int:
+        stmt = select(func.count()).select_from(model)
+        for w in where:
+            stmt = stmt.where(w)
+        return (await s.execute(stmt)).scalar_one()
+
+    return {
+        "schools": await _count(School),
+        "groups": await _count(Group, Group.active.is_(True)),
+        "persons": await _count(Person),
+        "open_surveys": await _count(Survey, Survey.status == SurveyStatus.open),
+        "pending_calls": await _count(
+            SupportCall, SupportCall.status == SupportCallStatus.pending
+        ),
+        "open_calls": await _count(
+            SupportCall, SupportCall.status == SupportCallStatus.open
+        ),
+    }
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    """DB-хелсчек для разработчика (settings.developer_id): жив ли бот и его
+    масштаб. Не в публичном меню — для всех прочих молчим."""
+    tg = message.from_user
+    if tg is None or settings.developer_id <= 0 or tg.id != settings.developer_id:
+        return
+    async with session_scope() as s:
+        snap = await _health_snapshot(s)
+    await message.answer(
+        "🩺 <b>Bot OK</b>\n"
+        f"школ: {snap['schools']} · активных групп: {snap['groups']}\n"
+        f"учеников: {snap['persons']} · открытых опросов: {snap['open_surveys']}\n"
+        f"добор pending/open: {snap['pending_calls']}/{snap['open_calls']}",
+        parse_mode=ParseMode.HTML,
     )
 
 

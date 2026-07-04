@@ -15,11 +15,15 @@ engine = create_async_engine(settings.database_url)
 
 @event.listens_for(engine.sync_engine, "connect")
 def _configure_sqlite(dbapi_connection, _record) -> None:
-    """Per-connection PRAGMAs: FK enforcement + WAL for concurrent reads/safer crashes."""
+    """Per-connection PRAGMAs: FK enforcement + WAL for concurrent reads/safer crashes.
+    busy_timeout=5000 — ждать до 5с освобождения write-лока вместо мгновенного
+    «database is locked»: транзиентные коллизии под конкурентной нагрузкой (и на
+    общей файловой тест-БД) ретраятся сами, а не роняют запрос."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 

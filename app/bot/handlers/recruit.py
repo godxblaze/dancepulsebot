@@ -196,46 +196,50 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
     if not selected:
         await call.answer("Сначала отметь, кого позвать", show_alert=True)
         return
-    async with session_scope() as s:
-        sc, survey, group = await _call_context(s, call_id)
-        if sc is None or survey is None or group is None or group.school_id is None:
-            await call.answer("Уже обработано", show_alert=True)
-            return
-        admin_id = await _admin_id_from_tg(call.from_user.id, s)
-        if admin_id is None or not await groups_svc.can_manage_recruit(
-            s, group.id, group.school_id, admin_id
-        ):
-            await call.answer()
-            return
-        if sc.status != SupportCallStatus.pending:
-            # Кто-то из ответственных уже разобрал (open/closed) — гасим дубль.
-            await call.answer("Уже разобрано", show_alert=True)
-            return
-        invited: list[tuple[int, str]] = []
-        for pid in selected:
-            p = await s.get(Person, pid)
-            if p is not None:
-                invited.append((p.tg_user_id, p.full_name))
-        if not invited:
-            await call.answer("Никого не нашлось", show_alert=True)
-            return
-        # status → open + сброс таймера «тишины» на момент отправки инвайтов,
-        # иначе «никто не откликнулся» отсчитывается от создания call'а (вечер).
-        await supports_svc.mark_invited(s, call_id)
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
-        title = format_group_title(group)
-        place = format_place(group, venue)
-        teachers_note = group.teachers_note
-        lesson_time = group.lesson_time
-        lesson_at = survey.lesson_at
-        tz_name = (
-            await schools_svc.get_timezone(s, group.school_id)
-            if group.school_id else None
-        )
+    # Сериализуем status-переход одного call'а с dismiss/другим picksend: все они
+    # гейтят на pending, но в разных сессиях — без общего lock'а гонка picksend↔
+    # picknope дала бы «инвайты разосланы, но call закрыт как ‘баланс ок’».
+    async with supports_svc.call_lock(call_id):
+        async with session_scope() as s:
+            sc, survey, group = await _call_context(s, call_id)
+            if sc is None or survey is None or group is None or group.school_id is None:
+                await call.answer("Уже обработано", show_alert=True)
+                return
+            admin_id = await _admin_id_from_tg(call.from_user.id, s)
+            if admin_id is None or not await groups_svc.can_manage_recruit(
+                s, group.id, group.school_id, admin_id
+            ):
+                await call.answer()
+                return
+            if sc.status != SupportCallStatus.pending:
+                # Кто-то из ответственных уже разобрал (open/closed) — гасим дубль.
+                await call.answer("Уже разобрано", show_alert=True)
+                return
+            invited: list[tuple[int, str]] = []
+            for pid in selected:
+                p = await s.get(Person, pid)
+                if p is not None:
+                    invited.append((p.tg_user_id, p.full_name))
+            if not invited:
+                await call.answer("Никого не нашлось", show_alert=True)
+                return
+            # status → open + сброс таймера «тишины» на момент отправки инвайтов,
+            # иначе «никто не откликнулся» отсчитывается от создания call'а (вечер).
+            await supports_svc.mark_invited(s, call_id)
+            venue = (
+                await venues_svc.get_venue(s, group.venue_id)
+                if group.venue_id is not None
+                else None
+            )
+            title = format_group_title(group)
+            place = format_place(group, venue)
+            teachers_note = group.teachers_note
+            lesson_time = group.lesson_time
+            lesson_at = survey.lesson_at
+            tz_name = (
+                await schools_svc.get_timezone(s, group.school_id)
+                if group.school_id else None
+            )
 
     await send_support_invites(
         bot, call_id=call_id, invited=invited, title=title, place=place,
@@ -250,45 +254,78 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data.startswith("picknope:"))
+async def cb_support_pick_nope(call: CallbackQuery) -> None:
+    """Lead закрывает picker без добора — «в этот раз баланс ок». Graceful-выход
+    у самого частого экрана добора: гасим call, чтобы pending-нудж не пинговал."""
+    call_id = int((call.data or "").split(":")[1])
+    async with supports_svc.call_lock(call_id):  # сериализация с picksend/другим dismiss
+        async with session_scope() as s:
+            sc, _survey, group = await _call_context(s, call_id)
+            if sc is None or group is None or group.school_id is None:
+                await call.answer()
+                return
+            admin_id = await _admin_id_from_tg(call.from_user.id, s)
+            if admin_id is None or not await groups_svc.can_manage_recruit(
+                s, group.id, group.school_id, admin_id
+            ):
+                await call.answer()
+                return
+            dismissed = await supports_svc.dismiss_call(s, call_id)
+    if not dismissed:
+        await call.answer("Уже разобрано", show_alert=True)
+        return
+    if call.message:
+        await call.message.edit_text(
+            "Ок, в этот раз добор не нужен — баланс сложился. "
+            "Если передумаешь: 🆘 Саппорты."
+        )
+    await call.answer()
+
+
 @router.callback_query(F.data.startswith("sup:join:"))
 async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
     call_id = int((call.data or "").split(":")[2])
-    async with session_scope() as s:
-        sc = await supports_svc.get_call(s, call_id)
-        if sc is None:
-            await call.answer()
-            return
-        survey = await surveys_svc.get_survey(s, sc.survey_id)
-        group = await groups_svc.get_group(s, survey.group_id) if survey else None
-        if group is None or group.school_id is None:
-            await call.answer()
-            return
-        if as_utc(survey.lesson_at) <= utc_now():
-            # Занятие уже началось/прошло — поздний тап не засчитываем.
-            if call.message:
-                await call.message.edit_text(
-                    "Занятие уже началось — добор закрыт. Спасибо, что откликнулся!"
-                )
-            await call.answer()
-            return
-        person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
-        if person is None:
-            await call.answer()
-            return
-        accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
-        notify_tgs = await groups_svc.group_admin_tg_ids(s, group.id, group.school_id)
-        person_name = person.full_name
-        title = format_group_title(group)
-        group_name = group.name
-        lesson_at = survey.lesson_at
-        tz_name = await schools_svc.get_timezone(s, group.school_id)
-        # B8: данные для живого баланс-бара в recruit-сообщении lead'а.
-        picker_chat_id = sc.picker_chat_id
-        picker_message_id = sc.picker_message_id
-        call_gender = sc.gender
-        call_needed = sc.needed
-        male_yes, female_yes = await surveys_svc.gender_yes_counts(s, sc.survey_id)
-        claimed_total = await supports_svc.count_claims(s, call_id)
+    # Сериализуем весь read→claim→commit одного call'а: два одновременных тапа на
+    # последний слот иначе прочитают stale count и перебрали бы набор. Lock должен
+    # охватывать session_scope целиком — commit (видимость вставки) на его __aexit__.
+    async with supports_svc.call_lock(call_id):
+        async with session_scope() as s:
+            sc = await supports_svc.get_call(s, call_id)
+            if sc is None:
+                await call.answer()
+                return
+            survey = await surveys_svc.get_survey(s, sc.survey_id)
+            group = await groups_svc.get_group(s, survey.group_id) if survey else None
+            if group is None or group.school_id is None:
+                await call.answer()
+                return
+            if as_utc(survey.lesson_at) <= utc_now():
+                # Занятие уже началось/прошло — поздний тап не засчитываем.
+                if call.message:
+                    await call.message.edit_text(
+                        "Занятие уже началось — добор закрыт. Спасибо, что откликнулся!"
+                    )
+                await call.answer()
+                return
+            person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
+            if person is None:
+                await call.answer()
+                return
+            accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
+            notify_tgs = await groups_svc.group_admin_tg_ids(s, group.id, group.school_id)
+            person_name = person.full_name
+            title = format_group_title(group)
+            group_name = group.name
+            lesson_at = survey.lesson_at
+            tz_name = await schools_svc.get_timezone(s, group.school_id)
+            # B8: данные для живого баланс-бара в recruit-сообщении lead'а.
+            picker_chat_id = sc.picker_chat_id
+            picker_message_id = sc.picker_message_id
+            call_gender = sc.gender
+            call_needed = sc.needed
+            male_yes, female_yes = await surveys_svc.gender_yes_counts(s, sc.survey_id)
+            claimed_total = await supports_svc.count_claims(s, call_id)
 
     when = format_lesson_at(lesson_at, tz=tz_name)
     if not accepted:
@@ -351,36 +388,40 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
     lesson_at_val = None
     group_obj = None
     tz_name: str | None = None
-    async with session_scope() as s:
-        sc = await supports_svc.get_call(s, call_id)
-        survey = await surveys_svc.get_survey(s, sc.survey_id) if sc else None
-        group = (
-            await groups_svc.get_group(s, survey.group_id) if survey else None
-        )
-        if group is not None and survey is not None and group.school_id is not None:
-            title = format_group_title(group)
-            tz_name = await schools_svc.get_timezone(s, group.school_id)
-            when = format_lesson_at(survey.lesson_at, tz=tz_name)
-            group_name = group.name
-            person = await persons_svc.get_person(
-                s, group.school_id, call.from_user.id
+    # unclaim переоткрывает closed-call по snapshot-статусу — сериализуем с join
+    # тем же call_lock'ом, иначе конкурентный join (fill→closed) закроет call, а
+    # skip прочитает stale open и не переоткроет освобождённый слот.
+    async with supports_svc.call_lock(call_id):
+        async with session_scope() as s:
+            sc = await supports_svc.get_call(s, call_id)
+            survey = await surveys_svc.get_survey(s, sc.survey_id) if sc else None
+            group = (
+                await groups_svc.get_group(s, survey.group_id) if survey else None
             )
-            if person is not None and sc is not None:
-                if await supports_svc.unclaim(s, call_id, person.id):
-                    reverted_name = person.full_name
-                    filled = await supports_svc.count_claims(s, call_id)
-                    needed = sc.needed
-                    notify_tgs = await groups_svc.group_admin_tg_ids(
-                        s, group.id, group.school_id
-                    )
-                    picker_chat_id = sc.picker_chat_id
-                    picker_message_id = sc.picker_message_id
-                    call_gender = sc.gender
-                    male_yes, female_yes = await surveys_svc.gender_yes_counts(
-                        s, sc.survey_id
-                    )
-                    lesson_at_val = survey.lesson_at
-                    group_obj = group
+            if group is not None and survey is not None and group.school_id is not None:
+                title = format_group_title(group)
+                tz_name = await schools_svc.get_timezone(s, group.school_id)
+                when = format_lesson_at(survey.lesson_at, tz=tz_name)
+                group_name = group.name
+                person = await persons_svc.get_person(
+                    s, group.school_id, call.from_user.id
+                )
+                if person is not None and sc is not None:
+                    if await supports_svc.unclaim(s, call_id, person.id):
+                        reverted_name = person.full_name
+                        filled = await supports_svc.count_claims(s, call_id)
+                        needed = sc.needed
+                        notify_tgs = await groups_svc.group_admin_tg_ids(
+                            s, group.id, group.school_id
+                        )
+                        picker_chat_id = sc.picker_chat_id
+                        picker_message_id = sc.picker_message_id
+                        call_gender = sc.gender
+                        male_yes, female_yes = await surveys_svc.gender_yes_counts(
+                            s, sc.survey_id
+                        )
+                        lesson_at_val = survey.lesson_at
+                        group_obj = group
 
     if call.message:
         text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"

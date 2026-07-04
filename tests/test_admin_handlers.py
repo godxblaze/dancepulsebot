@@ -154,6 +154,27 @@ async def test_claim_disabled_when_no_secret(db, monkeypatch) -> None:
         assert await admins.get_by_tg_id(s, 557) is None
 
 
+# ── /status (DB-хелсчек разработчика) ────────────────────────────────
+
+
+async def test_status_dev_only(db, monkeypatch) -> None:
+    from app.bot.handlers.admin import cmd_status
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "developer_id", 777)
+    async with session_scope() as s:
+        await admins.get_or_create(s, 100, "t", "T")  # школа — от autouse-фикстуры
+    # не-разработчик — молчим
+    msg = FakeMessage(user_id=100)
+    await cmd_status(msg)
+    assert msg.replies == []
+    # разработчик — получает хелсчек с масштабом
+    dev = FakeMessage(user_id=777)
+    await cmd_status(dev)
+    assert dev.replies and "Bot OK" in dev.replies[0]
+    assert "школ:" in dev.replies[0]
+
+
 # ── /today ───────────────────────────────────────────────────────────
 
 

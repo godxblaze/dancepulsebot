@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Gender, Person, SupportCall, SupportCallStatus, SupportClaim
+
+# Однопроцессный бот (polling) обрабатывает апдейты конкурентными задачами: два
+# «Приду помочь» на последний слот могут прочитать одинаковый count и перебрать
+# набор. Пер-call asyncio.Lock сериализует claim/dismiss одного call'а от чтения
+# счётчика до commit'а вызывающей сессии. Вызывающий держит его как
+# `async with supports.call_lock(call_id):` ВОКРУГ своего session_scope — иначе
+# commit (и, значит, видимость вставки другим сессиям) окажется вне блокировки.
+# Ключ включает id текущего loop'а: asyncio.Lock привязан к loop'у, на котором был
+# впервые захвачен, и падает при переиспользовании в другом (в тестах pytest-asyncio
+# даёт свой loop на тест). В проде loop один навсегда → эффективно пер-call.
+_call_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
+def call_lock(call_id: int) -> asyncio.Lock:
+    key = (id(asyncio.get_running_loop()), call_id)
+    lock = _call_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _call_locks[key] = lock
+    return lock
 
 
 async def _recount_helped(session: AsyncSession, person_id: int) -> None:
@@ -53,6 +74,22 @@ async def set_status(
     if call is not None:
         call.status = status
         await session.flush()
+
+
+async def dismiss_call(session: AsyncSession, call_id: int) -> bool:
+    """Lead закрыл picker кнопкой «Не сейчас · баланс ок». Закрываем call
+    (status closed = «nothing was needed»), но только если он ещё pending —
+    иначе гонка с уже отправленными инвайтами (picksend). Ставим topup_done,
+    чтобы фаза-2 добора остатка не воскресила call и не прислала picker снова
+    при подросшем дефиците: «не сейчас» = решение на всё занятие (препод всегда
+    может позвать вручную через 🆘 Саппорты). True, если закрыли."""
+    call = await session.get(SupportCall, call_id)
+    if call is None or call.status != SupportCallStatus.pending:
+        return False
+    call.status = SupportCallStatus.closed
+    call.topup_done = True
+    await session.flush()
+    return True
 
 
 async def count_claims(session: AsyncSession, call_id: int) -> int:

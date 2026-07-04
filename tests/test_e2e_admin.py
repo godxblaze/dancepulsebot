@@ -325,6 +325,30 @@ async def test_ping_pending(db) -> None:
     assert bot.sent_to(551) and bot.sent_to(552)  # both got the re-ask
 
 
+async def test_ping_pending_skips_undelivered(db) -> None:
+    """Недостижимый (tg_message_id=-1) не получает повторный опрос — его
+    некому пинговать (заблокировал бота/не нажал Start)."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    for tg, name, g in ((551, "Аня", Gender.female), (552, "Боря", Gender.male)):
+        await join_via_link(bot, code, tg, name, g)
+    async with session_scope() as s:
+        survey, _ = await surveys_svc.get_or_create_survey(
+            s, gid, SurveyKind.attendance, LESSON
+        )
+        members = await persons_svc.group_members(s, gid)
+        await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
+        survey_id = survey.id
+        undeliverable = next(p for p in members if p.tg_user_id == 552)
+        await surveys_svc.set_message_id(s, survey_id, undeliverable.id, -1)
+
+    before_551, before_552 = len(bot.sent_to(551)), len(bot.sent_to(552))
+    ping = cb(f"ping:{survey_id}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, ""))
+    await cb_ping_pending(ping, bot)
+    assert len(bot.sent_to(551)) > before_551  # Аня, реально молчащая, получила пинг
+    assert len(bot.sent_to(552)) == before_552  # Боря недостижим — не пингуем
+
+
 async def test_group_responsible_admins(db) -> None:
     bot = FakeBot()
     gid, sid, code = await make_group()

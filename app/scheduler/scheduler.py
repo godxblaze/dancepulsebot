@@ -213,6 +213,8 @@ def _format_summary(
         body.append(f"{ui.NO} не придут: {escape(', '.join(summary.no_names))}")
     if summary.pending_names:
         body.append(f"{ui.PENDING} молчат: {escape(', '.join(summary.pending_names))}")
+    if summary.undelivered:
+        body.append(f"{ui.UNDELIVERED} не дошло: {summary.undelivered} (не запустили бота)")
     return ui.card(
         ui.title(ui.BRAND, escape(format_group_title(group))) + " — итоги опроса",
         meta=f"занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}",

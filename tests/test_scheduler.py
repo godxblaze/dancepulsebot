@@ -202,6 +202,33 @@ async def test_auto_summary_retries_when_admin_blocked(db, freeze) -> None:
     assert len(summaries) == 1
 
 
+async def test_summary_shows_undelivered_not_pending(db, freeze) -> None:
+    """Автосводка: недоставленный (заблокировал бота) — не «молчит», а
+    отдельная строка «не дошло»; в «молчат» его имени нет."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    await _make_group(n_students=2)
+    freeze(datetime(2026, 5, 25, 9, 0))  # до halfway — только опрос
+
+    class BlockerBot(FakeBot):
+        async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+            if chat_id == 201:
+                raise TelegramForbiddenError(method=None, message="bot was blocked by the user")
+            return await super().send_message(chat_id, text, reply_markup, **kwargs)
+
+    bot = BlockerBot()
+    await sched.tick(bot)  # 200 получил опрос, 201 помечен -1
+
+    freeze(datetime(2026, 5, 25, 11, 0))  # past halfway → auto-summary
+    await sched.tick(bot)
+    summaries = [m for m in bot.sent if m.chat_id == 111 and "итоги опроса" in m.text]
+    assert len(summaries) == 1
+    text = summaries[0].text
+    assert "не дошло: 1" in text
+    assert "молчат" in text and "Ученик 0" in text  # 200 — реально молчит
+    assert "Ученик 1" not in text  # 201 (заблокировал) не показан как молчащий
+
+
 async def test_tick_no_poll_outside_window(db, freeze) -> None:
     await _make_group(lead_hours=18)
     freeze(datetime(2026, 5, 24, 9, 0))  # Sunday, ~34h before lesson

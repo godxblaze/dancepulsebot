@@ -133,3 +133,29 @@ async def test_unknown_yes_count(db) -> None:
         unknown = await surveys.unknown_yes_count(s, survey_id)
     assert (male, female) == (1, 1)  # Вика без пола не учтена
     assert unknown == 1
+
+
+async def test_undelivered_not_counted_as_pending(db) -> None:
+    """tg_message_id=-1 (заблокировали бота/не нажали Start) — не «молчит»:
+    отдельный счётчик undelivered, не в pending/pending_names, pending_persons
+    его тоже не возвращает (пинговать недостижимого некому)."""
+    group_id, person_ids = await _setup_group()
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, LESSON
+        )
+        await surveys.ensure_responses(s, survey.id, person_ids)
+        survey_id = survey.id
+        # Вика недостижима; Аня и Боря молчат (не отвечали).
+        await surveys.set_message_id(s, survey_id, person_ids[2], -1)
+
+    async with session_scope() as s:
+        summary = await surveys.summarize(s, survey_id)
+    assert summary.total == 3
+    assert summary.pending == 2
+    assert summary.pending_names == ["Аня", "Боря"]
+    assert summary.undelivered == 1
+
+    async with session_scope() as s:
+        pending = await surveys.pending_persons(s, survey_id)
+    assert {p.full_name for p in pending} == {"Аня", "Боря"}  # Вика не в списке

@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -27,6 +27,9 @@ class SurveySummary:
     pending: int
     no_names: list[str]
     pending_names: list[str]
+    # Опрос не дошёл (tg_message_id=-1 — заблокировали бота/не нажали Start).
+    # Не входит в pending/pending_names: недоставленный ≠ «молчит», ему некого пинговать.
+    undelivered: int = 0
     # Опционально, заполняется после занятия. None — ни одного актуального
     # ответа не отмечено (preпод ещё не нажимал «Отметить посещаемость»).
     actual_attended: int | None = None
@@ -122,7 +125,7 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
         .order_by(Person.full_name)
     )
     rows = (await session.execute(stmt)).all()
-    yes = no = pending = 0
+    yes = no = pending = undelivered = 0
     no_names: list[str] = []
     pending_names: list[str] = []
     actual_attended = 0
@@ -133,6 +136,8 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
         elif resp.answer == Answer.no:
             no += 1
             no_names.append(person.full_name)
+        elif resp.tg_message_id == -1:
+            undelivered += 1  # не дошло — не «молчит»
         else:
             pending += 1
             pending_names.append(person.full_name)
@@ -142,6 +147,7 @@ async def summarize(session: AsyncSession, survey_id: int) -> SurveySummary:
                 actual_attended += 1
     return SurveySummary(
         len(rows), yes, no, pending, no_names, pending_names,
+        undelivered=undelivered,
         actual_attended=actual_attended if actual_marked else None,
         actual_marked=actual_marked,
     )
@@ -247,11 +253,18 @@ async def lapsed_members(
 
 
 async def pending_persons(session: AsyncSession, survey_id: int) -> list[Person]:
-    """People in the survey who haven't answered yet."""
+    """People in the survey who haven't answered yet and are reachable —
+    excludes tg_message_id=-1 (permanently undelivered: пинговать некого).
+    NULL (опрос ещё не отправлен этим tick'ом) остаётся pending — это не
+    то же самое, что окончательно недоставленный."""
     stmt = (
         select(Person)
         .join(Response, Response.person_id == Person.id)
-        .where(Response.survey_id == survey_id, Response.answer.is_(None))
+        .where(
+            Response.survey_id == survey_id,
+            Response.answer.is_(None),
+            or_(Response.tg_message_id.is_(None), Response.tg_message_id != -1),
+        )
         .order_by(Person.full_name)
     )
     return list((await session.execute(stmt)).scalars().all())

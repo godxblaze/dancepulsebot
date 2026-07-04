@@ -21,6 +21,7 @@ from app.db.models import (
     Survey,
 )
 from app.services.schedule import format_lesson_at
+from app.services.schools import get_timezone
 
 
 def _csv_bytes(rows: list[list[str]], header: list[str]) -> bytes:
@@ -72,7 +73,10 @@ async def students_csv(session: AsyncSession, school_id: int) -> bytes:
 
 
 async def attendance_csv(session: AsyncSession, school_id: int) -> bytes:
-    """Все Response'ы по всем группам школы."""
+    """Все Response'ы по всем группам школы. lesson_at — в TZ школы, не в
+    глобальном settings.timezone (иначе время едет на offset для школ вне
+    Europe/Moscow)."""
+    tz_name = await get_timezone(session, school_id)
     stmt = (
         select(Group.name, Survey.lesson_at, Survey.status,
                Person.full_name, Response.answer, Response.actually_attended)
@@ -88,7 +92,7 @@ async def attendance_csv(session: AsyncSession, school_id: int) -> bytes:
     ).all():
         rows.append([
             group_name,
-            f"{format_lesson_at(lesson_at, '%Y-%m-%d %H:%M')}",
+            f"{format_lesson_at(lesson_at, '%Y-%m-%d %H:%M', tz=tz_name)}",
             status.value if hasattr(status, "value") else str(status),
             person_name,
             answer.value if answer else "",

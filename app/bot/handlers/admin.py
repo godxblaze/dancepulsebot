@@ -425,6 +425,10 @@ async def _build_today_view(teacher_id: int, span: str):
                 lines.append(f"{ui.NO} {escape(', '.join(summary.no_names))}")
             if summary.pending_names:
                 lines.append(f"{ui.PENDING} {escape(', '.join(summary.pending_names))}")
+            if summary.undelivered:
+                lines.append(
+                    f"{ui.UNDELIVERED} не дошло: {summary.undelivered} (не запустили бота)"
+                )
             blocks.append("\n".join(lines))
             if summary.pending > 0:
                 pending_by_group.append((g.name, survey.id, summary.pending))

@@ -172,7 +172,9 @@ async def main() -> None:
         await _add_batch(g_kizomba, kizomba_persons)
         await _add_batch(g_hustle, hustle_persons)
 
-        # 5) Несколько human'ов в пуле саппортов (с уровнями) — из салсы парни
+        # 5) Несколько human'ов в личном пуле саппортов dev-препода (с уровнями) —
+        #    из салсы парни. SupportPoolEntry: (admin, person) → level, per-teacher
+        #    (Person.support_level снесён — раньше был один на всю школу).
         salsa_male_ids = [
             pid for pid, spec in zip(salsa_ids, salsa_persons, strict=True)
             if spec["gender"] == Gender.male
@@ -180,8 +182,8 @@ async def main() -> None:
         for pid, lvl, helped in zip(
             salsa_male_ids[:5], [3, 3, 2, 2, 1], [12, 7, 4, 3, 1], strict=False,
         ):
+            await persons_svc.set_pool_level(s, admin_id, pid, lvl)
             p = await s.get(Person, pid)
-            p.support_level = lvl
             p.helped_count = helped
 
         salsa_female_ids = [
@@ -191,8 +193,8 @@ async def main() -> None:
         for pid, lvl, helped in zip(
             salsa_female_ids[:4], [3, 2, 2, 1], [8, 5, 2, 1], strict=False,
         ):
+            await persons_svc.set_pool_level(s, admin_id, pid, lvl)
             p = await s.get(Person, pid)
-            p.support_level = lvl
             p.helped_count = helped
         await s.flush()
 

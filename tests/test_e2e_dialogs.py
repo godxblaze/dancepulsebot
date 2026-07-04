@@ -3,12 +3,15 @@ MockMessageManager (see _dialog_harness). Covers create-school, new-group,
 edit-group, edit-name, rename-school and broadcast flows end to end."""
 from __future__ import annotations
 
-from app.db.models import Admin, Gender
+from datetime import UTC, datetime
+
+from app.db.models import Admin, Gender, SurveyKind
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
+from app.services import surveys as surveys_svc
 from tests._dialog_harness import click, click_plain, make_client
 from tests._e2e_helpers import TEACHER_TG, make_group
 
@@ -243,6 +246,46 @@ async def test_edit_group_dialog(db) -> None:
     # finish
     await click(client, mock, "К группе")
     assert any("Готово" in t for t in bot.texts())
+
+
+async def test_edit_group_dialog_notifies_on_reschedule_with_open_survey(db) -> None:
+    """Шаг 16: правка lesson_time с открытым опросом закрывает его и уведомляет
+    ответственного через реальный dialog-flow (не только сервисный юнит-тест).
+    Заголовок группы с HTML-спецсимволом («Rock & Roll») должен уйти escape()'нутым
+    (raw wire-текст содержит «&amp;») ОБЯЗАТЕЛЬНО в паре с parse_mode=HTML —
+    иначе Telegram показал бы «&amp;» буквально вместо «&»."""
+    from aiogram.enums import ParseMode
+    from aiogram.methods import SendMessage
+
+    gid, sid, code = await make_group()
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+        group = await groups_svc.get_group(s, gid)
+        group.style = "Rock & Roll"
+        survey, _ = await surveys_svc.get_or_create_survey(
+            s, gid, SurveyKind.attendance, datetime(2026, 6, 1, 19, 0, tzinfo=UTC)
+        )
+        survey_id = survey.id
+
+    client, mock, bot = make_client(TG)
+    await client.send("/groups")
+    await click_plain(client, bot, "Rock & Roll")
+    await click_plain(client, bot, "Изменить")
+    await click(client, mock, "Время")
+    await client.send("20:00")
+
+    async with session_scope() as s:
+        survey = await surveys_svc.get_survey(s, survey_id)
+        assert survey.status.value == "closed"
+
+    notify_calls = [
+        m for m in bot.records
+        if isinstance(m, SendMessage) and "Расписание группы" in (m.text or "")
+    ]
+    assert len(notify_calls) == 1
+    assert "Rock &amp; Roll" in notify_calls[0].text  # escape() применён
+    assert notify_calls[0].parse_mode == ParseMode.HTML  # ...и в паре с HTML-режимом
 
 
 async def test_edit_group_venue_skip_address(db) -> None:

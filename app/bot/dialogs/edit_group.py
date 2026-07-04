@@ -11,6 +11,7 @@ import re
 from html import escape
 from typing import Any
 
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
@@ -92,7 +93,7 @@ async def _patch_group(manager: DialogManager, **fields: Any) -> None:
         )
         for tg in notify_tgs:
             try:
-                await bot.send_message(tg, text)
+                await bot.send_message(tg, text, parse_mode=ParseMode.HTML)
             except Exception as e:  # noqa: BLE001
                 log.warning("reschedule-notice to %s failed: %s", tg, e)
 

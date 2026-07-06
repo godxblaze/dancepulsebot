@@ -137,15 +137,12 @@ async def _menu_getter(dialog_manager: DialogManager, **_: Any) -> dict:
 
 
 async def _style_getter(dialog_manager: DialogManager, **_: Any) -> dict:
-    user = user_from(dialog_manager)
     suggestions: list[str] = []
-    if user is not None:
-        async with session_scope() as s:
-            admin = await admins_svc.get_by_tg_id(s, user.id)
-            if admin is not None:
-                school = await schools_svc.get_owned_school(s, admin.id)
-                if school is not None:
-                    suggestions = await groups_svc.school_styles(s, school.id)
+    group_id = _gid(dialog_manager)
+    async with session_scope() as s:
+        group = await groups_svc.get_group(s, group_id)
+        if group is not None and group.school_id is not None:
+            suggestions = await groups_svc.school_styles(s, group.school_id)
     return {"styles": list(enumerate(suggestions[:6]))}
 
 
@@ -156,13 +153,13 @@ async def _on_style_pick(
         idx = int(item_id)
     except ValueError:
         return
-    user = user_from(manager)
-    if user is None:
-        return
+    group_id = _gid(manager)
     async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, user.id)
-        school = await schools_svc.get_owned_school(s, admin.id) if admin else None
-        suggestions = await groups_svc.school_styles(s, school.id) if school else []
+        group = await groups_svc.get_group(s, group_id)
+        suggestions = (
+            await groups_svc.school_styles(s, group.school_id)
+            if group is not None and group.school_id is not None else []
+        )
     if 0 <= idx < len(suggestions):
         await _patch_group(manager, style=suggestions[idx])
         await manager.switch_to(EditGroupSG.menu)
@@ -240,6 +237,17 @@ async def _on_weekdays_done(
     await manager.switch_to(EditGroupSG.menu)
 
 
+async def _on_weekdays_back(
+    _call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
+    """«◀ Назад» без сохранения — тоже должен сбросить weekdays_initialized,
+    иначе при повторном заходе в этот экран getter не переинициализирует
+    чекбоксы из актуального состояния группы (флаг уже True с прошлого
+    визита) и покажет отменённый черновик выбора."""
+    manager.dialog_data.pop("weekdays_initialized", None)
+    await manager.switch_to(EditGroupSG.menu)
+
+
 # ── lesson_time ───────────────────────────────────────────────────────
 
 
@@ -259,15 +267,12 @@ async def _on_time_typed(
 
 
 async def _venue_getter(dialog_manager: DialogManager, **_: Any) -> dict:
-    user = user_from(dialog_manager)
     venues_list: list = []
-    if user is not None:
-        async with session_scope() as s:
-            admin = await admins_svc.get_by_tg_id(s, user.id)
-            if admin is not None:
-                school = await schools_svc.get_owned_school(s, admin.id)
-                if school is not None:
-                    venues_list = await venues_svc.school_venues(s, school.id)
+    group_id = _gid(dialog_manager)
+    async with session_scope() as s:
+        group = await groups_svc.get_group(s, group_id)
+        if group is not None and group.school_id is not None:
+            venues_list = await venues_svc.school_venues(s, group.school_id)
     items: list[tuple[int, str]] = []
     for v in venues_list:
         label = f"📍 {v.name}"
@@ -319,16 +324,19 @@ async def _on_venue_new_name_typed(
 
 
 async def _save_new_venue_and_attach(manager: DialogManager, address: str | None) -> None:
+    """Новый зал заводим в школе РЕДАКТИРУЕМОЙ группы, а не в owned-школе
+    admin'а — иначе co-admin без своей школы получал бы орфанный Venue
+    (и потенциально фантомную «Моя школа»), никогда не привязанный к группе."""
     user = user_from(manager)
     name = manager.dialog_data.get("venue_new_name")
     if user is None or not name:
         return
+    group_id = _gid(manager)
     async with session_scope() as s:
-        admin = await admins_svc.get_by_tg_id(s, user.id)
-        if admin is None:
+        group = await groups_svc.get_group(s, group_id)
+        if group is None or group.school_id is None:
             return
-        school = await schools_svc.get_or_create_owned_school(s, admin.id)
-        venue = await venues_svc.create_venue(s, school.id, name, address)
+        venue = await venues_svc.create_venue(s, group.school_id, name, address)
         venue_id = venue.id
     await _patch_group(manager, venue_id=venue_id)
 
@@ -410,6 +418,7 @@ edit_group_dialog = Dialog(
         Button(Const("◀ К группе"), id="done", on_click=_on_done),
         getter=_menu_getter,
         state=EditGroupSG.menu,
+        parse_mode=ParseMode.HTML,
     ),
     Window(
         Const("Новое направление?"),
@@ -455,7 +464,7 @@ edit_group_dialog = Dialog(
             items="days",
         ),
         Button(Const("Готово ▶"), id="wd_done", on_click=_on_weekdays_done),
-        SwitchTo(Const("◀ Назад"), id="wd_back", state=EditGroupSG.menu),
+        Button(Const("◀ Назад"), id="wd_back", on_click=_on_weekdays_back),
         getter=_weekdays_getter,
         state=EditGroupSG.weekdays,
     ),
@@ -498,6 +507,7 @@ edit_group_dialog = Dialog(
             id="evn_addr_skip",
             on_click=_on_venue_new_addr_skip,
         ),
+        SwitchTo(Const("◀ Назад"), id="evn_addr_back", state=EditGroupSG.venue_new_name),
         state=EditGroupSG.venue_new_address,
     ),
     Window(

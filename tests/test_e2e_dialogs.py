@@ -41,6 +41,44 @@ async def test_create_school_dialog(db) -> None:
     assert any("Wave Dance" in t and "создана" in t for t in bot.texts())
 
 
+async def test_create_school_dialog_honest_when_school_already_exists(db) -> None:
+    """Если у admin'а УЖЕ есть owned-школа (напр. гонка: другой процесс/тап
+    успел создать её, пока wizard был открыт), сообщение не должно лгать про
+    «создана» с только что введённым именем — честно говорим, что школа уже
+    есть, и называем её реальное (старое) имя."""
+    from types import SimpleNamespace
+
+    from app.bot.dialogs.misc_dialogs import _on_create_school_typed
+    from tests._fakes import FakeMessage, fake_user
+
+    async with session_scope() as s:
+        admin = await admins_svc.get_or_create(s, TG, "t", "Препод")
+        # conftest даёт owned-школу автоматически ("Моя школа" по умолчанию)
+        existing = await schools_svc.get_owned_school(s, admin.id)
+        assert existing is not None
+
+    class _FakeManager:
+        def __init__(self, user) -> None:
+            self.event = SimpleNamespace(from_user=user)
+            self.done_calls = 0
+
+        async def done(self) -> None:
+            self.done_calls += 1
+
+    user = fake_user(TG, full_name="Препод")
+    msg = FakeMessage(user, text="Другое Имя")
+    manager = _FakeManager(user)
+    await _on_create_school_typed(msg, None, manager, "Другое Имя")
+
+    assert msg.replies
+    text = msg.replies[0].text
+    assert "уже есть школа" in text and "не стал" in text
+    assert existing.name in text
+    async with session_scope() as s:
+        school = await schools_svc.get_owned_school(s, admin.id)
+        assert school.name != "Другое Имя"  # не переименовалась молча
+
+
 async def test_new_group_dialog(db) -> None:
     # admin already has a school (make_group creates it) → drive /newgroup wizard
     await make_group()
@@ -110,6 +148,46 @@ async def test_new_group_dialog_skip_path(db) -> None:
         # a minimal group with weekday Пн (index 0), time 18:00, no style
         minimal = [g for g in groups if g.lesson_time == "18:00" and g.style is None]
         assert minimal, [(g.style, g.lesson_time) for g in groups]
+
+
+async def test_finish_new_group_idempotent_on_double_invocation(db) -> None:
+    """Двойной тап «Пропустить» на шаге «преподаватели» (или Enter сразу после
+    тапа) раньше создавал ДВЕ одинаковые группы — _finish_new_group теперь
+    ставит синхронный флаг _finishing до первого await, второй вызов должен
+    быть no-op."""
+    from types import SimpleNamespace
+
+    from app.bot.dialogs.new_group import _finish_new_group
+    from tests._fakes import FakeBot, FakeMessage, fake_user
+
+    await make_group(teacher_tg=850, teacher_name="Одна группа")
+
+    class _FakeManager:
+        def __init__(self, dialog_data, bot, user) -> None:
+            self.dialog_data = dialog_data
+            self.start_data = None
+            self.middleware_data = {"bot": bot}
+            self.event = SimpleNamespace(from_user=user)
+            self.done_calls = 0
+
+        async def done(self) -> None:
+            self.done_calls += 1
+
+    bot = FakeBot()
+    manager = _FakeManager(
+        {"weekdays": [0], "lesson_time": "21:00", "style": "Идемпотентная"},
+        bot, fake_user(850, full_name="Одна группа"),
+    )
+    target = FakeMessage(fake_user(850, full_name="Одна группа"), bot=bot)
+
+    await _finish_new_group(target, manager)
+    await _finish_new_group(target, manager)  # тот же dialog_data — уже _finishing
+
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, 850)
+        groups = await groups_svc.admin_visible_groups(s, admin.id)
+    matching = [g for g in groups if g.style == "Идемпотентная"]
+    assert len(matching) == 1  # не задвоилась
 
 
 async def test_edit_name_dialog(db) -> None:

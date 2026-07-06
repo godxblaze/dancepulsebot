@@ -34,6 +34,21 @@ class FakeMessage:
         self.replies.append(text)
 
 
+class FakeFSM:
+    """Пул больше не бесстейтовый — cb_pool_toggle/cmd_pool читают/пишут
+    pool_search_query (см. sticky-фильтр после поиска, search.py + pool.py)."""
+
+    def __init__(self) -> None:
+        self.data: dict = {}
+
+    async def get_data(self) -> dict:
+        return dict(self.data)
+
+    async def update_data(self, **kwargs) -> dict:
+        self.data.update(kwargs)
+        return dict(self.data)
+
+
 async def _person_of_teacher(
     teacher_tg: int = 100, person_tg: int = 500, name: str = "Аня"
 ) -> tuple[int, int]:
@@ -48,20 +63,20 @@ async def test_cmd_pool_empty(db) -> None:
     async with session_scope() as s:
         await admins.get_or_create(s, 100, "t", "Препод")
     msg = FakeMessage(user_id=100)
-    await cmd_pool(msg)
+    await cmd_pool(msg, FakeFSM())
     assert msg.replies and "пуст" in msg.replies[0]
 
 
 async def test_cmd_pool_silent_for_non_teacher(db) -> None:
     msg = FakeMessage(user_id=999)
-    await cmd_pool(msg)
+    await cmd_pool(msg, FakeFSM())
     assert msg.replies == []
 
 
 async def test_cmd_pool_lists_people(db) -> None:
     await _person_of_teacher()
     msg = FakeMessage(user_id=100)
-    await cmd_pool(msg)
+    await cmd_pool(msg, FakeFSM())
     assert any("пул саппортов" in r.lower() for r in msg.replies)
 
 
@@ -69,7 +84,7 @@ async def test_pool_toggle_cycles_level(db) -> None:
     teacher_id, pid = await _person_of_teacher()
     # tap cycles the level в ЛИЧНОМ пуле препода: None -> 1 -> 2 -> 3 -> None
     for expected in (1, 2, 3, None):
-        await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=100))
+        await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=100), FakeFSM())
         async with session_scope() as s:
             levels = await persons.admin_pool_levels(s, teacher_id)
             assert levels.get(pid) == expected
@@ -79,7 +94,7 @@ async def test_pool_toggle_rejects_foreign_person(db) -> None:
     teacher_id, pid = await _person_of_teacher(teacher_tg=100, person_tg=500)
     async with session_scope() as s:
         await admins.get_or_create(s, 200, "x", "Чужой Препод")
-    await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=200))
+    await cb_pool_toggle(FakeCallback(f"tpool:{pid}", user_id=200), FakeFSM())
     async with session_scope() as s:
         levels = await persons.admin_pool_levels(s, teacher_id)
         assert levels.get(pid) is None  # чужой препод не тронул пул

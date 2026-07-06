@@ -154,7 +154,7 @@ Start-ScheduledTask -TaskName DancePulseBot   # поднять сейчас
 pytest tests/
 ```
 
-168 тестов. Файлы:
+352 теста. Файлы (основные):
 - `test_schedule.py` — расчёт следующего занятия (граничные случаи).
 - `test_smoke.py` — без БД (генерация join-кодов).
 - `test_surveys.py` — ядро опросов: создание, ответы, сводка, закрытие.

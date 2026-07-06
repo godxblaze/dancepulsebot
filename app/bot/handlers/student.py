@@ -140,9 +140,12 @@ async def join_start(
         )
         return
 
-    # New face — ask name, then gender.
+    # New face — ask name, then gender. set_data (не update_data) — свежий
+    # флоу должен полностью заменить данные, а не смешаться с обрывком
+    # прошлого незавершённого флоу (напр. support_admin_id от чужой ссылки,
+    # если человек не дошёл до конца, а потом перешёл по другой).
     await state.set_state(JoinFlow.name)
-    await state.update_data(group_id=group.id)
+    await state.set_data({"group_id": group.id})
     await message.answer(
         f"Привет! Записываю тебя в группу «{format_group_title(group)}».\n\nКак тебя зовут?",
         reply_markup=join_name_keyboard(_display_name(tg)),
@@ -170,7 +173,12 @@ async def _support_invite_start(
         known = existing is not None and existing.gender is not None
         admin_id, admin_tg, school_id = admin.id, admin.tg_user_id, school.id
         if known:
-            await persons_svc.set_pool_level(s, admin_id, existing.id, 1)
+            # Не затираем уже проставленный (возможно более высокий) уровень —
+            # повторный переход по той же ссылке не должен откатывать курацию
+            # препода обратно на 1.
+            current_level = (await persons_svc.admin_pool_levels(s, admin_id)).get(existing.id)
+            if current_level is None:
+                await persons_svc.set_pool_level(s, admin_id, existing.id, 1)
             known_name = existing.full_name
 
     if known:
@@ -180,8 +188,10 @@ async def _support_invite_start(
         )
         return
 
+    # set_data (не update_data) — см. комментарий в join_start: свежий флоу не
+    # должен наследовать обрывок предыдущего незавершённого (напр. group_id).
     await state.set_state(JoinFlow.name)
-    await state.update_data(support_admin_id=admin_id, support_school_id=school_id)
+    await state.set_data({"support_admin_id": admin_id, "support_school_id": school_id})
     await message.answer(
         "Привет! Запишу тебя саппортом — буду звать выручить, когда на занятии "
         "не хватает пары.\n\nКак тебя зовут?",
@@ -228,7 +238,11 @@ async def join_gender(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
                 s, data["support_school_id"], tg.id, tg.username, name
             )
             await persons_svc.set_gender(s, person.id, gender)
-            await persons_svc.set_pool_level(s, data["support_admin_id"], person.id, 1)
+            current_level = (
+                await persons_svc.admin_pool_levels(s, data["support_admin_id"])
+            ).get(person.id)
+            if current_level is None:
+                await persons_svc.set_pool_level(s, data["support_admin_id"], person.id, 1)
             inviter = await s.get(Admin, data["support_admin_id"])
             inviter_tg = inviter.tg_user_id if inviter else None
         await state.clear()

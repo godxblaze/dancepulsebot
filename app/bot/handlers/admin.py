@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-import re
-from datetime import timedelta
+import secrets
+import weakref
+from datetime import UTC, datetime, timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -83,7 +85,6 @@ from app.services.schedule import (
 log = logging.getLogger(__name__)
 router = Router()
 
-_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _MAX_LEVEL = 3
 
 _HELP_ADMIN = (
@@ -116,11 +117,6 @@ async def _join_link(bot: Bot, code: str) -> str:
     return f"https://t.me/{username}?start=join_{code}"
 
 
-async def _partner_link(bot: Bot, code: str) -> str:
-    username = await get_bot_username(bot)
-    return f"https://t.me/{username}?start=partner_{code}"
-
-
 async def _with_admin_school(session, admin, call, empty):
     """Resolve the admin's primary school (owned, else first membership —
     иначе co-admin без owned-школы получал b""/[] на /export и статистике),
@@ -129,21 +125,6 @@ async def _with_admin_school(session, admin, call, empty):
     if school_id is None:
         return empty
     return await call(school_id)
-
-
-async def _styles_for(session, admin) -> list[str]:
-    """Style-подсказки из собственной школы admin'а — используются в мастере
-    при создании/редактировании группы."""
-    return await _with_admin_school(
-        session, admin, lambda sid: groups_svc.school_styles(session, sid), []
-    )
-
-
-async def _venues_for(session, admin) -> list:
-    """Venues собственной школы admin'а — для venue-picker'а."""
-    return await _with_admin_school(
-        session, admin, lambda sid: venues_svc.school_venues(session, sid), []
-    )
 
 
 async def _top_supports_for(session, admin, limit: int = 3) -> list:
@@ -281,7 +262,7 @@ async def cmd_claim(message: Message, command: CommandObject, bot: Bot) -> None:
     if not tg or not secret:
         return  # фича выключена — молчим, не палим существование команды
     arg = (command.args or "").strip()
-    if arg != secret:
+    if not secrets.compare_digest(arg, secret):
         await message.answer("Неверный код. Возьми актуальный у администратора бота.")
         return
     async with session_scope() as s:
@@ -370,7 +351,10 @@ async def cb_today_switch(call: CallbackQuery) -> None:
         return
     text, markup = await _build_today_view(teacher.id, span=span)
     if call.message:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        try:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception as e:  # noqa: BLE001
+            log.debug("today_switch edit_text: %s", e)
     await call.answer()
 
 
@@ -603,9 +587,12 @@ async def cb_stats_scope(call: CallbackQuery) -> None:
             show_alert=True,
         )
         return
-    await call.message.edit_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=stats_keyboard(scope)
-    )
+    try:
+        await call.message.edit_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=stats_keyboard(scope)
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("stats_scope edit_text: %s", e)
     await call.answer()
 
 
@@ -700,10 +687,9 @@ _NO_MY_GROUPS = (
 )
 
 
-async def _send_groups_list(target: Message) -> None:
-    tg = target.chat
+async def _send_groups_list(target: Message, tg_id: int) -> None:
     async with session_scope() as s:
-        teacher = await admins_svc.get_by_tg_id(s, tg.id)
+        teacher = await admins_svc.get_by_tg_id(s, tg_id)
         groups = await groups_svc.my_groups(s, teacher.id) if teacher else []
     if not groups:
         await target.answer(_NO_MY_GROUPS)
@@ -722,7 +708,7 @@ async def cmd_groups(message: Message) -> None:
     if teacher is None:
         await show_student_home(message)
         return
-    await _send_groups_list(message)
+    await _send_groups_list(message, tg.id)
 
 
 @router.callback_query(F.data == "grplist")
@@ -1132,10 +1118,36 @@ async def _send_invite(target: Message, group_name: str, link: str) -> None:
     )
 
 
+_PING_PENDING_COOLDOWN = timedelta(seconds=60)
+# in-memory (не переживает рестарт — ОК, это просто анти-даблтап на ручную
+# рассылку, не источник истины): survey_id → момент последней рассылки.
+# Ключ верхнего уровня — сам event loop (не id(loop)), а не голый dict: иначе
+# в тестах (каждый со своим loop'ом) состояние утекало бы между прогонами
+# и ложно блокировало не связанные друг с другом тесты (тот же паттерн, что
+# и call_lock в app/services/supports.py). В проде loop один навсегда.
+_ping_cooldowns_by_loop: weakref.WeakKeyDictionary[object, dict[int, datetime]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _ping_cooldowns() -> dict[int, datetime]:
+    loop = asyncio.get_running_loop()
+    cooldowns = _ping_cooldowns_by_loop.get(loop)
+    if cooldowns is None:
+        cooldowns = {}
+        _ping_cooldowns_by_loop[loop] = cooldowns
+    return cooldowns
+
+
 @router.callback_query(F.data.startswith("ping:"))
 async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
     """Re-send the attendance survey to everyone who hasn't answered yet."""
     survey_id = int((call.data or "").split(":")[1])
+    cooldowns = _ping_cooldowns()
+    last_sent = cooldowns.get(survey_id)
+    if last_sent is not None and datetime.now(UTC) - last_sent < _PING_PENDING_COOLDOWN:
+        await call.answer("Недавно уже напомнил — подожди немного.", show_alert=True)
+        return
     async with session_scope() as s:
         survey = await surveys_svc.get_survey(s, survey_id)
         if survey is None:
@@ -1182,6 +1194,7 @@ async def cb_ping_pending(call: CallbackQuery, bot: Bot) -> None:
             sent += 1
         except Exception as e:  # noqa: BLE001
             log.warning("Could not ping pending %s: %s", p.tg_user_id, e)
+    cooldowns[survey_id] = datetime.now(UTC)
     await call.answer(f"Пингнул {sent}/{len(pending)}", show_alert=True)
 
 

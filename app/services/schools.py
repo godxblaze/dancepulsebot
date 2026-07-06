@@ -13,7 +13,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -232,7 +232,9 @@ async def members_of(
         select(Admin, SchoolMember.role)
         .join(SchoolMember, SchoolMember.admin_id == Admin.id)
         .where(SchoolMember.school_id == school_id)
-        .order_by(SchoolMember.role, Admin.full_name)
+        # .desc(): роль хранится строкой ("owner"/"coadmin") — обычный
+        # order_by дал бы "coadmin" раньше "owner" лексикографически (см. admin_schools).
+        .order_by(SchoolMember.role.desc(), Admin.full_name)
     )
     return [(a, r) for a, r in (await session.execute(stmt)).all()]
 
@@ -311,7 +313,15 @@ def invite_is_valid(invite: SchoolInvite) -> bool:
 
 async def consume_invite(
     session: AsyncSession, invite: SchoolInvite, admin_id: int
-) -> None:
-    invite.used_at = datetime.now(UTC)
-    invite.used_by_admin_id = admin_id
+) -> bool:
+    """Атомарно помечает инвайт использованным. False — кто-то уже успел
+    (двое приняли одну ссылку одновременно); вызывающий не должен добавлять
+    co-admin'а в этом случае. Проверка-и-действие в одном UPDATE ... WHERE,
+    а не check-then-act — иначе оба конкурентных accept'а видят used_at=None."""
+    result = await session.execute(
+        update(SchoolInvite)
+        .where(SchoolInvite.id == invite.id, SchoolInvite.used_at.is_(None))
+        .values(used_at=datetime.now(UTC), used_by_admin_id=admin_id)
+    )
     await session.flush()
+    return result.rowcount > 0

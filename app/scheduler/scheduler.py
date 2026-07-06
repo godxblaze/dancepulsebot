@@ -416,6 +416,7 @@ def _auto_recruit_plan(
     female: int,
     *,
     kind: str,
+    unknown: int = 0,
 ) -> dict:
     """План авто-рассылки (open_race/auto_top): кого пригласить + текст lead'у
     с баланс-строкой (B8 — обновляется в реальном времени при claim/skip).
@@ -439,6 +440,9 @@ def _auto_recruit_plan(
             f"{deficit} — {_gender_plural(gender_needed)}.\n"
             f"баланс пар:\n{balance}\nПервый откликнувшийся выручает."
         )
+    if unknown:
+        # Ответившие «приду» без пола не попадают в баланс — как в _send_recruit_picker.
+        lead_text += f"\n⚠️ ещё {unknown} без пола — не в балансе; проставь в карточке ученика."
     return dict(
         call_id=call_id,
         invited=[(p.tg_user_id, p.full_name) for p in to_invite],
@@ -509,11 +513,12 @@ async def _maybe_recruit(
                     s, survey_id, gender_needed, deficit, SupportCallStatus.open
                 )
                 to_invite = await persons_svc.top_candidates(
-                    s, lead_id, gender_needed, group.id, deficit
+                    s, lead_id, gender_needed, group.id, deficit, group.school_id
                 )
                 auto_plan = _auto_recruit_plan(
                     group, new_call.id, to_invite, targets, gender_needed,
                     deficit, male, female, kind="auto_top",
+                    unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                 )
             elif mode == RecruitMode.open_race.value:
                 # Открытая гонка: приглашения сразу всему подходящему пулу.
@@ -521,7 +526,7 @@ async def _maybe_recruit(
                     s, survey_id, gender_needed, deficit, SupportCallStatus.open
                 )
                 candidates = await persons_svc.support_candidates(
-                    s, lead_id, gender_needed, group.id
+                    s, lead_id, gender_needed, group.id, group.school_id
                 )
                 colleagues = await persons_svc.school_pool_candidates(
                     s, group.school_id, gender_needed, group.id,
@@ -530,6 +535,7 @@ async def _maybe_recruit(
                 auto_plan = _auto_recruit_plan(
                     group, new_call.id, candidates + colleagues, targets,
                     gender_needed, deficit, male, female, kind="open_race",
+                    unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                 )
             else:
                 # curated (дефолт) и escalate до окна эскалации — picker lead'у.
@@ -537,7 +543,7 @@ async def _maybe_recruit(
                     s, survey_id, gender_needed, deficit, SupportCallStatus.pending
                 )
                 candidates = await persons_svc.support_candidates(
-                    s, lead_id, gender_needed, group.id
+                    s, lead_id, gender_needed, group.id, group.school_id
                 )
                 levels = await persons_svc.admin_pool_levels(s, lead_id)
                 colleagues = await persons_svc.school_pool_candidates(
@@ -573,7 +579,7 @@ async def _maybe_recruit(
             # повторно зовёт того, кто уже claim'нул этот call.
             claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
             cands = await persons_svc.support_candidates(
-                s, lead_id, call.gender, group.id
+                s, lead_id, call.gender, group.id, group.school_id
             )
             candidates = [c for c in cands if c.id not in claimed_ids]
             colleagues = await persons_svc.school_pool_candidates(
@@ -589,6 +595,7 @@ async def _maybe_recruit(
             auto_plan = _auto_recruit_plan(
                 group, call.id, candidates + colleagues, targets,
                 call.gender, call.needed, esc_male, esc_female, kind="open_race",
+                unknown=await surveys_svc.unknown_yes_count(s, survey_id),
             )
         else:
             # ── Фаза 2: добор остатка в день занятия ──
@@ -630,7 +637,7 @@ async def _maybe_recruit(
             await s.flush()
             claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
             cands = await persons_svc.support_candidates(
-                s, lead_id, short, group.id
+                s, lead_id, short, group.id, group.school_id
             )
             candidates = [c for c in cands if c.id not in claimed_ids]
             levels = await persons_svc.admin_pool_levels(s, lead_id)
@@ -652,12 +659,20 @@ async def _maybe_recruit(
         )
     if auto_plan is not None:
         if auto_plan["invited"]:
-            await send_support_invites(
+            sent = await send_support_invites(
                 bot, call_id=auto_plan["call_id"], invited=auto_plan["invited"],
                 title=format_group_title(group), place=format_place(group, venue),
                 teachers_note=group.teachers_note, lesson_time=group.lesson_time,
                 lesson_at=lesson_at, tz=tz,
             )
+            if sent == 0:
+                # Все отправки инвайтов упали (Telegram недоступен/у всех
+                # заблокирован бот) — не врём lead'у бодрым «позвал автоматически».
+                auto_plan["lead_text"] = (
+                    f"⚠️ Не удалось отправить приглашения саппортам «"
+                    f"{escape(format_group_title(group))}» — попробуй сам через "
+                    f"🆘 Саппорты."
+                )
         lead_ref: tuple[int, int] | None = None
         for tg in auto_plan["lead_tgs"]:
             try:
@@ -856,7 +871,11 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
       «никто не откликнулся, попробуй сам»;
     - pending-call, который owner так и не разобрал, а занятие уже близко —
       «разбери добор»."""
-    messages: list[tuple[int, str]] = []
+    # (call_id, tg, text) — флаг notified ставим ПОСЛЕ реальной отправки (см.
+    # ниже), а не до неё: иначе сбой send_message («никто не откликнулся» не
+    # дошло) навсегда съедает этот единственный пинг без ретрая.
+    no_reply_msgs: list[tuple[int, int, str]] = []
+    pending_msgs: list[tuple[int, int, str]] = []
     async with session_scope() as s:
         # SupportCall.created_at в SQLite — naive UTC (server_default=now()),
         # потому сравниваем naive vs naive.
@@ -868,18 +887,20 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
             if filled >= call.needed:
                 await supports_svc.mark_no_reply_notified(s, call.id)
                 continue
-            ctx = await _stale_call_context(s, call)
+            survey = await surveys_svc.get_survey(s, call.survey_id)
+            if survey is not None and as_utc(survey.lesson_at) <= now:
+                continue  # занятие уже началось/прошло — поздно «напиши им лично»
+            ctx = await _stale_call_context(s, call, survey=survey)
             if ctx is None:
                 continue
             admin_tgs, title = ctx
             for tg in admin_tgs:
-                messages.append((
-                    tg,
+                no_reply_msgs.append((
+                    call.id, tg,
                     f"🆘 «{escape(title)}» — никто из приглашённых не откликнулся "
                     f"за час ({filled}/{call.needed}). Стоит написать им лично или "
                     f"поискать саппорта через /pool.",
                 ))
-            await supports_svc.mark_no_reply_notified(s, call.id)
 
         for call in await supports_svc.pending_unnotified_calls(s):
             survey = await surveys_svc.get_survey(s, call.survey_id)
@@ -893,18 +914,26 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
                 continue
             admin_tgs, title = ctx
             for tg in admin_tgs:
-                messages.append((
-                    tg,
+                pending_msgs.append((
+                    call.id, tg,
                     f"🆘 «{escape(title)}» — добор саппортов не разобран, "
                     f"а занятие уже скоро. Загляни в сообщение выше или в /school.",
                 ))
-            await supports_svc.mark_pending_notified(s, call.id)
 
-    for tg, text in messages:
+    sent_call_ids: set[int] = set()
+    for call_id, tg, text in no_reply_msgs + pending_msgs:
         try:
             await bot.send_message(tg, text, parse_mode=ParseMode.HTML)
+            sent_call_ids.add(call_id)
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to send support notice to admin %s: %s", tg, e)
+
+    if sent_call_ids:
+        async with session_scope() as s:
+            for call_id in {c for c, _, _ in no_reply_msgs} & sent_call_ids:
+                await supports_svc.mark_no_reply_notified(s, call_id)
+            for call_id in {c for c, _, _ in pending_msgs} & sent_call_ids:
+                await supports_svc.mark_pending_notified(s, call_id)
 
 
 async def tick(bot: Bot) -> None:
@@ -970,13 +999,18 @@ async def tick(bot: Bot) -> None:
                 async with session_scope() as s:
                     if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                         continue
+                # reactivate ДО poll: иначе только что разосланный «придёшь?»
+                # свежего survey тут же считается pending → лапсед-член получает
+                # «давно не видели» секундами позже своего же обычного опроса.
+                # До создания survey этого занятия find_attendance_survey вернёт
+                # None и функция тихо выйдет — нудж просто уедет на следующий тик.
+                await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
                 await _poll_group(
                     bot, group, lesson_at, now, tz=tz, evening_time=evening_time
                 )
                 await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
                 await _maybe_remind(bot, group, lesson_at, now, tz=tz)
                 await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
-                await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
         except Exception:  # noqa: BLE001
             log.exception(
                 "tick: группа «%s» (id=%s) упала — пропускаю до след. tick'а",

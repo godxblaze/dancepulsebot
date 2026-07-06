@@ -48,6 +48,13 @@ async def _on_error(event: ErrorEvent) -> bool:
             )
         except Exception:  # noqa: BLE001
             pass
+        return True
+    message = event.update.message
+    if message is not None:
+        try:
+            await message.answer("Что-то пошло не так. Попробуй ещё раз.")
+        except Exception:  # noqa: BLE001
+            pass
     return True
 
 

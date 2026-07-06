@@ -3,7 +3,7 @@ approach as test_e2e_scenarios.py, factored out so the school / attendance /
 admin-misc files don't each re-declare group/join helpers."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,14 @@ from app.services import groups as groups_svc
 from tests._fakes import FakeBot, FakeCallback, FakeFSM, FakeMessage, SentMessage, fake_user
 
 _MSK = ZoneInfo("Europe/Moscow")
-LESSON = datetime(2026, 6, 1, 19, 0, tzinfo=_MSK).astimezone(UTC)  # Monday 19:00
+# Занятие через 14 дней, 19:00 МСК — фиксированная календарная дата рано или
+# поздно оказывается в прошлом (on_attendance теперь гвардит на
+# as_utc(lesson_at) <= utc_now()), а срок от «сейчас» — нет.
+LESSON = (
+    (datetime.now(UTC).astimezone(_MSK) + timedelta(days=14))
+    .replace(hour=19, minute=0, second=0, microsecond=0)
+    .astimezone(UTC)
+)
 TEACHER_TG = 100
 
 

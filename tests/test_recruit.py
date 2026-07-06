@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest_asyncio
 from sqlalchemy import select
 
 from app.bot.handlers.recruit import (
@@ -26,6 +27,14 @@ async def _drain_pool() -> None:
     конкуренцией (asyncio.gather): их WAL-локи на общей файловой тест-БД иначе
     роняют следующий тест «database is locked»."""
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def drain_pool_after():
+    """То же самое, но как fixture-teardown — гарантированно отрабатывает,
+    даже если тест упал на assert'е ДО явного вызова _drain_pool()."""
+    yield
+    await _drain_pool()
 
 _MSK = ZoneInfo("Europe/Moscow")
 # Занятие в будущем (cb_support_join сверяет lesson_at с реальным utc_now —
@@ -146,6 +155,33 @@ async def test_support_candidates_pool_gender_level(db) -> None:
         cands = await persons.support_candidates(s, tid, Gender.male, gid)
     # only the two male pool members not in the group, highest level first
     assert [p.id for p in cands] == [hi_id, lo_id]
+
+
+async def test_support_candidates_school_id_excludes_cross_school_leak(db) -> None:
+    """Лид-препод нескольких школ: личный пул не должен подсовывать саппорта
+    ИЗ ДРУГОЙ школы на занятие этой — SupportPoolEntry сам по себе school-агностичен."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
+        home_school_id = g.school_id
+        # тот же препод co-admin'ит вторую (чужую) школу — там у него тоже пул
+        other_owner = await admins.get_or_create(s, 999, "o", "O")
+        other_school = await schools.get_owned_school(s, other_owner.id)
+        await schools.add_coadmin(s, other_school.id, t.id)
+        other_group = await groups.create_group(s, other_school.id, "Сальса", "0", "18:00", 18)
+        foreign, _ = await persons.add_to_group(s, other_group, 1, "u", "Чужак")
+        await persons.set_gender(s, foreign.id, Gender.male)
+        await persons.set_pool_level(s, t.id, foreign.id, 3)
+        home_group = await groups.create_group(s, home_school_id, "Пул", "2", "20:00", 18)
+        home, _ = await persons.add_to_group(s, home_group, 2, "u", "Свой")
+        await persons.set_gender(s, home.id, Gender.male)
+        await persons.set_pool_level(s, t.id, home.id, 1)
+        tid, gid, home_id = t.id, g.id, home.id
+    async with session_scope() as s:
+        without_filter = await persons.support_candidates(s, tid, Gender.male, gid)
+        with_filter = await persons.support_candidates(s, tid, Gender.male, gid, home_school_id)
+    assert any(p.full_name == "Чужак" for p in without_filter)  # без фильтра утечка есть
+    assert [p.id for p in with_filter] == [home_id]  # с фильтром — только свой
 
 
 # ── supports.claim ───────────────────────────────────────────────────
@@ -415,6 +451,27 @@ async def test_pick_send_rejects_foreign_teacher(db) -> None:
         assert call is not None and call.status == SupportCallStatus.pending
 
 
+async def test_pick_send_rejects_after_lesson_started(db) -> None:
+    """Занятие уже началось — рассылать «Нужна помощь!» поздно (зеркало гарда
+    join/skip)."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        survey = await surveys.get_survey(s, (await supports.get_call(s, ctx.call_id)).survey_id)
+        survey.lesson_at = datetime.now(UTC) - timedelta(minutes=5)
+        candidates = await persons.support_candidates(
+            s, ctx.admin_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, candidates, {ctx.sup_pid})
+    bot = FakeBot()
+    send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
+    await cb_support_pick_send(send, bot)
+    assert bot.sent == []
+    assert send.answers and "уже началось" in send.answers[0]
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
+        assert call is not None and call.status == SupportCallStatus.pending  # не тронут
+
+
 async def test_pick_nope_dismisses_call(db) -> None:
     """«✗ Не сейчас · баланс ок» гасит pending-call, чтобы pending-нудж молчал."""
     ctx = await _call_with_pool_candidate()  # call в статусе pending
@@ -486,7 +543,7 @@ async def test_pick_nope_on_already_handled_call(db) -> None:
     assert cb.answers and "разобрано" in cb.answers[0].lower()
 
 
-async def test_picksend_and_picknope_concurrent_consistent(db) -> None:
+async def test_picksend_and_picknope_concurrent_consistent(db, drain_pool_after) -> None:
     """picksend и picknope на одном call сериализуются call_lock'ом: исход
     согласован — либо инвайты разосланы и call open, либо dismissed без инвайтов.
     Никогда «инвайты ушли, но call закрыт как ‘баланс ок’»."""
@@ -510,10 +567,9 @@ async def test_picksend_and_picknope_concurrent_consistent(db) -> None:
         assert not invited  # dismiss выиграл → инвайтов быть не должно
     else:
         assert call.status == SupportCallStatus.open and invited  # picksend выиграл
-    await _drain_pool()
 
 
-async def test_support_join_no_overfill_under_concurrency(db) -> None:
+async def test_support_join_no_overfill_under_concurrency(db, drain_pool_after) -> None:
     """Два одновременных «Приду помочь» на единственный слот: per-call
     asyncio.Lock сериализует read→claim→commit, набор не перебирается."""
     async with session_scope() as s:
@@ -537,10 +593,9 @@ async def test_support_join_no_overfill_under_concurrency(db) -> None:
     async with session_scope() as s:
         assert await supports.count_claims(s, call_id) == 1  # ровно один слот
         assert (await supports.get_call(s, call_id)).status == SupportCallStatus.closed
-    await _drain_pool()
 
 
-async def test_join_and_skip_concurrent_no_stuck_closed(db) -> None:
+async def test_join_and_skip_concurrent_no_stuck_closed(db, drain_pool_after) -> None:
     """Конкурентные join (заполняет последний слот → closed) и skip (unclaim)
     сериализуются call_lock'ом: call никогда не остаётся closed со свободным
     слотом — unclaim видит закоммиченный closed и переоткрывает."""
@@ -561,7 +616,53 @@ async def test_join_and_skip_concurrent_no_stuck_closed(db) -> None:
         count = await supports.count_claims(s, ctx.call_id)
     # инвариант: нет «закрыт, но слот свободен»
     assert not (call.status == SupportCallStatus.closed and count < call.needed)
-    await _drain_pool()
+
+
+async def test_unclaim_does_not_reopen_call_closed_below_capacity(db) -> None:
+    """closed НЕ от заполнения нормы (dismiss или phase-2 «баланс сложился» при
+    filled<needed) — сознательное решение, а не «слот освободился». unclaim
+    не должен воскрешать такой call, иначе новый саппорт сможет застолбить
+    слот на call, который лид/система уже закрыли."""
+    ctx = await _call_with_pool_candidate()  # needed=2
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+        await supports.claim(s, ctx.call_id, ctx.sup_pid)  # filled=1/2, ещё open
+        # Симулируем phase-2: баланс сложился (поздние отмены с другой стороны),
+        # call закрывается НЕСМОТРЯ на filled(1) < needed(2) — «не сейчас».
+        call = await supports.get_call(s, ctx.call_id)
+        call.status = SupportCallStatus.closed
+        await s.flush()
+    async with session_scope() as s:
+        changed = await supports.unclaim(
+            s, ctx.call_id, ctx.sup_pid, now=LESSON - timedelta(hours=1)
+        )
+    assert changed is True  # claim реально снят, helped_count пересчитан
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
+        assert call.status == SupportCallStatus.closed  # НЕ воскрес
+
+
+async def test_unclaim_reopens_call_closed_by_reaching_capacity(db) -> None:
+    """closed ИМЕННО от заполнения нормы (filled>=needed, обычный claim()) —
+    здесь reopen на unclaim корректен: слот реально освободился."""
+    ctx = await _call_with_pool_candidate()  # needed=2
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+        g = await groups.get_group(s, ctx.group_id)
+        b, _ = await persons.add_to_group(s, g, 701, "u", "B")
+        await persons.set_gender(s, b.id, Gender.male)
+        await supports.claim(s, ctx.call_id, ctx.sup_pid)
+        await supports.claim(s, ctx.call_id, b.id)  # filled=2/2 → claim() закрыл сам
+        call = await supports.get_call(s, ctx.call_id)
+        assert call.status == SupportCallStatus.closed
+    async with session_scope() as s:
+        changed = await supports.unclaim(
+            s, ctx.call_id, ctx.sup_pid, now=LESSON - timedelta(hours=1)
+        )
+    assert changed is True
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
+        assert call.status == SupportCallStatus.open  # слот освободился — открыт
 
 
 async def test_support_join_records_claim(db) -> None:
@@ -573,6 +674,30 @@ async def test_support_join_records_claim(db) -> None:
     async with session_scope() as s:
         assert await supports.count_claims(s, ctx.call_id) == 1
     assert any(chat == 100 for chat, _ in bot.sent)  # teacher notified
+
+
+async def test_support_join_unknown_person_gets_alert(db) -> None:
+    """Тап от человека без Person-строки в этой школе — раньше тихий
+    call.answer() без текста выглядел как сломанная кнопка."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+    bot = FakeBot()
+    cb = FakeCallback(f"sup:join:{ctx.call_id}", user_id=999999)
+    await cb_support_join(cb, bot)
+    assert cb.answers and "нет в этой школе" in cb.answers[0]
+    async with session_scope() as s:
+        assert await supports.count_claims(s, ctx.call_id) == 0
+
+
+async def test_support_skip_no_double_space_when_context_missing(db) -> None:
+    """call/survey/group не находятся (битый/устаревший callback) — текст не
+    должен получать двойной пробел из пустого `when` (title остаётся
+    дефолтным «занятие»)."""
+    bot = FakeBot()
+    cb = FakeCallback("sup:skip:999999", user_id=700)
+    await cb_support_skip(cb, bot)
+    assert cb.message.text == "Понял, на «занятие» не сможешь. Спасибо, что откликнулся!"
 
 
 async def test_support_flip_skip_after_join(db) -> None:
@@ -744,6 +869,61 @@ async def test_pending_call_quiet_when_lesson_far(db) -> None:
     assert bot.sent == []
 
 
+async def test_stale_open_call_no_nudge_after_lesson_started(db) -> None:
+    """Открытый call без откликов старше часа, но занятие УЖЕ началось — поздно
+    советовать «напиши им лично», нужен реальный фильтр по lesson_at."""
+    past = datetime.now(UTC) - timedelta(minutes=5)  # занятие уже началось
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, past
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.open
+        )
+        call.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+        await s.flush()
+    bot = FakeBot()
+    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    assert bot.sent == []  # занятие уже началось — не советуем "напиши лично"
+
+
+async def test_stale_open_call_not_marked_notified_on_send_failure(db) -> None:
+    """Флаг no_reply_notified не должен ставиться, если реальная отправка
+    упала — иначе единственный пинг теряется навсегда без повтора."""
+    soon = datetime.now(UTC) + timedelta(hours=2)  # занятие ещё далеко
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, soon
+        )
+        call = await supports.create_call(
+            s, survey.id, Gender.male, 2, SupportCallStatus.open
+        )
+        call.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+        call_id = call.id
+        await s.flush()
+
+    class _BrokenBot:
+        async def send_message(self, *args, **kwargs):
+            raise RuntimeError("Telegram недоступен")
+
+    await sched._notify_stale_support_calls(_BrokenBot(), datetime.now(UTC))
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+        assert call.no_reply_notified is False  # не потерян — попробуем ещё раз
+
+    # На следующий тик с живым ботом пинг реально доходит.
+    bot = FakeBot()
+    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    assert any("не откликнулся" in txt for _, txt in bot.sent)
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+        assert call.no_reply_notified is True
+
+
 # ── #6: helped_count по факту явки ───────────────────────────────────
 
 
@@ -874,6 +1054,32 @@ async def test_pickmore_reveals_colleague_pool(db) -> None:
         for b in row
     ]
     assert f"pick:{call_id}:{sup_id}" in callbacks  # саппорт коллеги показан
+
+
+async def test_pickmore_excludes_already_claimed(db) -> None:
+    """Уже согласившийся (claimed) не должен снова появляться невыбранным в
+    picker'е после «➕ из пула коллег» — иначе выглядит как будто он ничего
+    не подтверждал (фаза-2 фильтрует так же, см. scheduler.py claimed_ids)."""
+    ctx = await _call_with_pool_candidate()  # needed=2, sup_pid в пуле lead'а
+    async with session_scope() as s:
+        await supports.set_status(s, ctx.call_id, SupportCallStatus.open)
+        await supports.claim(s, ctx.call_id, ctx.sup_pid)  # уже согласился
+        co = await admins.get_or_create(s, 555, "c", "Co")
+        await schools.add_coadmin(s, ctx.school_id, co.id)
+        other = await groups.create_group(s, ctx.school_id, "Сосед", "2", "20:00", 18)
+        colleague_sup, _ = await persons.add_to_group(s, other, 702, "u", "Коллега")
+        await persons.set_gender(s, colleague_sup.id, Gender.male)
+        await persons.set_pool_level(s, co.id, colleague_sup.id, 2)
+        colleague_id = colleague_sup.id
+    cb = FakeCallback(f"pickmore:{ctx.call_id}", user_id=100)
+    await cb_support_pickmore(cb)
+    callbacks = [
+        b.callback_data
+        for row in cb.message.reply_markup.inline_keyboard
+        for b in row
+    ]
+    assert f"pick:{ctx.call_id}:{ctx.sup_pid}" not in callbacks  # уже согласился
+    assert f"pick:{ctx.call_id}:{colleague_id}" in callbacks  # ещё не спрошен
 
 
 async def test_support_invite_known_person_added_to_pool(db) -> None:

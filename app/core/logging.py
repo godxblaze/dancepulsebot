@@ -19,7 +19,7 @@ def setup_logging() -> None:
     )
 
     root = logging.getLogger()
-    root.setLevel(settings.log_level)
+    root.setLevel(settings.log_level.upper())
     root.handlers.clear()
 
     stream = logging.StreamHandler(sys.stdout)

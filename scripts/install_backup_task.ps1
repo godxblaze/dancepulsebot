@@ -15,7 +15,10 @@ if (-not (Test-Path $py)) { $py = "python" }
 
 $action  = New-ScheduledTaskAction -Execute $py -Argument "-m scripts.backup_db" -WorkingDirectory $proj
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+# WakeToRun — если машина спит в 03:00, Windows её разбудит ради бэкапа;
+# без этого флага StartWhenAvailable просто ждёт следующего пробуждения
+# (может пропустить бэкап на день, если хост всю ночь проспал).
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun
 # SYSTEM + ServiceAccount — та же дыра, что и в install_bot_task.ps1: без
 # принципала задача требует залогиненного пользователя, и ночной бэкап после
 # ребута без логина не выполнится. SYSTEM должен иметь доступ к $proj и .env.

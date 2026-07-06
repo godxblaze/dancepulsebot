@@ -12,6 +12,7 @@ from app.bot.bot import build_bot
 from app.core.logging import setup_logging
 from app.db.session import init_db, session_scope
 from app.scheduler.scheduler import _poll_group
+from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
@@ -42,6 +43,9 @@ async def run() -> None:
                 continue
             when = format_lesson_at(lesson_at, "%d.%m %H:%M", tz=tz)
             async with session_scope() as s:
+                if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
+                    print(f"«{group.name}»: занятие {when} отменено — пропуск.")
+                    continue
                 existing = await surveys_svc.find_attendance_survey(
                     s, group.id, lesson_at
                 )

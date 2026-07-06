@@ -10,9 +10,11 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import ui
+from app.bot.handlers.search import _match
 from app.bot.keyboards import (
     EVENING_TIMES,
     MENU_POOL,
@@ -41,18 +43,23 @@ _POOL_HEAD = (
 )
 
 
-async def _pool_view(s, admin_id: int) -> tuple[list[Person], dict[int, int]]:
+async def _pool_view(
+    s, admin_id: int, query: str | None = None
+) -> tuple[list[Person], dict[int, int]]:
     people = await persons_svc.admin_visible_persons(s, admin_id)
+    if query:
+        people = _match(people, query)
     levels = await persons_svc.admin_pool_levels(s, admin_id)
     return people, levels
 
 
 @router.message(Command("pool"))
 @router.message(F.text == MENU_POOL)
-async def cmd_pool(message: Message) -> None:
+async def cmd_pool(message: Message, state: FSMContext) -> None:
     tg = message.from_user
     if not tg:
         return
+    await state.update_data(pool_search_query=None)  # свежий /pool — без фильтра
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
         if teacher is None:
@@ -78,12 +85,16 @@ async def _rerender_pool(call: CallbackQuery, teacher_id: int, page: int = 0) ->
 
 
 @router.callback_query(F.data.startswith("tpool:"))
-async def cb_pool_toggle(call: CallbackQuery) -> None:
-    """Tap в /pool: cycle 1→2→3→None в ЛИЧНОМ пуле. idempotency через expected."""
+async def cb_pool_toggle(call: CallbackQuery, state: FSMContext) -> None:
+    """Tap в /pool: cycle 1→2→3→None в ЛИЧНОМ пуле. idempotency через expected.
+
+    Если тап пришёл по результату поиска (🔍) — сохраняем тот же фильтр при
+    перерисовке, иначе тап сбрасывал бы список обратно на весь пул."""
     parts = (call.data or "").split(":")
     person_id = int(parts[1])
     expected = lvl_from_code(parts[2]) if len(parts) > 2 else None
     page = int(parts[3]) if len(parts) > 3 else 0
+    query = (await state.get_data()).get("pool_search_query")
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
         person = await s.get(Person, person_id)
@@ -99,7 +110,7 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
         if not stale:
             new_level = None if current == _MAX_LEVEL else (current or 0) + 1
             await persons_svc.set_pool_level(s, teacher.id, person_id, new_level)
-        people, levels = await _pool_view(s, teacher.id)
+        people, levels = await _pool_view(s, teacher.id, query)
     if call.message:
         try:
             await call.message.edit_reply_markup(
@@ -111,23 +122,28 @@ async def cb_pool_toggle(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("poolpg:"))
-async def cb_pool_page(call: CallbackQuery) -> None:
+async def cb_pool_page(call: CallbackQuery, state: FSMContext) -> None:
     page = int((call.data or "").split(":", 1)[1])
+    query = (await state.get_data()).get("pool_search_query")
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
         if teacher is None:
             await call.answer()
             return
-        people, levels = await _pool_view(s, teacher.id)
+        people, levels = await _pool_view(s, teacher.id, query)
     if call.message:
-        await call.message.edit_reply_markup(
-            reply_markup=pool_keyboard(people, levels, page=page)
-        )
+        try:
+            await call.message.edit_reply_markup(
+                reply_markup=pool_keyboard(people, levels, page=page)
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("pool_page edit_reply_markup: %s", e)
     await call.answer()
 
 
 @router.callback_query(F.data == "poolback")
-async def cb_pool_back(call: CallbackQuery) -> None:
+async def cb_pool_back(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(pool_search_query=None)  # «Назад» — это весь пул
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
         if teacher is None:

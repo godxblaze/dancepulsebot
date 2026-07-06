@@ -15,6 +15,10 @@ class CancelLesson(StatesGroup):
     """Опциональный ввод причины отмены занятия. group_id и ts — в FSM data."""
 
     reason = State()
+    # Подтверждение введённого текстом. Без него любое НЕ относящееся к отмене
+    # сообщение, присланное в течение REASON_STALE_AFTER после «Другое», тихо
+    # исполнило бы отмену занятия с этим случайным текстом как причиной.
+    confirm_reason = State()
 
 
 class EntitySearch(StatesGroup):

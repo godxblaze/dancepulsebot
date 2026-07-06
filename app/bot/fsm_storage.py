@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
+
+log = logging.getLogger(__name__)
 
 
 def _key_to_str(key: StorageKey) -> str:
@@ -38,7 +41,10 @@ class JsonFileStorage(BaseStorage):
             return {}
         try:
             return json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning(
+                "FSM-хранилище %s повреждено/недоступно, начинаю с чистого: %s", self._path, e
+            )
             return {}
 
     def _flush(self) -> None:

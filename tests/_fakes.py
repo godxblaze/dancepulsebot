@@ -72,6 +72,7 @@ class FakeBot:
     def __init__(self) -> None:
         self._next_id = 1000
         self.sent: list[SentMessage] = []
+        self._by_id: dict[tuple[int, int], SentMessage] = {}
         self.commands_set: list[Any] = []
         self.commands_deleted = 0
 
@@ -80,6 +81,7 @@ class FakeBot:
     ) -> SentMessage:
         msg = SentMessage(self, chat_id, text, reply_markup)
         self.sent.append(msg)
+        self._by_id[(chat_id, msg.message_id)] = msg
         return msg
 
     async def get_me(self) -> SimpleNamespace:
@@ -88,8 +90,18 @@ class FakeBot:
     async def edit_message_text(
         self, text: str, chat_id: int | None = None, message_id: int | None = None, **_: Any
     ) -> SentMessage:
+        # Мутируем СУЩЕСТВУЮЩЕЕ сообщение (как настоящий Telegram), а не
+        # создаём новый объект — иначе тест, держащий ссылку на исходный
+        # send_message(...), не увидит правку через отдельный edit_message_text(...)
+        # (напр. B8 live-баланс через recruit.py._refresh_balance).
+        key = (chat_id if chat_id is not None else 0, message_id)
+        existing = self._by_id.get(key)
+        if existing is not None:
+            existing.text = text
+            return existing
         msg = SentMessage(self, chat_id if chat_id is not None else 0, text)
         self.sent.append(msg)
+        self._by_id[key] = msg
         return msg
 
     async def set_my_commands(self, commands: Any, **_: Any) -> bool:
@@ -191,6 +203,9 @@ class FakeFSM:
     async def update_data(self, **kwargs: Any) -> dict[str, Any]:
         self.data.update(kwargs)
         return dict(self.data)
+
+    async def set_data(self, data: dict[str, Any]) -> None:
+        self.data = dict(data)
 
     async def clear(self) -> None:
         self.state = None

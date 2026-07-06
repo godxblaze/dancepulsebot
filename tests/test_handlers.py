@@ -1,5 +1,5 @@
 """Tests for the attendance callback handler."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -9,7 +9,14 @@ from app.db.session import session_scope
 from app.services import admins, groups, persons, surveys
 
 _MSK = ZoneInfo("Europe/Moscow")
-LESSON = datetime(2026, 5, 25, 19, 0, tzinfo=_MSK).astimezone(UTC)
+# Занятие через 14 дней, 19:00 МСК — фиксированная календарная дата рано или
+# поздно оказывается в прошлом (on_attendance теперь гвардит на
+# as_utc(lesson_at) <= utc_now()), а срок от «сейчас» — нет.
+LESSON = (
+    (datetime.now(UTC).astimezone(_MSK) + timedelta(days=14))
+    .replace(hour=19, minute=0, second=0, microsecond=0)
+    .astimezone(UTC)
+)
 
 
 class FakeCbMessage:

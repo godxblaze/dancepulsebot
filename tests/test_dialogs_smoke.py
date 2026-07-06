@@ -147,3 +147,18 @@ def test_text_input_on_success_signatures() -> None:
             if n != 4:
                 bad.append(f"{fn.__module__}.{fn.__name__}: {n} positional (expected 4)")
     assert not bad, "Bad TextInput.on_success signatures:\n  " + "\n  ".join(bad)
+
+
+def test_windows_rendering_escaped_html_declare_parse_mode() -> None:
+    """Getter'ы этих окон отдают html.escape()'нутые строки ({title}/{summary}/
+    {current}) — без parse_mode=HTML на самом Window (ни Bot, ни Window не
+    заданы с HTML-дефолтом) html-сущности типа &amp; показывались бы юзеру
+    буквально, а не декодировались обратно в спецсимволы."""
+    from aiogram.enums import ParseMode
+
+    from app.bot.dialogs.edit_group import edit_group_dialog
+    from app.bot.dialogs.misc_dialogs import edit_name_dialog
+    from app.bot.dialogs.states import EditGroupSG, EditNameSG
+
+    assert edit_group_dialog.windows[EditGroupSG.menu].parse_mode == ParseMode.HTML
+    assert edit_name_dialog.windows[EditNameSG.name].parse_mode == ParseMode.HTML

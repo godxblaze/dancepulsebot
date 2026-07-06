@@ -98,7 +98,7 @@ dancepulsebot/
 │   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports, schedule
 │   └── main.py
 ├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes
-└── tests/           # 168 тестов, pytest + ruff гонятся через scripts/check.ps1
+└── tests/           # 352 теста, pytest + ruff гонятся через scripts/check.ps1
 ```
 
 ## Требования
@@ -138,7 +138,7 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 pytest tests/
 ```
 
-168 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
+352 теста (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
 
 ## Roadmap
 

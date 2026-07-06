@@ -40,6 +40,9 @@ def test_bar_fixed_width_and_glyphs() -> None:
     assert ui.bar(0, 0) == "░" * 10
     # только два глифа
     assert set(ui.bar(4, 9)) <= {"█", "░"}
+    # round-half-to-even: round(10*1/20)==round(0.5)==0 — но filled=1 реален,
+    # бар не должен выглядеть полностью пустым.
+    assert ui.bar(1, 20).count("█") == 1
 
 
 def test_balance_bars() -> None:

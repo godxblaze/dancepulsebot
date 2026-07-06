@@ -184,6 +184,65 @@ async def test_support_invite_known_person_fastpath(db) -> None:
         assert levels.get(person.id) == 1
 
 
+async def test_support_invite_repeat_click_does_not_downgrade_curated_level(db) -> None:
+    """Препод поднял саппорта до уровня 3 вручную (курация) — повторный переход
+    по той же persistent support-ссылке не должен откатывать его на 1."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    await join_via_link(bot, code, 981, "Настя", Gender.female)
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        support_code = await admins_svc.get_or_create_support_code(s, teacher.id)
+        person = await persons_svc.get_person(s, sid, 981)
+        await persons_svc.set_pool_level(s, teacher.id, person.id, 3)  # курация
+
+    user = fake_user(981, full_name="Настя")
+    fsm = FakeFSM()
+    start = FakeMessage(user, bot=bot)
+    await join_start(start, SimpleNamespace(args=f"support_{support_code}"), fsm, bot)
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        levels = await persons_svc.admin_pool_levels(s, teacher.id)
+        person = await persons_svc.get_person(s, sid, 981)
+        assert levels.get(person.id) == 3  # не откатился на 1
+
+
+async def test_join_flow_does_not_leak_support_context_from_abandoned_flow(db) -> None:
+    """Пользователь начал онбординг саппорта (support_admin_id в FSM), не
+    закончил его, потом перешёл по ОБЫЧНОЙ join-ссылке группы — второй флоу не
+    должен унаследовать support_admin_id от первого (set_data, не update_data)."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    async with session_scope() as s:
+        teacher = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        support_code = await admins_svc.get_or_create_support_code(s, teacher.id)
+
+    user = fake_user(990, full_name="Игорь")
+    fsm = FakeFSM()
+    # начал флоу саппорта — не заканчивает
+    await join_start(
+        FakeMessage(user, bot=bot), SimpleNamespace(args=f"support_{support_code}"), fsm, bot
+    )
+    assert "support_admin_id" in fsm.data
+
+    # передумал, перешёл по обычной ссылке группы
+    await join_start(FakeMessage(user, bot=bot), SimpleNamespace(args=f"join_{code}"), fsm, bot)
+    assert "support_admin_id" not in fsm.data  # обрывок первого флоу не унаследован
+    assert fsm.data.get("group_id") == gid
+
+    await join_name_typed(FakeMessage(user, text="Игорь", bot=bot), fsm)
+    gender_cb = cb("join:gender:male", 990, name="Игорь", message=SentMessage(None, 990, ""))
+    await join_gender(gender_cb, fsm, bot)
+
+    async with session_scope() as s:
+        # записан членом группы (а не саппортом в пуле — второй флоу выиграл)
+        assert await persons_svc.get_in_group(s, gid, 990) is not None
+        teacher = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        levels = await persons_svc.admin_pool_levels(s, teacher.id)
+        person = await persons_svc.get_person(s, sid, 990)
+        assert levels.get(person.id) is None  # НЕ попал в пул саппортов
+
+
 async def test_support_invite_bad_code(db) -> None:
     bot = FakeBot()
     await make_group()

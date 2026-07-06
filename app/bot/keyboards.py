@@ -290,6 +290,21 @@ def confirm_cancel_lesson_keyboard(group_id: int, ts: int) -> InlineKeyboardMark
     )
 
 
+def confirm_typed_cancel_reason_keyboard(group_id: int, ts: int) -> InlineKeyboardMarkup:
+    """Подтверждение отмены с ВВЕДЁННОЙ текстом причиной — без него случайное
+    сообщение, присланное в течение REASON_STALE_AFTER, тихо исполнило бы
+    отмену занятия с этим текстом как причиной."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚫 Да, отменить с этой причиной",
+                callback_data=f"grpcancelreasonok:{group_id}:{ts}",
+            )],
+            [InlineKeyboardButton(text="◀ Отмена", callback_data=f"grpcancel:{group_id}")],
+        ]
+    )
+
+
 def school_card_keyboard(
     school_id: int, is_owner: bool, multi_school: bool = False
 ) -> InlineKeyboardMarkup:
@@ -331,9 +346,9 @@ def school_card_keyboard(
 
 
 # Фиксированный список IANA таймзон в picker'е. 12 наиболее популярных:
-# Москва + EU (LON/MAD/BER/LIS/PAR/KYIV/IST), США (NY/LA), Латам/JP,
-# Россия-Сибирь (Yekaterinburg, Novosibirsk). Свободный ввод не предлагаем —
-# валидировать руками рискованно.
+# Москва + EU (Киев/Берлин/Мадрид/Лиссабон/Лондон/Стамбул), Закавказье
+# (Тбилиси/Ереван), Средняя Азия (Алматы), США (Нью-Йорк/Лос-Анджелес).
+# Свободный ввод не предлагаем — валидировать руками рискованно.
 TZ_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Europe/Moscow", "🇷🇺 Москва (UTC+3)"),
     ("Europe/Kyiv", "🇺🇦 Киев (UTC+2/+3)"),
@@ -531,7 +546,7 @@ def lesson_card_keyboard(
 def today_ping_keyboard(
     pending_by_group: list[tuple[str, int, int]],
     span: str = "day",
-) -> InlineKeyboardMarkup | None:
+) -> InlineKeyboardMarkup:
     """For /today summary — ping per group + переключатель span (day/week).
     span: 'day' → отображается сегодня+завтра, 'week' → ближайшие 7 дней."""
     has_pings = bool(pending_by_group)
@@ -694,7 +709,15 @@ def _lvl_code(lvl: int | None) -> str:
 
 
 def lvl_from_code(code: str) -> int | None:
-    return None if code == "x" else int(code)
+    """"x" — явное «нет уровня»; нечисловой код (испорченный/подделанный
+    callback_data) деградирует в None, как и сестринский attended_from_code,
+    а не роняет хендлер ValueError'ом."""
+    if code == "x":
+        return None
+    try:
+        return int(code)
+    except ValueError:
+        return None
 
 
 def _gender_code(g: Gender | None) -> str:
@@ -737,11 +760,14 @@ def pool_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for p in page_items:
         lvl = levels.get(p.id)
+        # Без пола автодобор его не позовёт (support_candidates фильтрует по
+        # gender) — помечаем, чтобы препод не гадал, почему человек «молчит».
+        no_gender = " ⚠️ без пола" if p.gender is None else ""
         if lvl is None:
-            label = f"☐ {p.full_name}"
+            label = f"☐ {p.full_name}{no_gender}"
         else:
             helped = f" · помог {p.helped_count}" if p.helped_count else ""
-            label = f"✅ {p.full_name} · ур.{lvl}{helped}"
+            label = f"✅ {p.full_name} · ур.{lvl}{helped}{no_gender}"
         # state и page в callback_data: idempotency-guard + возврат на ту же
         # страницу после toggle.
         rows.append([InlineKeyboardButton(

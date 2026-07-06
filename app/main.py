@@ -53,7 +53,10 @@ async def _run_locked() -> bool:
 
     bot = build_bot()
     await apply_bot_profile(bot)
-    await set_default_commands(bot)
+    try:
+        await set_default_commands(bot)
+    except Exception as e:  # noqa: BLE001
+        log.warning("set_default_commands failed (продолжаю запуск): %s", e)
     async with session_scope() as s:
         for a in await admins_svc.list_all(s):
             try:

@@ -1,7 +1,10 @@
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 class Settings(BaseSettings):
@@ -40,6 +43,14 @@ class Settings(BaseSettings):
             )
         if self.default_lead_hours <= 0:
             problems.append("DEFAULT_LEAD_HOURS должен быть > 0")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            problems.append(f"TIMEZONE {self.timezone!r} — не существующая IANA-зона")
+        if self.log_level.upper() not in _VALID_LOG_LEVELS:
+            problems.append(
+                f"LOG_LEVEL {self.log_level!r} — допустимо: {', '.join(sorted(_VALID_LOG_LEVELS))}"
+            )
         if problems:
             raise RuntimeError("Конфиг невалиден:\n  - " + "\n  - ".join(problems))
 

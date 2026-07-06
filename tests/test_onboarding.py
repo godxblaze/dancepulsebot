@@ -77,6 +77,9 @@ class FakeFSM:
         self.data.update(kwargs)
         return dict(self.data)
 
+    async def set_data(self, data: dict) -> None:
+        self.data = dict(data)
+
     async def clear(self) -> None:
         self.state = None
         self.data = {}

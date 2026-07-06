@@ -293,7 +293,8 @@ async def long_absent(
     last_seen_stmt = (
         select(Response.person_id, func.max(Survey.lesson_at).label("last"))
         .join(Survey, Survey.id == Response.survey_id)
-        .where(Response.actually_attended.is_(True))
+        .join(Group, Group.id == Survey.group_id)
+        .where(Response.actually_attended.is_(True), Group.school_id == school_id)
         .group_by(Response.person_id)
     )
     last_seen = dict((await session.execute(last_seen_stmt)).all())
@@ -318,10 +319,16 @@ async def long_absent(
 
 
 async def support_candidates(
-    session: AsyncSession, admin_id: int, gender: Gender, exclude_group_id: int
+    session: AsyncSession,
+    admin_id: int,
+    gender: Gender,
+    exclude_group_id: int,
+    school_id: int | None = None,
 ) -> list[Person]:
     """ЛИЧНЫЙ пул препода нужного пола, исключая регулярных членов группы.
-    Высший level первым."""
+    Высший level первым. school_id фильтрует пул до людей ИМЕННО этой школы —
+    без него кросс-школьный саппорт (лид препода нескольких школ) мог
+    получить приглашение на чужое занятие."""
     members = select(Membership.person_id).where(
         Membership.group_id == exclude_group_id
     )
@@ -335,6 +342,8 @@ async def support_candidates(
         )
         .order_by(SupportPoolEntry.level.desc(), Person.full_name)
     )
+    if school_id is not None:
+        stmt = stmt.where(Person.school_id == school_id)
     return list((await session.execute(stmt)).scalars().all())
 
 
@@ -344,10 +353,11 @@ async def top_candidates(
     gender: Gender,
     exclude_group_id: int,
     n: int,
+    school_id: int | None = None,
 ) -> list[Person]:
     """Топ-N кандидатов личного пула препода по уровню (для режима auto_top).
     support_candidates уже сортирует по уровню desc, так что берём префикс."""
-    cands = await support_candidates(session, admin_id, gender, exclude_group_id)
+    cands = await support_candidates(session, admin_id, gender, exclude_group_id, school_id)
     return cands[: max(0, n)]
 
 

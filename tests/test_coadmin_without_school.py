@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.bot.dialogs.edit_group import _style_getter, _venue_getter
 from app.bot.dialogs.new_group import _target_school
 from app.bot.handlers.admin import cmd_export, newgroup_start
 from app.bot.handlers.student import _support_invite_start
@@ -16,6 +17,7 @@ from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
+from app.services import venues as venues_svc
 from tests._e2e_helpers import TEACHER_TG, make_group
 from tests._fakes import FakeBot, FakeFSM, FakeMessage, fake_user
 
@@ -113,3 +115,24 @@ async def test_export_works_for_coadmin_without_owned_school(db) -> None:
     assert len(msg.replies) == 2  # students.csv + attendance.csv
     for reply in msg.replies:
         assert len(reply.document.data) > 0  # не пустой BufferedInputFile
+
+
+async def test_edit_group_style_venue_getters_use_group_school(db) -> None:
+    """_style_getter/_venue_getter редактора группы должны брать подсказки из
+    ШКОЛЫ РЕДАКТИРУЕМОЙ ГРУППЫ, а не owned-школы admin'а — иначе co-admin без
+    своей школы (или owner другой школы) видел бы чужие/пустые подсказки."""
+    gid, sid, _ = await make_group()
+    async with session_scope() as s:
+        await venues_svc.create_venue(s, sid, "Зал школы", None)
+        coadmin = await _bare_coadmin(s, sid, 780, "Co")
+        coadmin_id = coadmin.id
+    manager = SimpleNamespace(dialog_data={"group_id": gid}, start_data=None)
+
+    styles = await _style_getter(manager)
+    venues = await _venue_getter(manager)
+
+    async with session_scope() as s:
+        assert await schools_svc.get_owned_school(s, coadmin_id) is None
+    assert venues["venues"], "venue из школы группы должен быть виден co-admin'у"
+    assert venues["venues"][0][1].startswith("📍 Зал школы")
+    assert isinstance(styles["styles"], list)  # не падает без own-школы

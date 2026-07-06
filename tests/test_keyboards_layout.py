@@ -110,3 +110,22 @@ def test_group_actions_long_labels_full_width() -> None:
         if len(row) == 1:
             continue
         assert all(len(b.text) <= MAX_LABEL_PAIR for b in row)
+
+
+def test_pool_keyboard_warns_about_null_gender() -> None:
+    """Человек без указанного пола невидим для support_candidates/
+    school_pool_candidates (Person.gender == gender не матчит None) — препод
+    должен видеть почему он «молчит» в автодоборе."""
+    people = [_person(1, "Без пола", gender=None), _person(2, "С полом")]
+    rows = kb.pool_keyboard(people, {}).inline_keyboard
+    labels = {r[0].text for r in rows if r[0].callback_data.startswith("tpool:")}
+    assert any("Без пола" in t and "⚠️ без пола" in t for t in labels)
+    assert not any("С полом" in t and "⚠️" in t for t in labels)
+
+
+def test_lvl_from_code_degrades_on_malformed_input() -> None:
+    """Испорченный/подделанный callback_data (нечисловой сегмент) не должен
+    ронять хендлер ValueError'ом — деградирует в None, как attended_from_code."""
+    assert kb.lvl_from_code("x") is None
+    assert kb.lvl_from_code("2") == 2
+    assert kb.lvl_from_code("garbage") is None

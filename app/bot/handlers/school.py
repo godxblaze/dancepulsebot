@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram_dialog import DialogManager, StartMode
 
 from app.bot import ui
@@ -30,7 +35,6 @@ from app.bot.keyboards import (
     school_tz_keyboard,
 )
 from app.bot.utils import get_bot_username
-from app.core.config import settings
 from app.db.models import Admin
 from app.db.session import session_scope
 from app.services import admins as admins_svc
@@ -157,7 +161,10 @@ async def cb_school_groups(call: CallbackQuery) -> None:
             )
         else:
             await call.message.edit_text(
-                "В школе пока нет групп. Owner создаёт их кнопкой «➕ Новая группа»."
+                "В школе пока нет групп. Owner создаёт их кнопкой «➕ Новая группа».",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                    text="◀ К школе", callback_data=f"schcard:{school_id}",
+                )]]),
             )
     await call.answer()
 
@@ -194,14 +201,16 @@ async def cb_school_invite_link(call: CallbackQuery, bot: Bot) -> None:
         expires_at = invite.expires_at
         school = await schools_svc.get_school(s, school_id)
         school_name = school.name if school else "—"
+        tz_name = await schools_svc.get_timezone(s, school_id)
     link = await _partner_link(bot, code)
-    expires_local = expires_at.astimezone(ZoneInfo(settings.timezone)).strftime("%d.%m %H:%M")
-    await call.message.answer(
-        f"🛠 Ссылка-приглашение co-админом школы «{escape(school_name)}» — "
-        f"действует до {expires_local}. Перешли её одному человеку:\n\n"
-        f"<code>{escape(link)}</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    expires_local = expires_at.astimezone(ZoneInfo(tz_name)).strftime("%d.%m %H:%M")
+    if call.message:
+        await call.message.answer(
+            f"🛠 Ссылка-приглашение co-админом школы «{escape(school_name)}» — "
+            f"действует до {expires_local}. Перешли её одному человеку:\n\n"
+            f"<code>{escape(link)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
     await call.answer("Ссылка готова — пересылай")
 
 
@@ -348,14 +357,15 @@ async def cb_school_delete_confirm(call: CallbackQuery) -> None:
         school = await schools_svc.get_school(s, school_id)
         group_count = len(await groups_svc.school_groups(s, school_id))
         name = school.name if school else "—"
-    await call.message.edit_text(
-        f"⚠️ Удалить школу «{escape(name)}»?\n"
-        f"В ней {ui.plural_with_count(group_count, 'группа', 'группы', 'групп')} — "
-        f"они тоже будут удалены вместе с "
-        f"учениками, опросами и пулом саппортов. Это необратимо.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_school_delete_keyboard(school_id),
-    )
+    if call.message:
+        await call.message.edit_text(
+            f"⚠️ Удалить школу «{escape(name)}»?\n"
+            f"В ней {ui.plural_with_count(group_count, 'группа', 'группы', 'групп')} — "
+            f"они тоже будут удалены вместе с "
+            f"учениками, опросами и пулом саппортов. Это необратимо.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_school_delete_keyboard(school_id),
+        )
     await call.answer()
 
 
@@ -376,7 +386,8 @@ async def cb_school_delete(call: CallbackQuery, bot: Bot) -> None:
         members = await schools_svc.members_of(s, school_id)
         affected_tgs = [(a.id, a.tg_user_id) for a, _ in members]
         await schools_svc.delete_school(s, school)
-    await call.message.edit_text(f"🗑 Школа «{name}» удалена.")
+    if call.message:
+        await call.message.edit_text(f"🗑 Школа «{name}» удалена.")
     await call.answer()
     for admin_id, tg_id in affected_tgs:
         await demote_to_student_if_empty(bot, admin_id, tg_id)
@@ -391,12 +402,13 @@ async def cb_school_leave_confirm(call: CallbackQuery) -> None:
             await call.answer("Школа не найдена", show_alert=True)
             return
         name = school.name
-    await call.message.edit_text(
-        f"Выйти из школы «{escape(name)}»? Твои собственные данные не "
-        f"пропадут — ты просто перестанешь видеть её группы.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_school_leave_keyboard(school_id),
-    )
+    if call.message:
+        await call.message.edit_text(
+            f"Выйти из школы «{escape(name)}»? Твои собственные данные не "
+            f"пропадут — ты просто перестанешь видеть её группы.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_school_leave_keyboard(school_id),
+        )
     await call.answer()
 
 
@@ -424,7 +436,8 @@ async def cb_school_leave(call: CallbackQuery, bot: Bot) -> None:
         name = school.name if school else "—"
         admin_id_to_demote = admin.id
         tg_to_demote = call.from_user.id
-    await call.message.edit_text(f"↩ Вышел из школы «{name}».")
+    if call.message:
+        await call.message.edit_text(f"↩ Вышел из школы «{name}».")
     if admin_id_to_demote is not None and tg_to_demote is not None:
         await demote_to_student_if_empty(bot, admin_id_to_demote, tg_to_demote)
     await call.answer()
@@ -472,8 +485,17 @@ async def cb_school_accept(call: CallbackQuery, bot: Bot) -> None:
         admin = await admins_svc.get_or_create(
             s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
         )
+        # Атомарный consume ДО add_coadmin: если кто-то принял эту же ссылку
+        # секундой раньше в параллельной транзакции — не добавляем второго
+        # co-admin'а по уже использованному инвайту.
+        if not await schools_svc.consume_invite(s, invite, admin.id):
+            if call.message:
+                await call.message.edit_text(
+                    "Эта ссылка устарела или уже использована."
+                )
+            await call.answer()
+            return
         await schools_svc.add_coadmin(s, invite.school_id, admin.id)
-        await schools_svc.consume_invite(s, invite, admin.id)
         admin.has_completed_setup = True
         await s.flush()
         school = await schools_svc.get_school(s, invite.school_id)

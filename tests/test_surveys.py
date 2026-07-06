@@ -95,6 +95,24 @@ async def test_recent_closed_surveys(db) -> None:
     assert [r.lesson_at.day for r in recent] == [25, 20, 18]
 
 
+async def test_recent_closed_surveys_excludes_cancelled_lesson(db) -> None:
+    """Отменённое занятие тоже закрывает свой Survey (lesson_cancel.py) — оно
+    не должно засорять историю посещаемости как если бы занятие прошло."""
+    from app.services import cancellations
+
+    group_id, _ = await _setup_group()
+    dates = [datetime(2026, 6, d, 19, 0) for d in (1, 8, 15)]
+    async with session_scope() as s:
+        for d in dates:
+            await surveys.get_or_create_survey(s, group_id, SurveyKind.attendance, d)
+        await cancellations.cancel(s, group_id, dates[-1])  # 15 июня отменено
+    async with session_scope() as s:
+        await surveys.close_past_surveys(s, datetime(2026, 6, 20, 0, 0))
+        recent = await surveys.recent_closed_surveys(s, group_id, limit=5)
+    assert 15 not in [r.lesson_at.day for r in recent]
+    assert [r.lesson_at.day for r in recent] == [8, 1]
+
+
 async def test_mark_summary_sent(db) -> None:
     group_id, _ = await _setup_group()
     async with session_scope() as s:

@@ -100,6 +100,11 @@ def bar(filled: int, total: int, width: int = 10) -> str:
     if total <= 0:
         return "░" * width
     n = max(0, min(width, round(width * filled / total)))
+    if filled > 0 and n == 0:
+        # round-half-to-even может дать 0 блоков при реальном ненулевом вкладе
+        # (напр. filled=1, total=20, width=10 → round(0.5)==0) — бар не должен
+        # выглядеть полностью пустым, если кто-то реально есть.
+        n = 1
     return "█" * n + "░" * (width - n)
 
 

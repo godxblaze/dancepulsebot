@@ -68,6 +68,42 @@ async def test_lapsed_members_query_identifies_only_lapsed(db) -> None:
     assert [p.id for p in lapsed] == [ids.lapsed]
 
 
+async def test_lapsed_members_ignores_cancelled_lessons(db) -> None:
+    """Отменённые занятия тоже закрывают свой Survey (lesson_cancel.py). Без
+    анти-джойна против LessonCancellation они бы заняли место в «последних k»
+    и активный член (реально пришедший на оба genuine занятия) ложно
+    определился бы как lapsed — потому что в момент отмены survey уже был
+    отвечен «нет» (человек знал что не идёт ДО отмены, а потом занятие всё
+    равно отменили)."""
+    from app.services import cancellations
+
+    async with session_scope() as s:
+        t = await admins_svc.get_or_create(s, 100, "t", "Препод")
+        g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
+        active, _ = await persons.add_to_group(s, g, 201, "u", "Активный")
+        # 2 genuine прошлых занятия — активный реально приходил (yes) на оба.
+        for when in (PAST2, PAST1):
+            sv, _ = await surveys.get_or_create_survey(s, g.id, SurveyKind.attendance, when)
+            sv.status = SurveyStatus.closed
+            await surveys.ensure_responses(s, sv.id, [active.id])
+            await surveys.record_answer(s, sv.id, active.id, Answer.yes)
+        # 2 отменённых занятия БЛИЖЕ к сегодня, чем genuine — если их не
+        # отфильтровать, они займут окно «последних k=2» вместо genuine.
+        for days_ago in (2, 4):
+            when = LESSON - timedelta(days=days_ago)
+            sv, _ = await surveys.get_or_create_survey(s, g.id, SurveyKind.attendance, when)
+            await surveys.ensure_responses(s, sv.id, [active.id])
+            await surveys.record_answer(s, sv.id, active.id, Answer.no)
+            sv.status = SurveyStatus.closed
+            await cancellations.cancel(s, g.id, when)
+        gid, active_id = g.id, active.id
+    async with session_scope() as s:
+        lapsed = await surveys.lapsed_members(s, gid, k=2)
+    # Без фильтра последние k=2 были бы оба отменённых («нет» на обоих) →
+    # ложный lapsed. С фильтром последние k=2 — genuine PAST1/PAST2 (оба yes).
+    assert active_id not in [p.id for p in lapsed]
+
+
 async def test_lapsed_member_gets_one_reactivation(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)

@@ -51,23 +51,28 @@ def _has_pickmore(markup: InlineKeyboardMarkup | None) -> bool:
     )
 
 
-async def _pick_candidates(session, group, gender, *, expanded: bool):
+async def _pick_candidates(session, group, gender, call_id, *, expanded: bool):
     """(candidates, levels, can_expand) для picker'а: пул lead'а, при expanded —
-    плюс пул коллег."""
+    плюс пул коллег. Уже согласившиеся (claimed) исключены — иначе тап
+    «раскрыть пул коллег» возвращает их обратно в список невыбранных, будто
+    они ничего не подтверждали (фаза-2 фильтрует так же, см. scheduler.py)."""
+    claimed_ids = await supports_svc.claimed_person_ids(session, call_id)
     lead = await groups_svc.resolve_recruit_lead(session, group)
     lead_id = lead.id if lead else None
-    own = (
-        await persons_svc.support_candidates(session, lead_id, gender, group.id)
+    own_all = (
+        await persons_svc.support_candidates(session, lead_id, gender, group.id, group.school_id)
         if lead_id is not None else []
     )
+    own = [p for p in own_all if p.id not in claimed_ids]
     levels = (
         await persons_svc.admin_pool_levels(session, lead_id)
         if lead_id is not None else {}
     )
-    colleagues = await persons_svc.school_pool_candidates(
+    colleagues_all = await persons_svc.school_pool_candidates(
         session, group.school_id, gender, group.id, {c.id for c in own},
         exclude_admin_id=lead_id,
     )
+    colleagues = [p for p in colleagues_all if p.id not in claimed_ids]
     if expanded:
         return own + colleagues, levels, False
     return own, levels, bool(colleagues)
@@ -148,7 +153,7 @@ async def cb_support_pick(call: CallbackQuery) -> None:
             await call.answer()
             return
         candidates, levels, can_expand = await _pick_candidates(
-            s, group, sc.gender, expanded=expanded
+            s, group, sc.gender, call_id, expanded=expanded
         )
     if call.message:
         await call.message.edit_reply_markup(
@@ -176,7 +181,7 @@ async def cb_support_pickmore(call: CallbackQuery) -> None:
             await call.answer()
             return
         candidates, levels, _ = await _pick_candidates(
-            s, group, sc.gender, expanded=True
+            s, group, sc.gender, call_id, expanded=True
         )
     if call.message:
         await call.message.edit_reply_markup(
@@ -219,6 +224,11 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
             if sc.status != SupportCallStatus.pending:
                 # Кто-то из ответственных уже разобрал (open/closed) — гасим дубль.
                 await call.answer("Уже разобрано", show_alert=True)
+                return
+            if as_utc(survey.lesson_at) <= utc_now():
+                # Занятие уже началось — рассылать «Нужна помощь!» поздно
+                # (зеркало гарда в cb_support_join/cb_support_skip).
+                await call.answer("Занятие уже началось — поздно звать", show_alert=True)
                 return
             invited: list[tuple[int, str]] = []
             for pid in selected:
@@ -324,7 +334,7 @@ async def cb_support_join(call: CallbackQuery, bot: Bot) -> None:
                 return
             person = await persons_svc.get_person(s, group.school_id, call.from_user.id)
             if person is None:
-                await call.answer()
+                await call.answer("Тебя нет в этой школе", show_alert=True)
                 return
             accepted, filled, needed = await supports_svc.claim(s, call_id, person.id)
             notify_tgs = await groups_svc.group_admin_tg_ids(s, group.id, group.school_id)
@@ -449,10 +459,14 @@ async def cb_support_skip(call: CallbackQuery, bot: Bot) -> None:
                             group_obj = group
 
     if call.message:
+        # when может быть пустым (survey/group не нашлись) — вставляем через
+        # join, а не f-string с фиксированным пробелом, иначе «занятие»  не —
+        # двойной пробел.
+        when_part = f" {when}" if when else ""
         if lesson_over:
-            text = f"Занятие «{title}» {when} уже прошло — спасибо, что откликнулся!"
+            text = f"Занятие «{title}»{when_part} уже прошло — спасибо, что откликнулся!"
         else:
-            text = f"Понял, на «{title}» {when} не сможешь. Спасибо, что откликнулся!"
+            text = f"Понял, на «{title}»{when_part} не сможешь. Спасибо, что откликнулся!"
         await call.message.edit_text(
             text, reply_markup=support_flip_keyboard(call_id, "skip")
         )

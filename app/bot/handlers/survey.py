@@ -16,7 +16,7 @@ from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
-from app.services.schedule import format_lesson_at
+from app.services.schedule import as_utc, format_lesson_at, utc_now
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -36,6 +36,11 @@ async def on_attendance(call: CallbackQuery) -> None:
             return
         if survey.status == SurveyStatus.closed:
             await call.answer("Опрос уже закрыт — занятие прошло", show_alert=True)
+            return
+        # status закрывается только 15-минутным тиком scheduler'а — без этой
+        # проверки можно флипнуть ответ уже начавшегося занятия в это окно.
+        if as_utc(survey.lesson_at) <= utc_now():
+            await call.answer("Занятие уже началось — поздно отвечать", show_alert=True)
             return
         person = await persons_svc.get_in_group(s, survey.group_id, call.from_user.id)
         if person is None:

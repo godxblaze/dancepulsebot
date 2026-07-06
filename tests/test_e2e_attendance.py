@@ -21,6 +21,7 @@ from app.bot.handlers.lesson_cancel import (
     cb_lesson_cancel_other,
     cb_lesson_cancel_pick,
     lesson_cancel_reason_cancel,
+    lesson_cancel_reason_confirm,
     lesson_cancel_reason_typed,
 )
 from app.db.models import (
@@ -175,6 +176,37 @@ async def test_support_attendance_toggle(db) -> None:
         assert (await s.get(Person, sup_id)).helped_count == 1
 
 
+async def test_support_attendance_toggle_rejects_claim_from_other_survey(db) -> None:
+    """supatt:<survey_id>:<claim_id> должен проверять, что claim_id реально
+    принадлежит ЭТОМУ survey_id — иначе подделанный callback мог отметить явку
+    саппорта чужого занятия (другой группы/школы) через claim_id напрямую."""
+    bot = FakeBot()
+    gid_a, _, code_a = await make_group(teacher_tg=TEACHER_TG, teacher_name="Owner")
+    survey_a = await _closed_survey_with_roster(gid_a)
+
+    gid_b, _, code_b = await make_group(teacher_tg=901, teacher_name="Другой")
+    survey_b = await _closed_survey_with_roster(gid_b)
+    async with session_scope() as s:
+        group_b = await groups_svc.get_group(s, gid_b)
+        sup, _ = await persons_svc.add_to_group(s, group_b, 720, "u", "Чужой саппорт")
+        await persons_svc.set_gender(s, sup.id, Gender.male)
+        call_b = await supports_svc.create_call(
+            s, survey_b, Gender.male, 1, SupportCallStatus.open
+        )
+        await supports_svc.claim(s, call_b.id, sup.id)
+        sup_id = sup.id
+    async with session_scope() as s:
+        claim_b_id = (await supports_svc.claimed_supports_for_survey(s, survey_b))[0][1].id
+
+    roster = SentMessage(bot, TEACHER_TG, "")
+    # survey_id из школы A, но claim_id — из школы B (подделанный/чужой callback)
+    tap = cb(f"supatt:{survey_a}:{claim_b_id}:x:0", TEACHER_TG, message=roster)
+    await cb_support_attendance_toggle(tap)
+    assert any("не найден" in a[0] for a in tap.answers)
+    async with session_scope() as s:
+        assert (await s.get(Person, sup_id)).helped_count == 0  # не тронут
+
+
 # ── lesson cancellation ──────────────────────────────────────────────
 
 
@@ -238,8 +270,15 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
     assert state.state == lc.CancelLesson.reason
 
     reason_msg = FakeMessage(fake_user(TEACHER_TG), text="Зал занят", bot=bot)
-    await lesson_cancel_reason_typed(reason_msg, state, bot)
-    assert reason_msg.replies and "отменено" in reason_msg.replies[0].text
+    await lesson_cancel_reason_typed(reason_msg, state)
+    assert state.state == lc.CancelLesson.confirm_reason
+    assert reason_msg.replies and "Зал занят" in reason_msg.replies[0].text
+
+    confirm_msg = SentMessage(bot, TEACHER_TG, "")
+    await lesson_cancel_reason_confirm(
+        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state, bot
+    )
+    assert "отменено" in confirm_msg.text
 
     async with session_scope() as s:
         assert await cancellations_svc.is_cancelled(s, gid, dt)
@@ -360,6 +399,41 @@ async def test_cancel_confirm_screen_abandoned_no_cancel(db, monkeypatch) -> Non
         assert not await cancellations_svc.is_cancelled(s, gid, dt)
 
 
+async def test_cancel_typed_reason_requires_explicit_confirm(db, monkeypatch) -> None:
+    """Раньше ЛЮБОЙ текст в пределах REASON_STALE_AFTER исполнял отмену сразу —
+    случайное не-по-теме сообщение («Привет, как дела?») тоже отменило бы
+    занятие. Теперь ввод текста только показывает confirm-экран; занятие не
+    отменяется, пока препод явно не подтвердит тапом."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+
+    state = FakeFSM()
+    await cb_lesson_cancel_other(
+        cb(f"grpcancelother:{gid}:{ts}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, "")),
+        state,
+    )
+    msg = FakeMessage(fake_user(TEACHER_TG), text="Привет, как дела?", bot=bot)
+    await lesson_cancel_reason_typed(msg, state)
+
+    # занятие ЕЩЁ не отменено — только показан confirm с этим текстом
+    async with session_scope() as s:
+        assert not await cancellations_svc.is_cancelled(s, gid, dt)
+    assert state.state == lc.CancelLesson.confirm_reason
+    assert msg.replies and "Привет, как дела?" in msg.replies[0].text
+
+    # явное подтверждение — вот теперь отменяет
+    confirm_msg = SentMessage(bot, TEACHER_TG, "")
+    await lesson_cancel_reason_confirm(
+        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state, bot
+    )
+    async with session_scope() as s:
+        assert await cancellations_svc.is_cancelled(s, gid, dt)
+
+
 async def test_cancel_other_reason_stale_flow_does_not_cancel(db, monkeypatch) -> None:
     """«Другое» → пользователь пропал >10 мин → случайный текст спустя час НЕ
     исполняет отмену (протухший FSM-state)."""
@@ -381,8 +455,9 @@ async def test_cancel_other_reason_stale_flow_does_not_cancel(db, monkeypatch) -
     # со stale-state) не должен исполнить отмену.
     _pin_now(monkeypatch, now + timedelta(hours=1))
     msg = FakeMessage(fake_user(TEACHER_TG), text="Привет, как дела?", bot=bot)
-    await lesson_cancel_reason_typed(msg, state, bot)
+    await lesson_cancel_reason_typed(msg, state)
     assert msg.replies and "устарел" in msg.replies[0].text
+    assert state.state is None
     assert state.state is None  # state всё равно очищен
     async with session_scope() as s:
         assert not await cancellations_svc.is_cancelled(s, gid, dt)

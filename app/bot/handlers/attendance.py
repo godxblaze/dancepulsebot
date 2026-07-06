@@ -46,10 +46,13 @@ async def cb_attendance_pick_lesson(call: CallbackQuery) -> None:
         await call.answer("Нет прошедших занятий", show_alert=True)
         return
     items = [(s.id, format_lesson_at(s.lesson_at, tz=tz_name)) for s in surveys]
-    await call.message.edit_text(
-        f"{ui.EDIT} Какое занятие «{title}» отметить?",
-        reply_markup=closed_surveys_keyboard(group_id, items),
-    )
+    try:
+        await call.message.edit_text(
+            f"{ui.EDIT} Какое занятие «{title}» отметить?",
+            reply_markup=closed_surveys_keyboard(group_id, items),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("attendance_pick_lesson edit_text: %s", e)
     await call.answer()
 
 
@@ -86,12 +89,15 @@ async def _render_attendance_roster(
     )
     if support_items:
         head += f"\n{ui.SUPPORT} — саппорты; отметь, кто реально пришёл выручить."
-    await call.message.edit_text(
-        head,
-        reply_markup=attendance_mark_keyboard(
-            survey_id, group_id, items, page=page, supports=support_items
-        ),
-    )
+    try:
+        await call.message.edit_text(
+            head,
+            reply_markup=attendance_mark_keyboard(
+                survey_id, group_id, items, page=page, supports=support_items
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("attendance_roster edit_text: %s", e)
 
 
 @router.callback_query(F.data.startswith("atnpg:"))
@@ -133,11 +139,14 @@ async def _render_walk_in_picker(
             show_alert=True,
         )
         return
-    await call.message.edit_text(
-        "➕ Кого добавить как «был на занятии»?\n"
-        "Здесь только люди, которых ты уже видел в других группах.",
-        reply_markup=walk_in_picker_keyboard(survey_id, group_id, candidates, page=page),
-    )
+    try:
+        await call.message.edit_text(
+            "➕ Кого добавить как «был на занятии»?\n"
+            "Здесь только люди, которых ты уже видел в других группах.",
+            reply_markup=walk_in_picker_keyboard(survey_id, group_id, candidates, page=page),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("walk_in_picker edit_text: %s", e)
 
 
 @router.callback_query(F.data.startswith("atnwk:"))
@@ -240,6 +249,12 @@ async def cb_support_attendance_toggle(call: CallbackQuery) -> None:
             return
         claim = await s.get(SupportClaim, claim_id)
         if claim is None:
+            await call.answer("Саппорт не найден", show_alert=True)
+            return
+        support_call = await supports_svc.get_call(s, claim.support_call_id)
+        if support_call is None or support_call.survey_id != survey_id:
+            # claim_id не принадлежит этому survey_id — подделанный/чужой
+            # callback (иначе можно было бы отметить явку по чужому занятию).
             await call.answer("Саппорт не найден", show_alert=True)
             return
         cur = claim.attended

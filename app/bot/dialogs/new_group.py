@@ -289,7 +289,14 @@ async def _on_teachers_skip(
 
 
 async def _finish_new_group(target: Message, manager: DialogManager) -> None:
-    """Создаёт группу из накопленных dialog_data и шлёт invite-QR."""
+    """Создаёт группу из накопленных dialog_data и шлёт invite-QR.
+
+    Флаг ставится синхронно (без await до него) — двойной тап «Пропустить»/
+    Enter на шаге «преподаватели» иначе создал бы две одинаковые группы
+    (тот же паттерн, что и broadcast-lock в misc_dialogs.py)."""
+    if manager.dialog_data.get("_finishing"):
+        return
+    manager.dialog_data["_finishing"] = True
     from app.bot.utils import derive_group_name
     from app.services.schedule import format_weekdays
 
@@ -472,6 +479,7 @@ new_group_dialog = Dialog(
             id="venue_new_addr_skip",
             on_click=_on_venue_new_addr_skip,
         ),
+        SwitchTo(Const("◀ Назад"), id="venue_new_addr_back", state=NewGroupSG.venue_new_name),
         state=NewGroupSG.venue_new_address,
     ),
     Window(

@@ -5,12 +5,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from html import escape
 from typing import Any
 
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
@@ -62,8 +63,15 @@ async def _on_create_school_typed(
         admin.has_completed_setup = True
         await s.flush()
         school_name = school.name
+        already_had_school = existing is not None
+    if already_had_school:
+        # У admin'а уже была своя школа (напр. повторный визит в этот wizard) —
+        # честно говорим, что новую не завели, а не врём про «создана».
+        head = f"У тебя уже есть школа «{escape(school_name)}» — новую заводить не стал."
+    else:
+        head = f"✅ Школа «{escape(school_name)}» создана."
     await message.answer(
-        f"✅ Школа «{escape(school_name)}» создана.\n\n"
+        f"{head}\n\n"
         f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
         f"в карточке школы можно пригласить co-админа.",
         parse_mode=ParseMode.HTML,
@@ -198,6 +206,7 @@ edit_name_dialog = Dialog(
         Cancel(Const("⏭ Отмена")),
         getter=_edit_name_getter,
         state=EditNameSG.name,
+        parse_mode=ParseMode.HTML,
     ),
 )
 
@@ -278,6 +287,17 @@ async def _on_broadcast_send(
             sent += 1
         except (TelegramForbiddenError, TelegramNotFound):
             blocked += 1
+        except TelegramRetryAfter as e:
+            # Telegram flood-control — ждём и пробуем один раз ещё, а не
+            # молча считаем это «не доехало» (школа маленькая, но рассылка
+            # разом на всю группу вполне может упереться в лимит).
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.send_message(p.tg_user_id, body, parse_mode=ParseMode.HTML)
+                sent += 1
+            except Exception as e2:  # noqa: BLE001
+                log.warning("broadcast retry to %s failed: %s", p.tg_user_id, e2)
+                failed += 1
         except Exception as e:  # noqa: BLE001
             log.warning("broadcast to %s failed: %s", p.tg_user_id, e)
             failed += 1

@@ -45,8 +45,8 @@ def _match(people: list, query: str) -> list:
 async def on_search_query(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     data = await state.get_data()
-    await state.clear()
     if not text or text.startswith("/"):
+        await state.clear()
         await message.answer("Поиск отменён.")
         return
     kind = data.get("search_kind")
@@ -57,17 +57,26 @@ async def on_search_query(message: Message, state: FSMContext) -> None:
         async with session_scope() as s:
             teacher = await admins_svc.get_by_tg_id(s, tg_id)
             if teacher is None:
+                await state.clear()
                 return
             people = _match(await persons_svc.admin_visible_persons(s, teacher.id), text)
             levels = await persons_svc.admin_pool_levels(s, teacher.id)
         if not people:
+            await state.clear()
             await message.answer(f"По «{text}» никого. Открой 🆘 Саппорты заново.")
             return
+        # Выходим из состояния поиска, но НЕ чистим данные целиком: фильтр
+        # остаётся «прилипшим» в FSM, чтобы тап по пулу (cb_pool_toggle/
+        # cb_pool_page в pool.py) перерисовывал тот же отфильтрованный список,
+        # а не весь пул — иначе фильтр терялся после первого же тапа.
+        await state.set_state(None)
+        await state.update_data(pool_search_query=text)
         await message.answer(
             f"🔍 «{text}» — {len(people)}:", reply_markup=pool_keyboard(people, levels)
         )
         return
 
+    await state.clear()
     if kind == "walkin":
         survey_id, group_id = int(ctx[0]), int(ctx[1])
         async with session_scope() as s:

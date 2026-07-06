@@ -278,6 +278,28 @@ async def test_invite_decline_and_expired(db) -> None:
     assert "устарела" in consumed_msg.text
 
 
+async def test_invite_double_accept_race_only_first_wins(db) -> None:
+    """Двое приняли одну и ту же co-admin-ссылку одновременно — раньше оба
+    консьюмились (check-then-act), оба становились co-admin'ами. consume_invite
+    теперь атомарный UPDATE ... WHERE used_at IS NULL: второй вызов должен
+    проиграть гонку независимо от того, что invite ещё выглядел валидным на
+    момент чтения."""
+    _, sid, _ = await make_group()
+    async with session_scope() as s:
+        invite = await schools_svc.create_invite(s, sid)
+        admin_a = await admins_svc.get_or_create(s, 601, "a", "A")
+        admin_b = await admins_svc.get_or_create(s, 602, "b", "B")
+        # Оба «увидели» invite валидным до того, как кто-то его закрыл.
+        assert schools_svc.invite_is_valid(invite)
+        first = await schools_svc.consume_invite(s, invite, admin_a.id)
+        second = await schools_svc.consume_invite(s, invite, admin_b.id)
+    assert first is True
+    assert second is False
+    async with session_scope() as s:
+        invite = await schools_svc.get_invite(s, invite.code)
+        assert invite.used_by_admin_id == admin_a.id  # проигравший не перезаписал
+
+
 async def test_school_delete(db) -> None:
     bot = FakeBot()
     gid, sid, _ = await make_group()

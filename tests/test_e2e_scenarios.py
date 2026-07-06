@@ -51,7 +51,14 @@ from tests._fakes import (
 )
 
 _MSK = ZoneInfo("Europe/Moscow")
-LESSON = datetime(2026, 6, 1, 19, 0, tzinfo=_MSK).astimezone(UTC)  # Monday 19:00
+# Занятие через 14 дней, 19:00 МСК — фиксированная календарная дата рано или
+# поздно оказывается в прошлом (on_attendance теперь гвардит на
+# as_utc(lesson_at) <= utc_now()), а срок от «сейчас» — нет.
+LESSON = (
+    (datetime.now(UTC).astimezone(_MSK) + timedelta(days=14))
+    .replace(hour=19, minute=0, second=0, microsecond=0)
+    .astimezone(UTC)
+)
 TEACHER_TG = 100
 
 
@@ -638,7 +645,8 @@ async def test_pool_level_cycle(db, monkeypatch) -> None:
         await cb_pool_toggle(
             FakeCallback(
                 f"tpool:{person_id}", teacher, message=SentMessage(None, TEACHER_TG, "")
-            )
+            ),
+            FakeFSM(),
         )
         async with session_scope() as s:
             teacher_row = await admins_svc.get_by_tg_id(s, TEACHER_TG)

@@ -144,6 +144,16 @@ async def test_today_view(db, monkeypatch) -> None:
     bad = cb("today:bogus", TEACHER_TG, message=msg)
     await cb_today_switch(bad)
 
+    # double-tap same span → Telegram would raise "message is not modified" —
+    # handler must swallow it, not crash the callback.
+    class _UnmodifiableMessage:
+        async def edit_text(self, *args, **kwargs):
+            raise Exception("Bad Request: message is not modified")
+
+    dup = cb("today:day", TEACHER_TG, message=_UnmodifiableMessage())
+    await cb_today_switch(dup)  # не должно бросить
+    assert len(dup.answers) == 1  # call.answer() всё равно вызван
+
 
 async def test_stats_and_export(db, monkeypatch) -> None:
     bot = FakeBot()
@@ -177,6 +187,15 @@ async def test_stats_and_export(db, monkeypatch) -> None:
     await cb_stats_scope(cb("statsscope:mine", TEACHER_TG, message=msg))
     await cb_stats_scope(cb("statsscope:school", TEACHER_TG, message=msg))
 
+    # double-tap same scope → Telegram "message is not modified" — swallowed.
+    class _UnmodifiableMessage:
+        async def edit_text(self, *args, **kwargs):
+            raise Exception("Bad Request: message is not modified")
+
+    dup = cb("statsscope:school", TEACHER_TG, message=_UnmodifiableMessage())
+    await cb_stats_scope(dup)  # не должно бросить
+    assert len(dup.answers) == 1
+
     # export via /export and via the stats button
     exp = FakeMessage(fake_user(TEACHER_TG), bot=bot)
     await cmd_export(exp, bot)
@@ -197,7 +216,7 @@ async def test_pool_config(db) -> None:
 
     # empty pool first
     empty = FakeMessage(fake_user(TEACHER_TG), bot=bot)
-    await cmd_pool(empty)
+    await cmd_pool(empty, FakeFSM())
     assert "Пул пуст" in empty.replies[0].text
 
     # add a pool member, re-open
@@ -208,7 +227,7 @@ async def test_pool_config(db) -> None:
         await persons_svc.set_pool_level(s, t.id, p.id, 2)
 
     pool = FakeMessage(fake_user(TEACHER_TG), bot=bot)
-    await cmd_pool(pool)
+    await cmd_pool(pool, FakeFSM())
     assert "пул" in pool.replies[0].text.lower()
 
     pool_msg = pool.replies[0]
@@ -227,8 +246,8 @@ async def test_pool_config(db) -> None:
         assert t.recruit_mode == "open_race"
 
     # back to pool, paginate, invite link
-    await cb_pool_back(cb("poolback", TEACHER_TG, message=pool_msg))
-    await cb_pool_page(cb("poolpg:0", TEACHER_TG, message=pool_msg))
+    await cb_pool_back(cb("poolback", TEACHER_TG, message=pool_msg), FakeFSM())
+    await cb_pool_page(cb("poolpg:0", TEACHER_TG, message=pool_msg), FakeFSM())
     inv = cb("poolinvite", TEACHER_TG, message=pool_msg)
     await cb_pool_invite(inv, bot)
     assert any("Ссылка-приглашение саппорта" in r.text for r in pool_msg.replies)
@@ -323,6 +342,31 @@ async def test_ping_pending(db) -> None:
     await cb_ping_pending(ping, bot)
     assert any("Пингнул" in a[0] for a in ping.answers)
     assert bot.sent_to(551) and bot.sent_to(552)  # both got the re-ask
+
+
+async def test_ping_pending_double_tap_is_throttled(db) -> None:
+    """Повторный тап «напомнить» сразу после первого не должен задваивать
+    рассылку студентам — cooldown 60с на survey_id."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    for tg, name, g in ((551, "Аня", Gender.female), (552, "Боря", Gender.male)):
+        await join_via_link(bot, code, tg, name, g)
+    async with session_scope() as s:
+        survey, _ = await surveys_svc.get_or_create_survey(
+            s, gid, SurveyKind.attendance, LESSON
+        )
+        members = await persons_svc.group_members(s, gid)
+        await surveys_svc.ensure_responses(s, survey.id, [p.id for p in members])
+        survey_id = survey.id
+
+    ping1 = cb(f"ping:{survey_id}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, ""))
+    await cb_ping_pending(ping1, bot)
+    before_551 = len(bot.sent_to(551))
+
+    ping2 = cb(f"ping:{survey_id}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, ""))
+    await cb_ping_pending(ping2, bot)
+    assert any("подожди" in a[0].lower() for a in ping2.answers)
+    assert len(bot.sent_to(551)) == before_551  # второй тап никого не пингует
 
 
 async def test_ping_pending_skips_undelivered(db) -> None:

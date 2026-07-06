@@ -22,10 +22,13 @@ API:
 """
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+
+log = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -47,8 +50,8 @@ def school_tz_zone(tz_name: str | None = None) -> ZoneInfo:
     if tz_name:
         try:
             return ZoneInfo(tz_name)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("Невалидный TZ %r, фолбэк на %s: %s", tz_name, settings.timezone, e)
     return ZoneInfo(settings.timezone)
 
 

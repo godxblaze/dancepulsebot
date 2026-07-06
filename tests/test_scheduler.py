@@ -375,8 +375,9 @@ async def test_tick_pings_admin_when_no_replies_to_support(db, freeze) -> None:
         await s.flush()
         call_id = call.id
 
-    # tick за пределами окна опросов — обработает только stale-supports
-    freeze(datetime(2026, 5, 26, 6, 0))
+    # tick за пределами окна опросов (до открытия, не после занятия — иначе
+    # нудж «напиши лично» сам по себе подавляется гвардом «занятие уже прошло»)
+    freeze(datetime(2026, 5, 23, 6, 0))
     bot = FakeBot()
     await sched.tick(bot)
 
@@ -391,3 +392,38 @@ async def test_tick_pings_admin_when_no_replies_to_support(db, freeze) -> None:
     async with session_scope() as s:
         c = await s.get(SupportCall, call_id)
         assert c.no_reply_notified is True
+
+
+async def test_reactivate_does_not_double_message_freshly_polled_lapsed(db, freeze) -> None:
+    """Лапседа (пропустил REACTIVATE_MISSES=2 закрытых занятия) не должно
+    задваивать сообщениями в тот же тик, где ему только что ушёл обычный
+    опрос — _maybe_reactivate теперь идёт ДО _poll_group, так что до
+    появления survey текущего занятия он тихо выходит (find_attendance_survey
+    вернёт None), а не бьёт «давно не видели» через секунду после «придёшь?»."""
+    from app.db.models import Answer
+
+    group_id = await _make_group(n_students=0)
+    async with session_scope() as s:
+        group = await groups.get_group(s, group_id)
+        lapsed, _ = await persons.add_to_group(s, group, 300, "u", "Лапсед")
+        for when in (_msk(2026, 5, 11, 19, 0), _msk(2026, 5, 18, 19, 0)):
+            sv, _ = await surveys.get_or_create_survey(s, group_id, SurveyKind.attendance, when)
+            sv.status = SurveyStatus.closed
+            await surveys.ensure_responses(s, sv.id, [lapsed.id])
+            await surveys.record_answer(s, sv.id, lapsed.id, Answer.no)
+
+    # Первый тик текущего занятия: survey ещё не существует, когда должен
+    # отработать _maybe_reactivate (он теперь первый в очереди) — реактивации
+    # в этом тике быть не должно, только обычный опрос.
+    freeze(datetime(2026, 5, 25, 9, 0))
+    bot = FakeBot()
+    await sched.tick(bot)
+    assert sum(1 for m in bot.sent if m.chat_id == 300) == 1  # только обычный опрос
+    assert not any("соскучились" in m.text for m in bot.sent if m.chat_id == 300)
+
+    # Второй тик (15 мин спустя, тот же now): survey/Response уже есть,
+    # лапсед ещё не ответил — теперь реактивация корректно срабатывает.
+    await sched.tick(bot)
+    assert any(
+        m.chat_id == 300 and "соскучились" in m.text for m in bot.sent
+    )

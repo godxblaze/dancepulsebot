@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -15,18 +16,26 @@ from app.services.schedule import as_utc
 # счётчика до commit'а вызывающей сессии. Вызывающий держит его как
 # `async with supports.call_lock(call_id):` ВОКРУГ своего session_scope — иначе
 # commit (и, значит, видимость вставки другим сессиям) окажется вне блокировки.
-# Ключ включает id текущего loop'а: asyncio.Lock привязан к loop'у, на котором был
+# Ключ — сам loop (не id(loop)): asyncio.Lock привязан к loop'у, на котором был
 # впервые захвачен, и падает при переиспользовании в другом (в тестах pytest-asyncio
-# даёт свой loop на тест). В проде loop один навсегда → эффективно пер-call.
-_call_locks: dict[tuple[int, int], asyncio.Lock] = {}
+# даёт свой loop на тест). WeakKeyDictionary + сам объект loop'а, а не его id(),
+# исключает коллизию, если Python переиспользует id() сборранного GC loop'а под
+# новый объект между тестами. В проде loop один навсегда → эффективно пер-call.
+_call_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def call_lock(call_id: int) -> asyncio.Lock:
-    key = (id(asyncio.get_running_loop()), call_id)
-    lock = _call_locks.get(key)
+    loop = asyncio.get_running_loop()
+    per_loop = _call_locks.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _call_locks[loop] = per_loop
+    lock = per_loop.get(call_id)
     if lock is None:
         lock = asyncio.Lock()
-        _call_locks[key] = lock
+        per_loop[call_id] = lock
     return lock
 
 
@@ -136,10 +145,21 @@ async def unclaim(
         survey = await session.get(Survey, call.survey_id)
         if survey is not None and as_utc(survey.lesson_at) <= now:
             return False  # занятие уже прошло — не откатываем явку задним числом
+    # Заполненность ДО удаления — единственный сигнал «почему closed» без
+    # отдельного поля: если filled>=needed, call закрылся именно от заполнения
+    # нормы, и освободившийся слот реально свободен. Если filled<needed при
+    # closed — это был dismiss («Не сейчас») или phase-2 «баланс сложился»
+    # (сознательное решение закрыть НЕСМОТРЯ на недобор); безусловный reopen
+    # тут воскресил бы call, который лид/система закрыли намеренно.
+    filled_before = await count_claims(session, call_id) if call is not None else 0
     await session.delete(row)
     await session.flush()
     await _recount_helped(session, person_id)
-    if call is not None and call.status == SupportCallStatus.closed:
+    if (
+        call is not None
+        and call.status == SupportCallStatus.closed
+        and filled_before >= call.needed
+    ):
         call.status = SupportCallStatus.open
     await session.flush()
     return True

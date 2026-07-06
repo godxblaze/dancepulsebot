@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Answer,
     Gender,
+    LessonCancellation,
     Membership,
     Person,
     Response,
@@ -207,16 +208,29 @@ async def mark_summary_sent(session: AsyncSession, survey_id: int) -> None:
     )
 
 
+def _not_cancelled(query_group_id_col, query_lesson_at_col):
+    """Анти-джойн против LessonCancellation: отменённое занятие закрывает свой
+    Survey (см. lesson_cancel.py), и без этого фильтра оно неотличимо от
+    реально прошедшего — засоряет историю посещаемости и B5-стрик."""
+    cancelled = select(LessonCancellation.id).where(
+        LessonCancellation.group_id == query_group_id_col,
+        LessonCancellation.lesson_at == query_lesson_at_col,
+    )
+    return ~cancelled.exists()
+
+
 async def recent_closed_surveys(
     session: AsyncSession, group_id: int, limit: int = 5
 ) -> list[Survey]:
-    """Closed attendance surveys, newest first."""
+    """Closed attendance surveys, newest first. Отменённые занятия исключены —
+    их Survey тоже закрыт, но занятия не было."""
     stmt = (
         select(Survey)
         .where(
             Survey.group_id == group_id,
             Survey.kind == SurveyKind.attendance,
             Survey.status == SurveyStatus.closed,
+            _not_cancelled(Survey.group_id, Survey.lesson_at),
         )
         .order_by(Survey.lesson_at.desc())
         .limit(limit)
@@ -237,6 +251,7 @@ async def lapsed_members(
             Survey.group_id == group_id,
             Survey.kind == SurveyKind.attendance,
             Survey.status == SurveyStatus.closed,
+            _not_cancelled(Survey.group_id, Survey.lesson_at),
         )
         .order_by(Survey.lesson_at.desc())
         .limit(k)

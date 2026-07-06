@@ -21,6 +21,7 @@ from app.bot.handlers._access import accessible_group
 from app.bot.keyboards import (
     MENU_TEXTS,
     confirm_cancel_lesson_keyboard,
+    confirm_typed_cancel_reason_keyboard,
     pick_lesson_to_cancel_keyboard,
 )
 from app.bot.states import CancelLesson
@@ -72,10 +73,11 @@ async def cb_lesson_cancel_pick(call: CallbackQuery) -> None:
             label = format_lesson_at(dt, "%d.%m (%a) в %H:%M", tz=tz_name)
             items.append((int(dt.timestamp()), label, cancelled))
         title = format_group_title(group)
-    await call.message.edit_text(
-        f"Отменить какое занятие «{title}»?",
-        reply_markup=pick_lesson_to_cancel_keyboard(group_id, items),
-    )
+    if call.message:
+        await call.message.edit_text(
+            f"Отменить какое занятие «{title}»?",
+            reply_markup=pick_lesson_to_cancel_keyboard(group_id, items),
+        )
     await call.answer()
 
 
@@ -99,13 +101,14 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
             await schools_svc.get_timezone(s, group.school_id)
             if group.school_id else None
         )
-    await call.message.edit_text(
-        f"Отменить занятие «{title}» {format_lesson_at(lesson_at, tz=tz_name)}?\n\n"
-        f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
-        f"уйдёт уведомление об отмене.\n\n"
-        f"Выбери причину — отмена исполнится сразу по тапу:",
-        reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
-    )
+    if call.message:
+        await call.message.edit_text(
+            f"Отменить занятие «{title}» {format_lesson_at(lesson_at, tz=tz_name)}?\n\n"
+            f"Бот не разошлёт опрос; всем кто уже ответил «приду» и саппортам "
+            f"уйдёт уведомление об отмене.\n\n"
+            f"Выбери причину — отмена исполнится сразу по тапу:",
+            reply_markup=confirm_cancel_lesson_keyboard(group_id, ts),
+        )
     await call.answer()
 
 
@@ -145,21 +148,48 @@ async def lesson_cancel_reason_cancel(message: Message, state: FSMContext) -> No
 
 @router.message(CancelLesson.reason, F.text, ~F.text.in_(MENU_TEXTS))
 async def lesson_cancel_reason_typed(
-    message: Message, state: FSMContext, bot: Bot
+    message: Message, state: FSMContext
 ) -> None:
+    """Не исполняем отмену сразу по любому тексту — даже в пределах
+    REASON_STALE_AFTER это может оказаться не причиной отмены, а случайным
+    сообщением не по теме. Просим явное подтверждение с показом причины."""
     data = await state.get_data()
     asked_at = data.get("asked_at")
-    await state.clear()
     if asked_at is None or utc_now().timestamp() - asked_at > REASON_STALE_AFTER.total_seconds():
         # Флоу протух (>10 мин без ответа) — не исполняем отмену по случайному
         # тексту, введённому куда-то в другой момент.
+        await state.clear()
         await message.answer("Флоу отмены устарел — начни заново через карточку группы.")
         return
     reason = (message.text or "").strip() or None
-    result = await _do_cancel_lesson(
-        message.from_user.id, int(data["group_id"]), int(data["ts"]), reason, bot
+    group_id, ts = int(data["group_id"]), int(data["ts"])
+    await state.set_state(CancelLesson.confirm_reason)
+    await state.update_data(reason=reason)
+    reason_line = f"«{reason}»" if reason else "без причины"
+    await message.answer(
+        f"Отменить занятие с причиной {reason_line}?",
+        reply_markup=confirm_typed_cancel_reason_keyboard(group_id, ts),
     )
-    await message.answer(result)
+
+
+@router.callback_query(CancelLesson.confirm_reason, F.data.startswith("grpcancelreasonok:"))
+async def lesson_cancel_reason_confirm(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Подтверждение введённой текстом причины — реальное исполнение отмены."""
+    data = await state.get_data()
+    await state.clear()
+    parts = (call.data or "").split(":")
+    group_id, ts = int(parts[1]), int(parts[2])
+    # group_id/ts из callback_data должны совпасть с тем, что уже в FSM —
+    # защита от «подтверждения» чужого/устаревшего флоу.
+    if group_id != int(data.get("group_id", -1)) or ts != int(data.get("ts", -1)):
+        await call.answer("Флоу отмены устарел — начни заново.", show_alert=True)
+        return
+    result = await _do_cancel_lesson(
+        call.from_user.id, group_id, ts, data.get("reason"), bot
+    )
+    if call.message:
+        await call.message.edit_text(result)
+    await call.answer()
 
 
 async def _do_cancel_lesson(

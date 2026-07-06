@@ -337,3 +337,73 @@ async def test_escalate_coexists_with_topup(db) -> None:
         assert call.status == SupportCallStatus.open  # уже добираем достаточно
         assert call.topup_done is True  # top-up отработал поверх escalate
 
+
+async def _balanced_lesson_with_female_pool(mode: str):
+    """3 vs 3 (баланс), потом две девушки отменяются → дыра 2 девушки. Пул
+    lead'а — 2 девушки-саппорта, чтобы фаза 2 было кого звать."""
+    async with session_scope() as s:
+        t = await admins_svc.get_or_create(s, 100, "teach", "Препод")
+        await admins_svc.set_recruit_mode(s, t.id, mode)
+        g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        uid = 200
+        for gender, count in ((Gender.male, 3), (Gender.female, 3)):
+            for _ in range(count):
+                p, _ = await persons.add_to_group(s, g, uid, "u", f"P{uid}")
+                await persons.set_gender(s, p.id, gender)
+                await surveys.record_answer(s, survey.id, p.id, Answer.yes)
+                uid += 1
+        pool_group = await groups.create_group(s, t.id, "Пул", "2", "20:00", 18)
+        for tg in (901, 902):
+            fp, _ = await persons.add_to_group(s, pool_group, tg, "u", f"F{tg}")
+            await persons.set_gender(s, fp.id, Gender.female)
+            await persons.set_pool_level(s, t.id, fp.id, 2)
+        return SimpleNamespace(group=g, survey_id=survey.id)
+
+
+async def test_escalate_topup_picker_gets_grace_before_escalating(db) -> None:
+    """Свежий picker, переоткрытый фазой 2 под escalate (support_cutoff_hours=3ч
+    по умолчанию, раньше ESCALATE_LEAD=6ч), не должен эскалировать на первом же
+    следующем тике — lead получает ESCALATE_MIN_GRACE, чтобы среагировать."""
+    ctx = await _balanced_lesson_with_female_pool("escalate")
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=20))
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        assert call.status == SupportCallStatus.closed  # вечером баланс ок
+        females = [
+            p for p in await persons.group_members(s, ctx.group.id)
+            if p.gender == Gender.female
+        ]
+        for p in females[:2]:
+            await surveys.record_answer(s, ctx.survey_id, p.id, Answer.no)
+
+    # фаза 2 переоткрывает call под свежую дыру (topup_hours=3ч по умолчанию)
+    await sched._maybe_recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=3))
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        assert call.status == SupportCallStatus.pending
+        assert call.topup_done is True
+
+    # следующий тик (~15 мин) — до бага эскалировало бы немедленно
+    bot2 = FakeBot()
+    await sched._maybe_recruit(
+        bot2, ctx.group, LESSON, LESSON - timedelta(hours=2, minutes=45)
+    )
+    assert not any("Нужна помощь" in t for _, t in bot2.sent)
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        assert call.status == SupportCallStatus.pending  # ещё не эскалировал
+
+    # grace (1ч) прошёл — теперь эскалирует как обычно
+    bot3 = FakeBot()
+    await sched._maybe_recruit(
+        bot3, ctx.group, LESSON, LESSON - timedelta(hours=1, minutes=45)
+    )
+    assert any("Нужна помощь" in t for _, t in bot3.sent)
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        assert call.status == SupportCallStatus.open
+

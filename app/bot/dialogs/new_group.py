@@ -40,15 +40,27 @@ _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 # ── getters ──────────────────────────────────────────────────────────
 
 
+async def _target_school(session, manager: DialogManager, admin_id: int):
+    """Школа, в которой создаётся группа: если мастер запущен из карточки
+    конкретной школы (school_id в start_data — так co-admin заводит группу в
+    чужой школе), берём её; иначе — собственная школа admin'а (создаём при
+    первой необходимости). Без этого style/venue-подсказки и новый зал уходили
+    в owned-школу co-admin'а, даже когда группа создаётся в чужой."""
+    school_id = (manager.start_data or {}).get("school_id")
+    if school_id is not None:
+        return await schools_svc.get_school(session, school_id)
+    return await schools_svc.get_or_create_owned_school(session, admin_id)
+
+
 async def _style_getter(dialog_manager: DialogManager, **_: Any) -> dict:
-    """Style-подсказки из собственной школы admin'а."""
+    """Style-подсказки из школы, в которой создаётся группа."""
     user = user_from(dialog_manager)
     suggestions: list[str] = []
     if user is not None:
         async with session_scope() as s:
             admin = await admins_svc.get_by_tg_id(s, user.id)
             if admin is not None:
-                school = await schools_svc.get_owned_school(s, admin.id)
+                school = await _target_school(s, dialog_manager, admin.id)
                 if school is not None:
                     suggestions = await groups_svc.school_styles(s, school.id)
     return {"styles": list(enumerate(suggestions[:6]))}
@@ -65,7 +77,7 @@ async def _venue_getter(dialog_manager: DialogManager, **_: Any) -> dict:
         async with session_scope() as s:
             admin = await admins_svc.get_by_tg_id(s, user.id)
             if admin is not None:
-                school = await schools_svc.get_owned_school(s, admin.id)
+                school = await _target_school(s, dialog_manager, admin.id)
                 if school is not None:
                     venues = await venues_svc.school_venues(s, school.id)
     items: list[tuple[int, str]] = []
@@ -91,7 +103,7 @@ async def _on_style_pick(
         async with session_scope() as s:
             admin = await admins_svc.get_by_tg_id(s, user.id)
             if admin is not None:
-                school = await schools_svc.get_owned_school(s, admin.id)
+                school = await _target_school(s, manager, admin.id)
                 if school is not None:
                     suggestions = await groups_svc.school_styles(s, school.id)
     try:
@@ -182,8 +194,8 @@ async def _on_venue_pick(
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, user.id)
         venue = await venues_svc.get_venue(s, venue_id)
-        owned = await schools_svc.get_owned_school(s, admin.id) if admin else None
-        if admin is None or venue is None or owned is None or venue.school_id != owned.id:
+        target = await _target_school(s, manager, admin.id) if admin else None
+        if admin is None or venue is None or target is None or venue.school_id != target.id:
             await call.answer()
             return
     manager.dialog_data["venue_id"] = venue_id
@@ -224,7 +236,9 @@ async def _save_new_venue(manager: DialogManager, address: str | None) -> None:
         admin = await admins_svc.get_by_tg_id(s, user.id)
         if admin is None:
             return
-        school = await schools_svc.get_or_create_owned_school(s, admin.id)
+        school = await _target_school(s, manager, admin.id)
+        if school is None:
+            return
         venue = await venues_svc.create_venue(s, school.id, name, address)
         manager.dialog_data["venue_id"] = venue.id
 

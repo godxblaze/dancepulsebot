@@ -261,6 +261,27 @@ async def group_admin_tg_ids(
     return await schools_svc.member_tg_ids(session, school_id)
 
 
+async def clear_admin_from_school(
+    session: AsyncSession, school_id: int, admin_id: int
+) -> None:
+    """Снятому co-admin'у больше не место в маршрутизации групп его бывшей
+    школы: убираем GroupAdmin-ответственность и куратора добора (fallback на
+    owner'а школы через resolve_recruit_lead), иначе он продолжит получать
+    recruit-пинги и блокировать реальных членов школы (can_manage_recruit)."""
+    stmt = select(Group.id).where(Group.school_id == school_id)
+    group_ids = list((await session.execute(stmt)).scalars().all())
+    if not group_ids:
+        return
+    for group_id in group_ids:
+        await set_group_admin(session, group_id, admin_id, assigned=False)
+    lead_stmt = select(Group).where(
+        Group.school_id == school_id, Group.recruit_lead_admin_id == admin_id,
+    )
+    for group in (await session.execute(lead_stmt)).scalars().all():
+        group.recruit_lead_admin_id = None
+    await session.flush()
+
+
 async def can_manage_recruit(
     session: AsyncSession, group_id: int, school_id: int | None, admin_id: int
 ) -> bool:

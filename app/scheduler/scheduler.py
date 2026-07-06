@@ -56,6 +56,12 @@ POLL_BEFORE_FIX = timedelta(hours=4)
 # Режим escalate: если lead не разобрал pending-picker, а до занятия осталось не
 # больше этого — бот авто-докидывает (open-race fallback). Используется в _maybe_recruit.
 ESCALATE_LEAD = timedelta(hours=6)
+# Минимальное время жизни pending-picker'а, переоткрытого фазой 2, под escalate
+# (см. _maybe_recruit) — отсчитывается от lesson_at - support_cutoff_hours, не
+# от ESCALATE_LEAD. Без этого зазора при дефолтных настройках (cutoff=3ч <
+# ESCALATE_LEAD=6ч) свежий picker эскалировал бы на следующем же тике (~15 мин),
+# не дав lead'у шанса среагировать.
+ESCALATE_MIN_GRACE = timedelta(hours=1)
 
 
 def _answer_deadline(
@@ -550,7 +556,17 @@ async def _maybe_recruit(
             and call.status == SupportCallStatus.pending
         ):
             # ── Режим escalate: human-first picker, авто-фолбэк при бездействии ──
-            if now < lesson_at - ESCALATE_LEAD:
+            # Обычный дедлайн — ESCALATE_LEAD до занятия. Но если pending — это
+            # свежий picker, который фаза 2 только что переоткрыла (topup_done),
+            # тот дедлайн при дефолтных настройках (cutoff=3ч < ESCALATE_LEAD=6ч)
+            # уже в прошлом — picker эскалировал бы на первом же тике после
+            # переоткрытия. Даём вместо этого ESCALATE_MIN_GRACE от момента,
+            # когда фаза 2 могла его переоткрыть (lesson_at − topup_hours).
+            if call.topup_done:
+                deadline = lesson_at - timedelta(hours=topup_hours) + ESCALATE_MIN_GRACE
+            else:
+                deadline = lesson_at - ESCALATE_LEAD
+            if now < deadline:
                 return  # до окна эскалации — как curated (picker уже у lead'а)
             # lead не разобрал pending за окно до занятия → авто open-race fallback.
             # Фильтруем уже согласившихся (по образцу фазы-2) — иначе эскалация

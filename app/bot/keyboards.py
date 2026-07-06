@@ -308,6 +308,9 @@ def school_card_keyboard(
             text="➕ Пригласить co-админа", callback_data=f"schlink:{school_id}",
         )])
         rows.append([InlineKeyboardButton(
+            text="👥 Состав школы", callback_data=f"schmembers:{school_id}",
+        )])
+        rows.append([InlineKeyboardButton(
             text="🌐 Часовой пояс", callback_data=f"schtz:{school_id}",
         )])
         rows.append([InlineKeyboardButton(

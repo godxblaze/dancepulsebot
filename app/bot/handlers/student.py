@@ -158,6 +158,11 @@ async def _support_invite_start(
     async with session_scope() as s:
         admin = await admins_svc.get_by_support_code(s, code)
         school = await schools_svc.get_owned_school(s, admin.id) if admin else None
+        if school is None and admin is not None:
+            # Co-admin без собственной школы — саппорта записываем в первую
+            # школу, где он member (иначе ссылка мертва для наёмных преподов).
+            memberships = await schools_svc.admin_schools(s, admin.id)
+            school = memberships[0][0] if memberships else None
         if admin is None or school is None:
             await message.answer("Ссылка-приглашение саппорта не найдена или устарела.")
             return

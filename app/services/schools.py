@@ -92,6 +92,19 @@ async def get_owned_school(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def primary_school_id(session: AsyncSession, admin_id: int) -> int | None:
+    """Школа, чей контент считаем «рабочим» для admin'а: собственная, а если
+    её нет (co-admin без owned-школы) — первая, где он member. None если
+    admin ни в одной школе. Используется там, где раньше слепо брали
+    get_owned_school и co-admin получал b""/пустой список (/export, топ
+    саппортов, давно отсутствующие)."""
+    owned = await get_owned_school(session, admin_id)
+    if owned is not None:
+        return owned.id
+    schools = await admin_schools(session, admin_id)
+    return schools[0][0].id if schools else None
+
+
 async def admin_schools(
     session: AsyncSession, admin_id: int
 ) -> list[tuple[School, SchoolMemberRole]]:
@@ -100,7 +113,9 @@ async def admin_schools(
         select(School, SchoolMember.role)
         .join(SchoolMember, SchoolMember.school_id == School.id)
         .where(SchoolMember.admin_id == admin_id)
-        .order_by(SchoolMember.role, School.id)
+        # .desc(): роль хранится строкой ("owner"/"coadmin") — обычный
+        # (возрастающий) order_by дал бы "coadmin" раньше "owner" лексикографически.
+        .order_by(SchoolMember.role.desc(), School.id)
     )
     return [(s, r) for s, r in (await session.execute(stmt)).all()]
 
@@ -192,7 +207,9 @@ async def remove_coadmin(
     session: AsyncSession, school_id: int, admin_id: int
 ) -> bool:
     """Снимает coadmin-членство. Owner'а через этот хелпер не снимешь —
-    защита от случайного потерять-школу."""
+    защита от случайного потерять-школу. Заодно чистит его как ответственного
+    и куратора добора групп этой школы (см. clear_admin_from_school) — иначе
+    он остаётся получателем recruit-пингов и блокирует реальных членов школы."""
     stmt = select(SchoolMember).where(
         SchoolMember.school_id == school_id,
         SchoolMember.admin_id == admin_id,
@@ -203,6 +220,8 @@ async def remove_coadmin(
         return False
     await session.delete(member)
     await session.flush()
+    from app.services import groups as groups_svc
+    await groups_svc.clear_admin_from_school(session, school_id, admin_id)
     return True
 
 

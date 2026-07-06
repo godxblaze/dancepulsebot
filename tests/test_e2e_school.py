@@ -15,6 +15,7 @@ from app.bot.handlers.school import (
     cb_school_leave,
     cb_school_leave_confirm,
     cb_school_list,
+    cb_school_members,
     cb_school_remove_member,
     cb_school_tz,
     cb_school_tz_set,
@@ -144,6 +145,85 @@ async def test_coadmin_full_lifecycle(db) -> None:
     assert any("Убран" in a[0] for a in rem.answers)
     async with session_scope() as s:
         assert await schools_svc.get_role(s, sid, coadmin_id) is None
+
+
+async def test_schmembers_screen_reachable_from_card_and_removes(db) -> None:
+    """Раньше schrem был недостижим из UI — school_members_keyboard никто не
+    рендерил. Проверяем реальный путь: карточка → «Состав школы» → тап-удаление."""
+    bot = FakeBot()
+    _, sid, _ = await make_group()
+    coadmin_id = await _accept_coadmin(bot, sid, 201, "Петя")
+
+    # карточка школы содержит кнопку в «Состав школы»
+    card = SentMessage(bot, TEACHER_TG, "")
+    await cb_school_card(cb(f"schcard:{sid}", TEACHER_TG, message=card))
+    members_btn = [
+        b for row in card.reply_markup.inline_keyboard for b in row
+        if b.callback_data == f"schmembers:{sid}"
+    ]
+    assert members_btn, "нет кнопки «Состав школы» в карточке"
+
+    # тап по ней → экран состава с кнопкой убрать co-admin'а
+    await cb_school_members(cb(f"schmembers:{sid}", TEACHER_TG, message=card))
+    assert "Состав школы" in card.text
+    rem_btn = [
+        b for row in card.reply_markup.inline_keyboard for b in row
+        if b.callback_data == f"schrem:{sid}:{coadmin_id}"
+    ]
+    assert rem_btn, "нет кнопки удаления co-admin'а на экране состава"
+
+    # тап по ней — реально убирает
+    await cb_school_remove_member(cb(f"schrem:{sid}:{coadmin_id}", TEACHER_TG, message=card), bot)
+    async with session_scope() as s:
+        assert await schools_svc.get_role(s, sid, coadmin_id) is None
+    assert "Петя" not in card.text  # экран состава перерисован без него
+
+    # co-admin не может открыть экран состава (owner-only guard)
+    guard = cb(f"schmembers:{sid}", 999, message=SentMessage(bot, 999, ""))
+    await cb_school_members(guard)
+    assert any(a[1] for a in guard.answers)  # show_alert
+
+
+async def test_remove_coadmin_clears_recruit_lead_and_group_admin(db) -> None:
+    """Снятый co-admin не должен оставаться куратором добора/ответственным за
+    группы школы — иначе он продолжает получать recruit-пинги, а реальные
+    члены школы блокируются can_manage_recruit."""
+    bot = FakeBot()
+    gid, sid, _ = await make_group()
+    coadmin_id = await _accept_coadmin(bot, sid, 202, "Настя")
+
+    async with session_scope() as s:
+        await groups_svc.set_recruit_lead(s, gid, coadmin_id)
+        await groups_svc.set_group_admin(s, gid, coadmin_id, assigned=True)
+        group = await groups_svc.get_group(s, gid)
+        assert group.recruit_lead_admin_id == coadmin_id
+        assert coadmin_id in await groups_svc.group_admin_ids(s, gid)
+
+    rem = cb(f"schrem:{sid}:{coadmin_id}", TEACHER_TG, message=SentMessage(bot, TEACHER_TG, ""))
+    await cb_school_remove_member(rem, bot)
+
+    async with session_scope() as s:
+        group = await groups_svc.get_group(s, gid)
+        assert group.recruit_lead_admin_id is None  # fallback на owner'а школы
+        assert coadmin_id not in await groups_svc.group_admin_ids(s, gid)
+        lead = await groups_svc.resolve_recruit_lead(s, group)
+        assert lead is not None and lead.tg_user_id == TEACHER_TG
+
+
+async def test_admin_schools_owner_school_sorts_first(db) -> None:
+    """admin_schools() обещает «owner-школа всегда первая» — SchoolMemberRole
+    хранится строкой ("owner"/"coadmin"), обычный order_by дал бы "coadmin"
+    раньше "owner" лексикографически (баг из аудита), нужен .desc()."""
+    _, own_sid, _ = await make_group(teacher_tg=TEACHER_TG, teacher_name="Owner")
+    _, other_sid, _ = await make_group(teacher_tg=901, teacher_name="Другой owner")
+    async with session_scope() as s:
+        owner = await admins_svc.get_by_tg_id(s, TEACHER_TG)
+        await schools_svc.add_coadmin(s, other_sid, owner.id)
+        result = await schools_svc.admin_schools(s, owner.id)
+    assert [school.id for school, _ in result] == [own_sid, other_sid]
+    assert [role for _, role in result] == [
+        SchoolMemberRole.owner, SchoolMemberRole.coadmin,
+    ]
 
 
 async def test_coadmin_leaves(db) -> None:

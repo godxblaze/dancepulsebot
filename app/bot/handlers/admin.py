@@ -122,12 +122,13 @@ async def _partner_link(bot: Bot, code: str) -> str:
 
 
 async def _with_admin_school(session, admin, call, empty):
-    """Resolve the admin's owned school, then `await call(school_id)`. If the admin
-    owns no school, return `empty` instead. Shared guard for the `_*_for` helpers."""
-    school = await schools_svc.get_owned_school(session, admin.id)
-    if school is None:
+    """Resolve the admin's primary school (owned, else first membership —
+    иначе co-admin без owned-школы получал b""/[] на /export и статистике),
+    then `await call(school_id)`. If the admin is in no school, return `empty`."""
+    school_id = await schools_svc.primary_school_id(session, admin.id)
+    if school_id is None:
         return empty
-    return await call(school.id)
+    return await call(school_id)
 
 
 async def _styles_for(session, admin) -> list[str]:
@@ -622,12 +623,22 @@ async def newgroup_start(message: Message, dialog_manager: DialogManager) -> Non
         return
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
-    if teacher is None:
-        return
+        if teacher is None:
+            return
+        all_schools = await schools_svc.admin_schools(s, teacher.id)
     from aiogram_dialog import StartMode
 
     from app.bot.dialogs import NewGroupSG
-    await dialog_manager.start(NewGroupSG.style, mode=StartMode.RESET_STACK)
+    if len(all_schools) > 1:
+        # Co-admin нескольких школ (или owner + co-admin где-то ещё) — молча
+        # выбирать нельзя, иначе группа рискует уйти не в ту школу (см.
+        # phantom-school находку аудита). Пусть выберет явно через карточку школы.
+        await message.answer(
+            "У тебя несколько школ — открой 🏫 Школа → нужную → «➕ Новая группа»."
+        )
+        return
+    data = {"school_id": all_schools[0][0].id} if all_schools else None
+    await dialog_manager.start(NewGroupSG.style, mode=StartMode.RESET_STACK, data=data)
 
 
 async def _format_group_summary(session, group: Group) -> str:

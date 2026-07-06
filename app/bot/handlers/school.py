@@ -25,6 +25,7 @@ from app.bot.keyboards import (
     groups_keyboard,
     school_accept_keyboard,
     school_card_keyboard,
+    school_members_keyboard,
     school_picker_keyboard,
     school_tz_keyboard,
 )
@@ -223,7 +224,32 @@ async def cb_school_remove_member(call: CallbackQuery, bot: Bot) -> None:
     else:
         await call.answer("Уже не co-admin", show_alert=True)
     if call.message is not None:
-        await _render_school_card(call.message, school_id, me.id, edit=True)
+        await _render_school_members(call, school_id)
+
+
+async def _render_school_members(call: CallbackQuery, school_id: int) -> None:
+    async with session_scope() as s:
+        members = await schools_svc.members_of(s, school_id)
+        school = await schools_svc.get_school(s, school_id)
+        school_name = school.name if school else "—"
+    if call.message:
+        await call.message.edit_text(
+            f"👥 Состав школы «{escape(school_name)}» — тап по co-admin'у убирает его.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=school_members_keyboard(school_id, members, is_owner=True),
+        )
+
+
+@router.callback_query(F.data.startswith("schmembers:"))
+async def cb_school_members(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_owner(s, school_id, admin.id):
+            await call.answer("Только owner видит управление составом", show_alert=True)
+            return
+    await _render_school_members(call, school_id)
+    await call.answer()
 
 
 async def _render_school_tz(call: CallbackQuery, school_id: int) -> None:

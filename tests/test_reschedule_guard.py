@@ -6,9 +6,9 @@
 from datetime import UTC, datetime, timedelta
 
 from app.bot.handlers.school import cb_school_tz_set
-from app.db.models import Answer, SurveyKind, SurveyStatus
+from app.db.models import Answer, Gender, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
-from app.services import admins, cancellations, groups, persons, schools, surveys
+from app.services import admins, cancellations, groups, persons, schools, supports, surveys
 from tests._e2e_helpers import TEACHER_TG, cb
 from tests._fakes import FakeBot, SentMessage
 
@@ -55,6 +55,28 @@ async def test_lesson_time_change_without_open_survey_no_notify(db) -> None:
         group = await groups.get_group(s, g.id)
         notify_tgs = await groups.update_group(s, group, lesson_time="20:00")
     assert notify_tgs == []
+
+
+async def test_lesson_time_change_closes_live_support_call(db) -> None:
+    """close_orphaned_survey не должен оставлять добор жить сам по себе,
+    отвязанным от survey: scheduler._maybe_recruit больше не найдёт его (survey
+    закрыт), но лид ещё мог бы тапнуть по старому picker'у и позвать саппорта на
+    занятие, которого больше нет по этому расписанию. Call создан и закоммичен
+    ДО правки расписания отдельной транзакцией — как в реальности (scheduler
+    заводит call вчера вечером, правка расписания происходит отдельным событием
+    сегодня), а не в одной транзакции с самой правкой."""
+    gid, _sid, survey_id = await _group_with_open_survey()
+    async with session_scope() as s:
+        call = await supports.create_call(
+            s, survey_id, Gender.male, 2, SupportCallStatus.pending
+        )
+        call_id = call.id
+    async with session_scope() as s:
+        group = await groups.get_group(s, gid)
+        await groups.update_group(s, group, lesson_time="20:00")
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+        assert call.status == SupportCallStatus.closed
 
 
 async def test_unrelated_field_change_does_not_trigger_guard(db) -> None:

@@ -1,16 +1,19 @@
 """B16: recruit_mode — enum, миграция, сеттер (Phase 1) + режимы scheduler
 (Phase 2: curated / open_race / auto_top)."""
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
+from app.bot.handlers.recruit import cb_support_pick_nope
 from app.db.models import Answer, Gender, RecruitMode, SupportCallStatus, SurveyKind
 from app.db.session import _apply_lightweight_migrations, engine, session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import groups, persons, schools, supports, surveys
+from tests._fakes import FakeCallback, fake_user
 
 _MSK = ZoneInfo("Europe/Moscow")
 # Занятие через 14 дней, 19:00 МСК (как в test_recruit). -3ч заведомо после
@@ -280,6 +283,36 @@ async def test_escalate_does_not_fire_twice(db) -> None:
     bot2 = FakeBot()
     await sched._maybe_recruit(bot2, ctx.group, LESSON, _IN_ESC)
     assert not any("Нужна помощь" in t for _, t in bot2.sent)
+
+
+async def test_escalate_and_picknope_concurrent_consistent(db) -> None:
+    """Пилот-аудит: scheduler-эскалация (pending→open + инвайты) раньше мутировала
+    call без call_lock, которым обвязаны tap-хендлеры — «лид тапает ‘Не сейчас’ в
+    то же мгновение, что scheduler эскалирует» могло перезаписать dismiss открытием
+    и разослать инвайты вопреки решению препода. Теперь оба пути берут
+    call_lock(call_id): исход согласован — либо dismiss выиграл (closed, эскалация
+    видит не-pending и молчит), либо эскалация выиграла (open + инвайты, dismiss
+    находит call уже не pending и отказывает). Никогда «инвайты ушли, но
+    call закрыт как ‘не сейчас’»."""
+    ctx = await _lesson_needing_two_males("escalate")
+    await _escalate_pending(ctx)  # pending picker
+    async with session_scope() as s:
+        call = await supports.get_call_for_survey(s, ctx.survey_id)
+        call_id = call.id
+    bot = FakeBot()
+    nope = FakeCallback(f"picknope:{call_id}", fake_user(ctx.lead_tg))
+    await asyncio.gather(
+        sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC),
+        cb_support_pick_nope(nope),
+    )
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+    invited = any("Нужна помощь" in t for _, t in bot.sent)
+    if call.status == SupportCallStatus.closed:
+        assert not invited  # dismiss выиграл — эскалация не проскочила следом
+    else:
+        assert call.status == SupportCallStatus.open and invited  # эскалация выиграла
+    await engine.dispose()  # общая файловая тест-БД: закрыть пул после конкуренции
 
 
 async def test_curated_does_not_escalate(db) -> None:

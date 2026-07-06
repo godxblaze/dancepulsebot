@@ -16,7 +16,7 @@ from app.bot.handlers.recruit import (
     cb_support_skip,
 )
 from app.bot.keyboards import support_pick_keyboard
-from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind
+from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import engine, session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons, schools, supports, surveys
@@ -309,6 +309,21 @@ async def test_maybe_recruit_before_evening_fix_does_nothing(db) -> None:
     g, survey_id = await _imbalanced_lesson()
     bot = FakeBot()
     await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=30))
+    async with session_scope() as s:
+        assert await supports.get_call_for_survey(s, survey_id) is None
+    assert bot.sent == []
+
+
+async def test_maybe_recruit_skips_closed_orphaned_survey(db) -> None:
+    """Осиротевший survey (закрыт правкой расписания/TZ, см. close_orphaned_survey)
+    не должен получать добор от scheduler'а — ни новый call, ни продолжение
+    существующего. Иначе добор жил бы сам по себе, отвязанный от занятия."""
+    g, survey_id = await _imbalanced_lesson(males_yes=1, females_yes=4)
+    async with session_scope() as s:
+        survey = await surveys.get_survey(s, survey_id)
+        survey.status = SurveyStatus.closed
+    bot = FakeBot()
+    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         assert await supports.get_call_for_survey(s, survey_id) is None
     assert bot.sent == []

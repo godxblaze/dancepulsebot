@@ -17,7 +17,7 @@ from app.bot.keyboards import (
     support_ask_keyboard,
     support_pick_keyboard,
 )
-from app.bot.utils import format_group_title, format_place
+from app.bot.utils import format_group_title, format_place, send_with_retry
 from app.core.alerts import alert_developer
 from app.core.config import settings
 from app.core.logging import LOG_FILE
@@ -138,7 +138,8 @@ async def _poll_group(
     sent = 0
     for p in to_poll:
         try:
-            msg = await bot.send_message(
+            msg = await send_with_retry(
+                bot,
                 p.tg_user_id,
                 text,
                 reply_markup=attendance_keyboard(survey_id),
@@ -260,7 +261,7 @@ async def _maybe_send_summary(
     terminal = 0
     for tg in admin_tg_ids:
         try:
-            await bot.send_message(tg, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            await send_with_retry(bot, tg, text, parse_mode=ParseMode.HTML, reply_markup=markup)
             delivered += 1
         except (TelegramForbiddenError, TelegramNotFound):
             log.info("Admin tg=%s заблокировал бота — auto-summary skipped", tg)
@@ -322,8 +323,8 @@ async def send_support_invites(
     sent = 0
     for tg_id, _name in invited:
         try:
-            await bot.send_message(
-                tg_id, text, reply_markup=support_ask_keyboard(call_id)
+            await send_with_retry(
+                bot, tg_id, text, reply_markup=support_ask_keyboard(call_id)
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not invite support %s: %s", tg_id, e)
@@ -386,8 +387,8 @@ async def _send_recruit_picker(
     sent_ref: tuple[int, int] | None = None
     for tg in teacher_tgs:
         try:
-            msg = await bot.send_message(
-                tg, body, reply_markup=markup, parse_mode=ParseMode.HTML
+            msg = await send_with_retry(
+                bot, tg, body, reply_markup=markup, parse_mode=ParseMode.HTML
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not ask admin %s about supports: %s", tg, e)
@@ -472,6 +473,11 @@ async def _maybe_recruit(
         return
     send_kwargs: dict | None = None
     auto_plan: dict | None = None
+
+    # ── Фаза 0: дешёвые reads, вне лока — решаем ветку и достаём call_id (если
+    # call уже существует). Мутирующие ветки ниже re-читают call свежим внутри
+    # call_lock, а не доверяют этим (потенциально устаревшим к моменту захвата
+    # лока) значениям.
     async with session_scope() as s:
         # Добор ведёт «куратор» группы (lead) — его настройки, его пул, ему picker.
         lead = await groups_svc.resolve_recruit_lead(s, group)
@@ -488,15 +494,22 @@ async def _maybe_recruit(
         if survey is None:
             return
         survey_id = survey.id
-        call = await supports_svc.get_call_for_survey(s, survey_id)
+        if survey.status != SurveyStatus.open:
+            # Осиротел (правка расписания/TZ закрыла его через
+            # close_orphaned_survey) — добор для него больше не ведём.
+            return
+        existing_call = await supports_svc.get_call_for_survey(s, survey_id)
+        call_id = existing_call.id if existing_call is not None else None
         venue = (
             await venues_svc.get_venue(s, group.venue_id)
             if group.venue_id is not None
             else None
         )
 
-        if call is None:
-            # ── Фаза 1: вечерний разбор ──
+    if call_id is None:
+        # ── Фаза 1: вечерний разбор (call ещё не существует — никто другой не
+        # может на него ссылаться, лок не нужен) ──
+        async with session_scope() as s:
             if now < evening_fix_at(lesson_at, evening_time, tz=tz):
                 return
             male, female = await surveys_svc.gender_yes_counts(s, survey_id)
@@ -557,101 +570,113 @@ async def _maybe_recruit(
                     levels=levels, can_expand=bool(colleagues), phase2=False,
                     unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                 )
-        elif (
-            mode == RecruitMode.escalate.value
-            and call.status == SupportCallStatus.pending
-        ):
-            # ── Режим escalate: human-first picker, авто-фолбэк при бездействии ──
-            # Обычный дедлайн — ESCALATE_LEAD до занятия. Но если pending — это
-            # свежий picker, который фаза 2 только что переоткрыла (topup_done),
-            # тот дедлайн при дефолтных настройках (cutoff=3ч < ESCALATE_LEAD=6ч)
-            # уже в прошлом — picker эскалировал бы на первом же тике после
-            # переоткрытия. Даём вместо этого ESCALATE_MIN_GRACE от момента,
-            # когда фаза 2 могла его переоткрыть (lesson_at − topup_hours).
-            if call.topup_done:
-                deadline = lesson_at - timedelta(hours=topup_hours) + ESCALATE_MIN_GRACE
-            else:
-                deadline = lesson_at - ESCALATE_LEAD
-            if now < deadline:
-                return  # до окна эскалации — как curated (picker уже у lead'а)
-            # lead не разобрал pending за окно до занятия → авто open-race fallback.
-            # Фильтруем уже согласившихся (по образцу фазы-2) — иначе эскалация
-            # повторно зовёт того, кто уже claim'нул этот call.
-            claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
-            cands = await persons_svc.support_candidates(
-                s, lead_id, call.gender, group.id, group.school_id
-            )
-            candidates = [c for c in cands if c.id not in claimed_ids]
-            colleagues = await persons_svc.school_pool_candidates(
-                s, group.school_id, call.gender, group.id,
-                {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
-            )
-            # status pending→open = гард от повторной эскалации на следующем tick'е.
-            call.status = SupportCallStatus.open
-            call.created_at = datetime.now(UTC).replace(tzinfo=None)
-            call.no_reply_notified = False
-            await s.flush()
-            esc_male, esc_female = await surveys_svc.gender_yes_counts(s, survey_id)
-            auto_plan = _auto_recruit_plan(
-                group, call.id, candidates + colleagues, targets,
-                call.gender, call.needed, esc_male, esc_female, kind="open_race",
-                unknown=await surveys_svc.unknown_yes_count(s, survey_id),
-            )
-        else:
-            # ── Фаза 2: добор остатка в день занятия ──
-            if topup_hours <= 0 or call.topup_done:
-                return
-            if now < lesson_at - timedelta(hours=topup_hours):
-                return
-            call.topup_done = True
-            male, female = await surveys_svc.gender_yes_counts(s, survey_id)
-            claimed = await supports_svc.count_claims(s, call.id)
-            had_recruit = call.needed > 0
-            sec_male = claimed if had_recruit and call.gender == Gender.male else 0
-            sec_female = claimed if had_recruit and call.gender == Gender.female else 0
-            eff_male, eff_female = male + sec_male, female + sec_female
-            deficit = abs(eff_male - eff_female)
-            short = Gender.male if eff_male < eff_female else Gender.female
-            remaining = max(0, call.needed - claimed)
-            if deficit < threshold:
-                if call.status != SupportCallStatus.closed:
-                    call.status = SupportCallStatus.closed  # баланс сложился
-                await s.flush()
-                return
-            if (had_recruit and short != call.gender) or deficit <= remaining:
-                # перекос ушёл в другую сторону (редко, не флипаем) либо уже
-                # добираем достаточно — ничего нового не спрашиваем.
-                await s.flush()
-                return
-            # Нужно БОЛЬШЕ `short`, чем уже добираем → расширяем и зовём ещё.
-            call.gender = short
-            call.needed = claimed + deficit
-            call.status = SupportCallStatus.pending
-            call.no_reply_notified = False
-            # Свежий picker на бо́льшую дыру — разрешаем и nudge заново, если
-            # owner и его проигнорит.
-            call.pending_notified = False
-            # сбрасываем таймер «тишины» на момент добора (иначе stale-пинг
-            # сработает сразу — call создан ещё вечером накануне).
-            call.created_at = datetime.now(UTC).replace(tzinfo=None)
-            await s.flush()
-            claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
-            cands = await persons_svc.support_candidates(
-                s, lead_id, short, group.id, group.school_id
-            )
-            candidates = [c for c in cands if c.id not in claimed_ids]
-            levels = await persons_svc.admin_pool_levels(s, lead_id)
-            colleagues = await persons_svc.school_pool_candidates(
-                s, group.school_id, short, group.id,
-                {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
-            )
-            send_kwargs = dict(
-                teacher_tgs=targets, call_id=call.id, gender_needed=short,
-                deficit=deficit, male=eff_male, female=eff_female,
-                candidates=candidates, venue=venue, levels=levels,
-                can_expand=bool(colleagues), phase2=True,
-                unknown=await surveys_svc.unknown_yes_count(s, survey_id),
-            )
+    else:
+        # ── Call уже существует: escalate-переход и фаза-2 добора мутируют его
+        # статус/поля — та же сериализация, что у tap-хендлеров recruit.py,
+        # иначе тап «Не сейчас»/claim в это же мгновение может быть перезаписан
+        # (см. pilot_risks — scheduler-мутации без call_lock).
+        async with supports_svc.call_lock(call_id):
+            async with session_scope() as s:
+                call = await supports_svc.get_call(s, call_id)
+                if call is None:
+                    return
+                if (
+                    mode == RecruitMode.escalate.value
+                    and call.status == SupportCallStatus.pending
+                ):
+                    # ── Режим escalate: human-first picker, авто-фолбэк при бездействии ──
+                    # Обычный дедлайн — ESCALATE_LEAD до занятия. Но если pending — это
+                    # свежий picker, который фаза 2 только что переоткрыла (topup_done),
+                    # тот дедлайн при дефолтных настройках (cutoff=3ч < ESCALATE_LEAD=6ч)
+                    # уже в прошлом — picker эскалировал бы на первом же тике после
+                    # переоткрытия. Даём вместо этого ESCALATE_MIN_GRACE от момента,
+                    # когда фаза 2 могла его переоткрыть (lesson_at − topup_hours).
+                    if call.topup_done:
+                        deadline = (
+                            lesson_at - timedelta(hours=topup_hours) + ESCALATE_MIN_GRACE
+                        )
+                    else:
+                        deadline = lesson_at - ESCALATE_LEAD
+                    if now < deadline:
+                        return  # до окна эскалации — как curated (picker уже у lead'а)
+                    # lead не разобрал pending за окно до занятия → авто open-race fallback.
+                    # Фильтруем уже согласившихся (по образцу фазы-2) — иначе эскалация
+                    # повторно зовёт того, кто уже claim'нул этот call.
+                    claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
+                    cands = await persons_svc.support_candidates(
+                        s, lead_id, call.gender, group.id, group.school_id
+                    )
+                    candidates = [c for c in cands if c.id not in claimed_ids]
+                    colleagues = await persons_svc.school_pool_candidates(
+                        s, group.school_id, call.gender, group.id,
+                        {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
+                    )
+                    # status pending→open = гард от повторной эскалации на следующем tick'е.
+                    call.status = SupportCallStatus.open
+                    call.created_at = datetime.now(UTC).replace(tzinfo=None)
+                    call.no_reply_notified = False
+                    await s.flush()
+                    esc_male, esc_female = await surveys_svc.gender_yes_counts(s, survey_id)
+                    auto_plan = _auto_recruit_plan(
+                        group, call.id, candidates + colleagues, targets,
+                        call.gender, call.needed, esc_male, esc_female, kind="open_race",
+                        unknown=await surveys_svc.unknown_yes_count(s, survey_id),
+                    )
+                else:
+                    # ── Фаза 2: добор остатка в день занятия ──
+                    if topup_hours <= 0 or call.topup_done:
+                        return
+                    if now < lesson_at - timedelta(hours=topup_hours):
+                        return
+                    call.topup_done = True
+                    male, female = await surveys_svc.gender_yes_counts(s, survey_id)
+                    claimed = await supports_svc.count_claims(s, call.id)
+                    had_recruit = call.needed > 0
+                    sec_male = claimed if had_recruit and call.gender == Gender.male else 0
+                    sec_female = claimed if had_recruit and call.gender == Gender.female else 0
+                    eff_male, eff_female = male + sec_male, female + sec_female
+                    deficit = abs(eff_male - eff_female)
+                    short = Gender.male if eff_male < eff_female else Gender.female
+                    remaining = max(0, call.needed - claimed)
+                    if deficit < threshold:
+                        if call.status != SupportCallStatus.closed:
+                            call.status = SupportCallStatus.closed  # баланс сложился
+                        await s.flush()
+                        return
+                    if (had_recruit and short != call.gender) or deficit <= remaining:
+                        # перекос ушёл в другую сторону (редко, не флипаем) либо уже
+                        # добираем достаточно — ничего нового не спрашиваем.
+                        await s.flush()
+                        return
+                    # Нужно БОЛЬШЕ `short`, чем уже добираем → расширяем и зовём ещё.
+                    call.gender = short
+                    call.needed = claimed + deficit
+                    call.status = SupportCallStatus.pending
+                    call.no_reply_notified = False
+                    # Свежий picker на бо́льшую дыру — разрешаем и nudge заново, если
+                    # owner и его проигнорит.
+                    call.pending_notified = False
+                    # сбрасываем таймер «тишины» на момент добора (иначе stale-пинг
+                    # сработает сразу — call создан ещё вечером накануне).
+                    call.created_at = datetime.now(UTC).replace(tzinfo=None)
+                    await s.flush()
+                    claimed_ids = await supports_svc.claimed_person_ids(s, call.id)
+                    cands = await persons_svc.support_candidates(
+                        s, lead_id, short, group.id, group.school_id
+                    )
+                    candidates = [c for c in cands if c.id not in claimed_ids]
+                    levels = await persons_svc.admin_pool_levels(s, lead_id)
+                    colleagues = await persons_svc.school_pool_candidates(
+                        s, group.school_id, short, group.id,
+                        {c.id for c in candidates} | claimed_ids, exclude_admin_id=lead_id,
+                    )
+                    send_kwargs = dict(
+                        teacher_tgs=targets, call_id=call.id, gender_needed=short,
+                        deficit=deficit, male=eff_male, female=eff_female,
+                        candidates=candidates, venue=venue, levels=levels,
+                        can_expand=bool(colleagues), phase2=True,
+                        unknown=await surveys_svc.unknown_yes_count(s, survey_id),
+                    )
 
     if send_kwargs is not None:
         await _send_recruit_picker(
@@ -676,8 +701,8 @@ async def _maybe_recruit(
         lead_ref: tuple[int, int] | None = None
         for tg in auto_plan["lead_tgs"]:
             try:
-                msg = await bot.send_message(
-                    tg, auto_plan["lead_text"], parse_mode=ParseMode.HTML
+                msg = await send_with_retry(
+                    bot, tg, auto_plan["lead_text"], parse_mode=ParseMode.HTML
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("Could not send recruit heads-up to lead %s: %s", tg, e)
@@ -746,7 +771,8 @@ async def _maybe_remind(
     sent = 0
     for p in to_remind:
         try:
-            await bot.send_message(
+            await send_with_retry(
+                bot,
                 p.tg_user_id,
                 text,
                 reply_markup=attendance_keyboard(survey_id),
@@ -833,8 +859,8 @@ async def _maybe_reactivate(
     )
     for tg_id, pid in targets:
         try:
-            await bot.send_message(
-                tg_id, text,
+            await send_with_retry(
+                bot, tg_id, text,
                 reply_markup=attendance_keyboard(survey_id),
                 parse_mode=ParseMode.HTML,
             )
@@ -923,7 +949,7 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
     sent_call_ids: set[int] = set()
     for call_id, tg, text in no_reply_msgs + pending_msgs:
         try:
-            await bot.send_message(tg, text, parse_mode=ParseMode.HTML)
+            await send_with_retry(bot, tg, text, parse_mode=ParseMode.HTML)
             sent_call_ids.add(call_id)
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to send support notice to admin %s: %s", tg, e)

@@ -25,7 +25,7 @@ from app.bot.keyboards import (
     pick_lesson_to_cancel_keyboard,
 )
 from app.bot.states import CancelLesson
-from app.bot.utils import format_group_title
+from app.bot.utils import format_group_title, send_with_retry
 from app.db.models import Answer, Person, SupportCallStatus, SurveyStatus
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
@@ -254,7 +254,7 @@ async def _do_cancel_lesson(
     notice = f"⚠️ Занятие «{title}» {when_str} отменено.{reason_suffix}"
     for tg in yes_tg_ids:
         try:
-            await bot.send_message(tg, notice)
+            await send_with_retry(bot, tg, notice)
         except Exception as e:  # noqa: BLE001
             log.info("cancel-notice to %s failed: %s", tg, e)
     sup_notice = (
@@ -263,7 +263,7 @@ async def _do_cancel_lesson(
     )
     for tg in support_tg_ids:
         try:
-            await bot.send_message(tg, sup_notice)
+            await send_with_retry(bot, tg, sup_notice)
         except Exception as e:  # noqa: BLE001
             log.info("cancel-notice (support) to %s failed: %s", tg, e)
 
@@ -273,7 +273,7 @@ async def _do_cancel_lesson(
     )
     for tg in coadmin_tg_ids:
         try:
-            await bot.send_message(tg, coadmin_notice)
+            await send_with_retry(bot, tg, coadmin_notice)
         except Exception as e:  # noqa: BLE001
             log.info("cancel-notice (coadmin) to %s failed: %s", tg, e)
 

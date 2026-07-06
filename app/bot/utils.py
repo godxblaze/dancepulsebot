@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import io
+from typing import Any
 
 import segno
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.types import Message
 
 from app.bot.ui import bar  # re-export: единственная реализация бара живёт в ui
 from app.db.models import Group, Venue
@@ -15,6 +19,7 @@ __all__ = [
     "format_place",
     "get_bot_username",
     "qr_png",
+    "send_with_retry",
 ]
 
 _bot_username: str | None = None
@@ -58,6 +63,18 @@ def format_group_title(group: Group) -> str:
     if parts:
         return " · ".join(parts)
     return group.name  # legacy fallback
+
+
+async def send_with_retry(bot: Bot, chat_id: int, text: str, **kwargs: Any) -> Message:
+    """bot.send_message, но на 429 (TelegramRetryAfter) спит предписанный Telegram
+    интервал и повторяет один раз — вместо того чтобы тихо потерять сообщение
+    рассылки. Любое другое исключение (включая повторный 429) пробрасывается
+    вызывающему как обычно."""
+    try:
+        return await bot.send_message(chat_id, text, **kwargs)
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        return await bot.send_message(chat_id, text, **kwargs)
 
 
 def derive_group_name(style: str | None, level: int | None) -> str:

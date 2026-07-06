@@ -84,16 +84,36 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     занятия — пересчитываемый UTC-инстант. Открытый Survey этой группы осиротел
     бы (сводка/напоминания/добор продолжат жить по старому расписанию, ответы
     потеряются, ученикам уйдёт второй «придёшь?»), а будущая LessonCancellation
-    «воскресла» бы под новым расписанием. Закрывает открытые Survey и чистит
-    будущие cancellation'ы. Возвращает admin tg_ids для уведомления — вызывающий
-    шлёт его через свой bot (см. group_admin_tg_ids)."""
+    «воскресла» бы под новым расписанием. Закрывает открытые Survey, гасит их
+    незакрытый SupportCall (иначе добор продолжил бы жить сам по себе, отвязанный
+    от survey — scheduler больше его найдёт, а лид ещё может тапнуть по старому
+    picker'у) и чистит будущие cancellation'ы. Возвращает admin tg_ids для
+    уведомления — вызывающий шлёт его через свой bot (см. group_admin_tg_ids).
+
+    Осознанно НЕ взято под supports_svc.call_lock: эта функция мутирует call в
+    УЖЕ открытой сессии вызывающего (владеет ей не она), а call_lock обязан
+    покрывать сессию целиком вплоть до commit — открыть здесь свою залоченную
+    session_scope нельзя: SQLite (один writer) тогда упирается в lock вызывающей
+    незакоммиченной транзакции и падает по busy_timeout. Остаточная гонка (админ
+    правит расписание в то же мгновение, что саппорт тапает join/dismiss по
+    этому call) не сериализована этим путём — узкое окно, редкий триггер
+    (осознанно принято, по аналогии с pilot_risks в docs/PILOT_AUDIT_2026-07-02.md)."""
+    from app.db.models import SupportCallStatus
     from app.services import cancellations as cancellations_svc
+    from app.services import supports as supports_svc
     from app.services import surveys as surveys_svc
     from app.services.schedule import utc_now
 
     closed = await surveys_svc.close_open_surveys_for_group(session, group.id)
     if not closed:
         return []
+    for survey_id in closed:
+        call = await supports_svc.get_call_for_survey(session, survey_id)
+        if call is not None and call.status in (
+            SupportCallStatus.pending, SupportCallStatus.open,
+        ):
+            call.status = SupportCallStatus.closed
+    await session.flush()
     await cancellations_svc.delete_future(session, group.id, utc_now())
     if group.school_id is None:
         return []

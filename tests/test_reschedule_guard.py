@@ -8,7 +8,16 @@ from datetime import UTC, datetime, timedelta
 from app.bot.handlers.school import cb_school_tz_set
 from app.db.models import Answer, Gender, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
-from app.services import admins, cancellations, groups, persons, schools, supports, surveys
+from app.services import (
+    admins,
+    cancellations,
+    groups,
+    persons,
+    place_overrides,
+    schools,
+    supports,
+    surveys,
+)
 from tests._e2e_helpers import TEACHER_TG, cb
 from tests._fakes import FakeBot, SentMessage
 
@@ -55,6 +64,26 @@ async def test_lesson_time_change_without_open_survey_no_notify(db) -> None:
         group = await groups.get_group(s, g.id)
         notify_tgs = await groups.update_group(s, group, lesson_time="20:00")
     assert notify_tgs == []
+
+
+async def test_reschedule_without_open_survey_cleans_future_lesson_edits(db) -> None:
+    """Регресс: правка расписания, когда опрос НЕ открыт (типовой случай —
+    опрос живёт только в lead-окне), обязана всё равно подчистить будущие
+    отмены и override'ы места, иначе они «воскреснут» при совпадении
+    lesson_at под новым расписанием."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, TEACHER_TG, "t", "Препод")
+        g = await groups.create_group(s, t.id, "Бачата", "0", "19:00", 18)
+        gid = g.id
+        await cancellations.cancel(s, gid, LESSON)
+        await place_overrides.set_place(s, gid, LESSON, "Зал Б")
+    async with session_scope() as s:
+        group = await groups.get_group(s, gid)
+        notify_tgs = await groups.update_group(s, group, lesson_time="20:00")
+    assert notify_tgs == []  # опрос не осиротел — уведомлять некого
+    async with session_scope() as s:
+        assert not await cancellations.is_cancelled(s, gid, LESSON)
+        assert await place_overrides.get_place(s, gid, LESSON) is None
 
 
 async def test_lesson_time_change_closes_live_support_call(db) -> None:

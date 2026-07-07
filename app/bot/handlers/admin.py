@@ -359,6 +359,10 @@ async def _devstats_snapshot(s) -> list[dict]:
             .join(Group, Survey.group_id == Group.id)
             .where(Group.school_id == school.id)
         )).scalar_one()
+        # SQLite отдаёт naive-UTC — нормализуем к aware (конвенция persons.py),
+        # иначе sort ниже падает на сравнении с aware-фоллбэком datetime.min.
+        if last_activity is not None and last_activity.tzinfo is None:
+            last_activity = last_activity.replace(tzinfo=UTC)
         total, yes, marked, attended = (await s.execute(
             select(
                 func.count(Response.id),

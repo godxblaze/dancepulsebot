@@ -196,6 +196,28 @@ async def test_devstats_dev_only(db, monkeypatch) -> None:
     assert "последняя активность" in dev.replies[0]
 
 
+async def test_devstats_mixed_activity_does_not_crash(db) -> None:
+    """Регресс: школа с опросами (naive datetime из SQLite func.max) рядом со
+    школой без опросов (aware-фоллбэк datetime.min) роняла сортировку
+    TypeError'ом «can't compare offset-naive and offset-aware datetimes»."""
+    from app.bot.handlers.admin import _devstats_snapshot
+
+    async with session_scope() as s:
+        active = await admins.get_or_create(s, 201, "a1", "Активный")
+        await admins.get_or_create(s, 202, "a2", "Тихий")
+        g = await groups.create_group(s, active.id, "Сальса", "0", "19:00", 18)
+        await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, datetime(2026, 5, 25, 16, 0, tzinfo=UTC)
+        )
+        rows = await _devstats_snapshot(s)
+
+    assert len(rows) == 2
+    # активная школа первой, её last_activity нормализован к aware-UTC
+    assert rows[0]["last_activity"] is not None
+    assert rows[0]["last_activity"].tzinfo is not None
+    assert rows[1]["last_activity"] is None
+
+
 # ── /today ───────────────────────────────────────────────────────────
 
 

@@ -89,8 +89,11 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     «воскресла» бы под новым расписанием. Закрывает открытые Survey, гасит их
     незакрытый SupportCall (иначе добор продолжил бы жить сам по себе, отвязанный
     от survey — scheduler больше его найдёт, а лид ещё может тапнуть по старому
-    picker'у) и чистит будущие cancellation'ы. Возвращает admin tg_ids для
-    уведомления — вызывающий шлёт его через свой bot (см. group_admin_tg_ids).
+    picker'у) и чистит будущие cancellation'ы/place override'ы. Чистка идёт
+    независимо от того, был ли открытый опрос: отмена/зал привязаны к lesson_at
+    старого расписания и «воскресли» бы под новым и без опроса. Возвращает
+    admin tg_ids для уведомления — вызывающий шлёт его через свой bot
+    (см. group_admin_tg_ids).
 
     Осознанно НЕ взято под supports_svc.call_lock: эта функция мутирует call в
     УЖЕ открытой сессии вызывающего (владеет ей не она), а call_lock обязан
@@ -108,8 +111,6 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     from app.services.schedule import utc_now
 
     closed = await surveys_svc.close_open_surveys_for_group(session, group.id)
-    if not closed:
-        return []
     for survey_id in closed:
         call = await supports_svc.get_call_for_survey(session, survey_id)
         if call is not None and call.status in (
@@ -119,7 +120,7 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     await session.flush()
     await cancellations_svc.delete_future(session, group.id, utc_now())
     await overrides_svc.delete_future(session, group.id, utc_now())
-    if group.school_id is None:
+    if not closed or group.school_id is None:
         return []
     return await group_admin_tg_ids(session, group.id, group.school_id)
 

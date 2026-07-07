@@ -97,7 +97,9 @@ dancepulsebot/
 │   ├── scheduler/   # scheduler.py — tick: опросы, авто-сводки, auto-reminders (4h/1h), рекрутинг, stale support pings
 │   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports, schedule
 │   └── main.py
-├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes
+├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes,
+│                    # dev_stats (текстовый срез), stats_dashboard (HTML-дашборд: `python -m scripts.stats_dashboard`,
+│                    # `--demo` — сэмпл-данные; тренд отклика, баланс пар, матрица посещаемости; read-only)
 └── tests/           # 352 теста, pytest + ruff гонятся через scripts/check.ps1
 ```
 

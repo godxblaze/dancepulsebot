@@ -26,3 +26,4 @@ e2e/web/.profile/
 .playwright-mcp/
 *.session
 *.session-journal
+stats_dashboard.html

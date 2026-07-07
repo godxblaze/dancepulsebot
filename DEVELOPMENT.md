@@ -169,10 +169,11 @@ Start-ScheduledTask -TaskName DancePulseBot   # поднять сейчас
 ## Тесты (детали)
 
 ```powershell
-pytest tests/
+pytest tests/          # серийно, ~28с
+pytest tests/ -n 8     # pytest-xdist, ~12с (так же гоняет scripts/check.ps1); -n auto не ставить
 ```
 
-352 теста. Файлы (основные):
+386 тестов. Файлы (основные):
 - `test_schedule.py` — расчёт следующего занятия (граничные случаи).
 - `test_smoke.py` — без БД (генерация join-кодов).
 - `test_surveys.py` — ядро опросов: создание, ответы, сводка, закрытие.
@@ -190,7 +191,11 @@ pytest tests/
 - `test_balance_bar.py` — живой баланс-бар при claim/skip.
 - `test_e2e_*.py` — сквозные сценарии поверх FakeBot.
 
-Тесты с БД используют временную базу через [conftest.py](tests/conftest.py).
+Тесты с БД используют временную базу через [conftest.py](tests/conftest.py): файл
+per-PID (конкурентные pytest-процессы и xdist-воркеры не мешают друг другу), схема
+строится один раз на процесс, между тестами данные сносятся одним `executescript`.
+Тест, который меняет DDL (регрессии миграций), помечай `@pytest.mark.schema_mutating` —
+conftest пересоздаст схему до и после него.
 
 ### E2E — настоящее прокликивание живого бота
 

@@ -140,10 +140,11 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 ## Тесты
 
 ```powershell
-pytest tests/
+pytest tests/          # серийно, ~28с
+pytest tests/ -n 8     # параллельно (pytest-xdist), ~12с — так гоняет и scripts/check.ps1
 ```
 
-386 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
+386 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Схема БД строится один раз на процесс, между тестами данные сносятся одним `executescript`; тесты, мутирующие DDL, помечены `@pytest.mark.schema_mutating`. Не ставь `-n auto` — на многоядерной машине старт десятков воркеров съедает выигрыш. Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
 
 ## Roadmap
 

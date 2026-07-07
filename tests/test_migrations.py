@@ -1,12 +1,16 @@
 """Регрессия на lightweight-миграции, которые свежая схема не воспроизводит."""
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import text
 
 from app.db.models import SurveyKind
 from app.db.session import _backfill_support_pool, engine, init_db, session_scope
 from app.services import admins, groups, persons, surveys
 from app.services.schedule import as_utc
+
+# Тесты дописывают/мутируют DDL мимо metadata — схему после них надо строить заново.
+pytestmark = pytest.mark.schema_mutating
 
 
 async def test_backfill_support_pool_from_legacy_support_level(db) -> None:

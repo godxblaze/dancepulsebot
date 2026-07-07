@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram_dialog import DialogManager
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from app.bot import ui
 from app.bot.commands import grant_admin_commands, revoke_admin_commands
@@ -58,10 +58,13 @@ from app.bot.utils import (
 )
 from app.core.config import settings
 from app.db.models import (
+    Answer,
     Gender,
     Group,
     Person,
+    Response,
     School,
+    SchoolMember,
     SupportCall,
     SupportCallStatus,
     Survey,
@@ -174,6 +177,17 @@ async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
         # everyone is a student by default — teacher status is granted via /grant
         await show_student_home(message)
         return
+    if dialog_manager.has_context():
+        # /start — безопасная гавань: закрыть любой зависший wizard (напр.
+        # брошенный на середине /newgroup), чтобы он не пережил рестарт бота
+        # и не перехватывал дальнейшие тапы по нижнему меню (см. ClearStaleCancelState
+        # для аналогичного случая с классическим FSM). remove_keyboard=False —
+        # старое сообщение мастера могло устареть (>48ч) и editMessageReplyMarkup
+        # на нём упал бы; сам wizard всё равно не актуален, лишняя клавиатура не страшна.
+        try:
+            await dialog_manager.reset_stack(remove_keyboard=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("reset_stack on /start failed for %s: %s", tg.id, e)
     if not admin_schools and not completed_setup:
         # Свежий admin: только что получил /grant или первый /start developer'а.
         # Первый шаг — назвать собственную школу через CreateSchool dialog.
@@ -318,6 +332,117 @@ async def cmd_status(message: Message) -> None:
         f"школ: {snap['schools']} · активных групп: {snap['groups']}\n"
         f"учеников: {snap['persons']} · открытых опросов: {snap['open_surveys']}\n"
         f"добор pending/open: {snap['pending_calls']}/{snap['open_calls']}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _devstats_snapshot(s) -> list[dict]:
+    """Per-school разрез вовлечённости за последние 4 недели для /devstats —
+    в отличие от /status (плоские суммы по всей базе), тут видно, какая школа
+    реально живёт, а какая заглохла."""
+    since = utc_now() - timedelta(weeks=4)
+    schools = (await s.execute(select(School).order_by(School.id))).scalars().all()
+    rows: list[dict] = []
+    for school in schools:
+        n_admins = (await s.execute(
+            select(func.count()).select_from(SchoolMember)
+            .where(SchoolMember.school_id == school.id)
+        )).scalar_one()
+        n_groups = (await s.execute(
+            select(func.count()).select_from(Group)
+            .where(Group.school_id == school.id, Group.active.is_(True))
+        )).scalar_one()
+        last_activity = (await s.execute(
+            select(func.max(Survey.created_at))
+            .select_from(Survey)
+            .join(Group, Survey.group_id == Group.id)
+            .where(Group.school_id == school.id)
+        )).scalar_one()
+        total, yes, marked, attended = (await s.execute(
+            select(
+                func.count(Response.id),
+                func.sum(case((Response.answer == Answer.yes, 1), else_=0)),
+                func.sum(case((Response.actually_attended.is_not(None), 1), else_=0)),
+                func.sum(case((Response.actually_attended.is_(True), 1), else_=0)),
+            )
+            .select_from(Response)
+            .join(Survey, Response.survey_id == Survey.id)
+            .join(Group, Survey.group_id == Group.id)
+            .where(
+                Group.school_id == school.id,
+                Survey.lesson_at >= since,
+                Response.answer.is_not(None),
+            )
+        )).one()
+        stuck_calls = (await s.execute(
+            select(func.count())
+            .select_from(SupportCall)
+            .join(Survey, SupportCall.survey_id == Survey.id)
+            .join(Group, Survey.group_id == Group.id)
+            .where(
+                Group.school_id == school.id,
+                Survey.lesson_at >= since,
+                SupportCall.status.in_(
+                    (SupportCallStatus.pending, SupportCallStatus.open)
+                ),
+            )
+        )).scalar_one()
+        rows.append({
+            "name": school.name,
+            "admins": n_admins,
+            "groups": n_groups,
+            "last_activity": last_activity,
+            "responded": total or 0,
+            "yes": yes or 0,
+            "marked": marked or 0,
+            "attended": attended or 0,
+            "stuck_calls": stuck_calls,
+        })
+    rows.sort(
+        key=lambda r: r["last_activity"] or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    return rows
+
+
+@router.message(Command("devstats"))
+async def cmd_devstats(message: Message) -> None:
+    """Разработчику: кто из школ реально пользуется ботом и с каким успехом
+    (отклик на опросы, реальная посещаемость, зависший добор), за 4 недели.
+    Дополняет /status — тот же гейт по settings.developer_id."""
+    tg = message.from_user
+    if tg is None or settings.developer_id <= 0 or tg.id != settings.developer_id:
+        return
+    async with session_scope() as s:
+        rows = await _devstats_snapshot(s)
+    if not rows:
+        await message.answer("Школ пока нет.")
+        return
+    blocks: list[str] = []
+    for r in rows:
+        last = f"{r['last_activity']:%d.%m.%Y}" if r["last_activity"] else "никогда"
+        lines = [
+            f"{ui.title(ui.STATS, escape(r['name']))} — "
+            f"{r['admins']} {ui.plural(r['admins'], 'админ', 'админа', 'админов')}, "
+            f"{r['groups']} {ui.plural(r['groups'], 'группа', 'группы', 'групп')}",
+            f"последняя активность: {last}",
+        ]
+        if r["responded"]:
+            pct = round(100 * r["yes"] / r["responded"])
+            lines.append(f"отклик за 4 нед.: <b>{pct}%</b> ({r['responded']} ответов)")
+            if r["marked"]:
+                pct_actual = round(100 * r["attended"] / r["marked"])
+                lines.append(
+                    f"реальная посещаемость: <b>{pct_actual}%</b> "
+                    f"(по {r['marked']} отмеченным)"
+                )
+        else:
+            lines.append("отклик за 4 нед.: нет данных")
+        if r["stuck_calls"]:
+            lines.append(f"{ui.SLEEP} зависший добор: {r['stuck_calls']}")
+        blocks.append("\n".join(lines))
+    await message.answer(
+        f"{ui.title(ui.TROPHY, 'Dev stats — по школам')}\n\n" + "\n\n".join(blocks),
         parse_mode=ParseMode.HTML,
     )
 

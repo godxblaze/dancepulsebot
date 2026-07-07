@@ -175,6 +175,27 @@ async def test_status_dev_only(db, monkeypatch) -> None:
     assert "школ:" in dev.replies[0]
 
 
+# ── /devstats (per-school разрез вовлечённости разработчику) ─────────
+
+
+async def test_devstats_dev_only(db, monkeypatch) -> None:
+    from app.bot.handlers.admin import cmd_devstats
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "developer_id", 777)
+    async with session_scope() as s:
+        await admins.get_or_create(s, 101, "t2", "T2")  # школа — от autouse-фикстуры
+    # не-разработчик — молчим
+    msg = FakeMessage(user_id=101)
+    await cmd_devstats(msg)
+    assert msg.replies == []
+    # разработчик — получает разбивку по школам
+    dev = FakeMessage(user_id=777)
+    await cmd_devstats(dev)
+    assert dev.replies and "Dev stats" in dev.replies[0]
+    assert "последняя активность" in dev.replies[0]
+
+
 # ── /today ───────────────────────────────────────────────────────────
 
 

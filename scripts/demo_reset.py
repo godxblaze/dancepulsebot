@@ -66,7 +66,7 @@ async def main() -> None:
 
             # 2. one shared venue
             venue = await venues_svc.create_venue(
-                s, sid, "Wave Dance", "Шлюзовая наб. 8с2"
+                s, sid, "Студия Ритм", "Тверская 10"
             )
 
             # 3. four groups
@@ -170,7 +170,7 @@ async def main() -> None:
         text = (
             "🆘 Нужна помощь!\n"
             f"«Хастл · ур.2» — {lesson_at:%d.%m} в {lesson_at:%H:%M}.\n"
-            "📍 Wave Dance — Шлюзовая наб. 8с2, зал 19\n"
+            "📍 Студия Ритм — Тверская 10, зал 19\n"
             "👤 Дима\n"
             "Не хватает пары — сможешь подойти выручить?"
         )

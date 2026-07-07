@@ -15,6 +15,7 @@ from app.db.models import Group, Venue
 __all__ = [
     "bar",
     "derive_group_name",
+    "format_duration",
     "format_group_title",
     "format_place",
     "get_bot_username",
@@ -50,6 +51,15 @@ def format_place(group: Group, venue: Venue | None) -> str | None:
     if group.room:
         parts.append(group.room)
     return ", ".join(parts) if parts else None
+
+
+def format_duration(minutes: int) -> str:
+    """90 → «1,5 ч», 60 → «1 ч», 45 → «45 мин»."""
+    if minutes % 60 == 0:
+        return f"{minutes // 60} ч"
+    if minutes % 30 == 0:
+        return f"{minutes // 60},5 ч"
+    return f"{minutes} мин"
 
 
 def format_group_title(group: Group) -> str:

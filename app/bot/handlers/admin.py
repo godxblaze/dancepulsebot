@@ -52,6 +52,7 @@ from app.bot.keyboards import (
     today_ping_keyboard,
 )
 from app.bot.utils import (
+    format_duration,
     format_group_title,
     get_bot_username,
     qr_png,
@@ -758,7 +759,10 @@ async def newgroup_start(message: Message, dialog_manager: DialogManager) -> Non
 
 async def _format_group_summary(session, group: Group) -> str:
     """Multi-line description used in the group card and after creation."""
-    lines = [f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"]
+    schedule = f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"
+    if group.duration_min:
+        schedule += f" ({format_duration(group.duration_min)})"
+    lines = [schedule]
     if group.style:
         lines.append(f"Направление: {escape(group.style)}")
     if group.level is not None:

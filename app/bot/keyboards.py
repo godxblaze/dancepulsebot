@@ -318,6 +318,13 @@ def school_card_keyboard(
     rows.append([InlineKeyboardButton(
         text="➕ Новая группа", callback_data=f"schnewgroup:{school_id}",
     )])
+    # Дефолты для мастера группы (площадки, связки «кто ведёт») — любому члену.
+    rows.append([InlineKeyboardButton(
+        text="📍 Площадки", callback_data=f"schvenues:{school_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="👤 Преподаватели", callback_data=f"schteachers:{school_id}",
+    )])
     if is_owner:
         rows.append([InlineKeyboardButton(
             text="➕ Пригласить co-админа", callback_data=f"schlink:{school_id}",

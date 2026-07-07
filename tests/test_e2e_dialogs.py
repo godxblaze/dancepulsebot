@@ -32,13 +32,35 @@ async def test_create_school_dialog(db) -> None:
     await client.send("/start")
     assert "название своей школе" in mock.last_message().text
 
-    # type the school name → school is created
+    # type the school name → school is created, wizard asks for the place
     await client.send("Wave Dance")
+    assert "Где проходят занятия" in mock.last_message().text
+    await client.send("Тверская 10")
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, TG)
         school = await schools_svc.get_owned_school(s, admin.id)
         assert school is not None and school.name == "Wave Dance"
+        from app.services import venues as venues_svc
+        venues = await venues_svc.school_venues(s, school.id)
+        assert [v.name for v in venues] == ["Тверская 10"]
     assert any("Wave Dance" in t and "создана" in t for t in bot.texts())
+
+
+async def test_create_school_dialog_place_skip(db) -> None:
+    """«Пропустить» на шаге места — школа без площадок, финал тот же."""
+    await _fresh_admin()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/start")
+    await client.send("Wave Dance")
+    await click(client, mock, "Пропустить")
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        school = await schools_svc.get_owned_school(s, admin.id)
+        assert school is not None
+        from app.services import venues as venues_svc
+        assert await venues_svc.school_venues(s, school.id) == []
+    assert any("создана" in t for t in bot.texts())
 
 
 async def test_create_school_dialog_honest_when_school_already_exists(db) -> None:
@@ -93,15 +115,15 @@ async def test_new_group_dialog(db) -> None:
     # weekdays → tick Вт, then Готово
     await click(client, mock, "Вт")
     await click(client, mock, "Готово")
-    # time
+    # time — свой текст всё ещё принимается наравне с кнопками 12:00–22:00
     await client.send("20:30")
-    # venue → add a new one
-    await click(client, mock, "Добавить новую")
+    # duration → pick 1,5 ч
+    await click(client, mock, "1,5 ч")
+    # venue → одной строкой, без отдельного вопроса про адрес
     await client.send("Студия Полевик")
-    await client.send("Шлюзовая 8")
     # room → type
     await client.send("зал 7")
-    # teachers → type → finishes
+    # teachers → type → finishes (и сохраняется как связка школы)
     await client.send("Маша + Петя")
 
     async with session_scope() as s:
@@ -114,11 +136,50 @@ async def test_new_group_dialog(db) -> None:
         assert g.level == 2
         assert g.weekdays == "1"  # Вт == index 1
         assert g.lesson_time == "20:30"
+        assert g.duration_min == 90
         assert g.room == "зал 7"
         assert g.teachers_note == "Маша + Петя"
         venue = await __get_venue(s, g.venue_id)
         assert venue is not None and venue.name == "Студия Полевик"
+        from app.services import teacher_presets as presets_svc
+        presets = await presets_svc.school_presets(s, g.school_id)
+        assert [p.note for p in presets] == ["Маша + Петя"]
     # invite message with the QR/link went out
+    assert any("Приглашение" in t for t in bot.texts())
+
+
+async def test_new_group_dialog_time_buttons_and_teacher_preset(db) -> None:
+    """Кнопки времени 12:00–22:00, кнопки длительности и тап по сохранённой
+    связке преподавателей — путь «всё кнопками» без единого текстового ввода
+    (кроме /newgroup)."""
+    from app.services import teacher_presets as presets_svc
+
+    gid, sid, code = await make_group()
+    async with session_scope() as s:
+        await presets_svc.get_or_create(s, sid, "Маша + Петя")
+
+    client, mock, bot = make_client(TG)
+    await client.send("/newgroup")
+    await click(client, mock, "Сальса")           # дефолтная подсказка стиля
+    await click(client, mock, "ур.1")
+    await click(client, mock, "Пн")
+    await click(client, mock, "Готово")
+    await click(client, mock, "19:00")             # кнопка времени
+    assert "длится" in mock.last_message().text
+    await click(client, mock, "2 ч")               # кнопка длительности
+    await click(client, mock, "Пропустить")        # venue skip
+    await click(client, mock, "Пропустить")        # room skip
+    await click(client, mock, "Маша + Петя")       # преподаватели — пресет
+
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        groups = await groups_svc.admin_visible_groups(s, admin.id)
+        salsa = [g for g in groups if g.style == "Сальса"]
+        assert salsa, [g.style for g in groups]
+        g = salsa[0]
+        assert g.lesson_time == "19:00"
+        assert g.duration_min == 120
+        assert g.teachers_note == "Маша + Петя"
     assert any("Приглашение" in t for t in bot.texts())
 
 
@@ -142,8 +203,8 @@ async def test_new_group_dialog_direct_text_on_style_window(db) -> None:
 
 
 async def test_new_group_dialog_direct_text_on_venue_window(db) -> None:
-    """Тот же паттерн на venue-окне: текст без тапа «Добавить новую» должен
-    завести новую площадку, а не зациклить мастер."""
+    """Текст на venue-окне заводит площадку одной строкой (без отдельного
+    вопроса про адрес) и сразу двигает мастер на шаг зала."""
     await make_group()
     client, mock, bot = make_client(TG)
 
@@ -153,9 +214,16 @@ async def test_new_group_dialog_direct_text_on_venue_window(db) -> None:
     await click(client, mock, "Пн")
     await click(client, mock, "Готово")
     await client.send("18:00")
+    await click(client, mock, "Пропустить")   # duration
     assert "Где проходят занятия" in mock.last_message().text
-    await client.send("Студия у дома")  # без тапа "Добавить новую"
-    assert "адрес" in mock.last_message().text.lower()
+    await client.send("Тверская 10")      # адрес как есть — это и есть площадка
+    assert "зале" in mock.last_message().text.lower()
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        school = await schools_svc.get_owned_school(s, admin.id)
+        from app.services import venues as venues_svc
+        names = [v.name for v in await venues_svc.school_venues(s, school.id)]
+        assert "Тверская 10" in names
 
 
 async def test_new_group_dialog_cancel_from_style_window(db) -> None:
@@ -200,6 +268,7 @@ async def test_new_group_dialog_skip_path(db) -> None:
     await click(client, mock, "Пн")                # weekday
     await click(client, mock, "Готово")
     await client.send("18:00")                      # time
+    await click(client, mock, "Пропустить")        # duration skip
     await click(client, mock, "Пропустить")        # venue skip
     await click(client, mock, "Пропустить")        # room skip
     await click(client, mock, "Пропустить")        # teachers skip → finish
@@ -385,11 +454,17 @@ async def test_edit_group_dialog(db) -> None:
     await click(client, mock, "Очистить")
     assert (await get_group()).teachers_note is None
 
-    # venue: add new (with address), then pick it, then clear
+    # duration: pick then clear
+    await click(client, mock, "Длительность")
+    await click(client, mock, "1,5 ч")
+    assert (await get_group()).duration_min == 90
+    await click(client, mock, "Длительность")
+    await click(client, mock, "Очистить")
+    assert (await get_group()).duration_min is None
+
+    # venue: add new одной строкой, then pick it, then clear
     await click(client, mock, "Место")
-    await click(client, mock, "Добавить новую")
     await client.send("Лофт")
-    await client.send("Тверская 1")
     async with session_scope() as s:
         g = await groups_svc.get_group(s, gid)
         assert g.venue_id is not None
@@ -446,8 +521,8 @@ async def test_edit_group_dialog_notifies_on_reschedule_with_open_survey(db) -> 
     assert notify_calls[0].parse_mode == ParseMode.HTML  # ...и в паре с HTML-режимом
 
 
-async def test_edit_group_venue_skip_address(db) -> None:
-    """The add-venue-without-address branch (_on_venue_new_addr_skip)."""
+async def test_edit_group_venue_one_line(db) -> None:
+    """Новая площадка в редакторе — одной строкой, без вопроса про адрес."""
     gid, sid, code = await make_group()
     client, mock, bot = make_client(TG)
     async with session_scope() as s:
@@ -458,11 +533,73 @@ async def test_edit_group_venue_skip_address(db) -> None:
     await click_plain(client, bot, "Бачата")
     await click_plain(client, bot, "Изменить")
     await click(client, mock, "Место")
-    await click(client, mock, "Добавить новую")
     await client.send("Зал без адреса")
-    await click(client, mock, "Пропустить")   # skip address
     async with session_scope() as s:
         g = await groups_svc.get_group(s, gid)
         from app.services import venues as venues_svc
         v = await venues_svc.get_venue(s, g.venue_id)
         assert v.name == "Зал без адреса" and v.address is None
+    # мастер вернулся в меню редактирования
+    assert "Что меняем" in mock.last_message().text
+
+
+async def test_school_venues_management(db) -> None:
+    """Меню школы: 📍 Площадки — список, добавление через диалог, удаление
+    с подтверждением."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("🏫 Школа")
+    await click_plain(client, bot, "📍 Площадки")
+    assert any("Пока пусто" in t for t in bot.texts())
+
+    # add via dialog
+    await click_plain(client, bot, "➕ Добавить площадку")
+    await client.send("Тверская 10")
+    async with session_scope() as s:
+        from app.services import venues as venues_svc
+        names = [v.name for v in await venues_svc.school_venues(s, sid)]
+        assert names == ["Тверская 10"]
+
+    # re-open the list → venue row is there; delete with confirm
+    await click_plain(client, bot, "К площадкам")
+    await click_plain(client, bot, "🗑 Тверская 10")
+    assert any("Удалить площадку" in t for t in bot.texts())
+    await click_plain(client, bot, "Да, удалить")
+    async with session_scope() as s:
+        from app.services import venues as venues_svc
+        assert await venues_svc.school_venues(s, sid) == []
+
+
+async def test_school_teacher_presets_management(db) -> None:
+    """Меню школы: 👤 Преподаватели — добавление связки и удаление тапом."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("🏫 Школа")
+    await click_plain(client, bot, "👤 Преподаватели")
+    await click_plain(client, bot, "➕ Добавить связку")
+    await client.send("Маша + Петя")
+    async with session_scope() as s:
+        from app.services import teacher_presets as presets_svc
+        assert [p.note for p in await presets_svc.school_presets(s, sid)] == [
+            "Маша + Петя"
+        ]
+
+    await click_plain(client, bot, "К преподавателям")
+    await click_plain(client, bot, "🗑 Маша + Петя")
+    async with session_scope() as s:
+        from app.services import teacher_presets as presets_svc
+        assert await presets_svc.school_presets(s, sid) == []
+
+
+async def test_teacher_presets_get_or_create_dedup(db) -> None:
+    """Повторный ввод той же связки в мастере не плодит дубликатов."""
+    from app.services import teacher_presets as presets_svc
+
+    gid, sid, code = await make_group()
+    async with session_scope() as s:
+        p1 = await presets_svc.get_or_create(s, sid, "Маша + Петя")
+        p2 = await presets_svc.get_or_create(s, sid, "Маша + Петя")
+        assert p1.id == p2.id
+        assert len(await presets_svc.school_presets(s, sid)) == 1

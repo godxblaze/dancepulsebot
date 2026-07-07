@@ -19,7 +19,7 @@ from aiogram_dialog import DialogManager, StartMode
 
 from app.bot import ui
 from app.bot.commands import grant_admin_commands
-from app.bot.dialogs import RenameSchoolSG
+from app.bot.dialogs import AddTeacherPresetSG, AddVenueSG, RenameSchoolSG
 from app.bot.handlers._access import demote_to_student_if_empty
 from app.bot.keyboards import (
     MENU_SCHOOL,
@@ -40,6 +40,8 @@ from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
+from app.services import teacher_presets as presets_svc
+from app.services import venues as venues_svc
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -186,6 +188,183 @@ async def cb_school_new_group(
     await dialog_manager.start(
         NewGroupSG.style, mode=StartMode.RESET_STACK, data={"school_id": school_id}
     )
+
+
+async def _member_or_none(call: CallbackQuery, school_id: int):
+    """Admin, если он член школы; иначе алерт + None."""
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, call.from_user.id)
+        if admin is None or not await schools_svc.is_member(s, school_id, admin.id):
+            await call.answer("Нет доступа", show_alert=True)
+            return None
+    return admin
+
+
+async def _render_school_venues(call: CallbackQuery, school_id: int) -> None:
+    async with session_scope() as s:
+        venues = await venues_svc.school_venues(s, school_id)
+    lines = [
+        "📍 <b>Площадки школы</b> — дефолтные места в мастере группы.",
+    ]
+    if venues:
+        lines.append("Тап по 🗑 удаляет площадку.")
+    else:
+        lines.append("Пока пусто — добавь первую.")
+    rows: list[list[InlineKeyboardButton]] = []
+    for v in venues:
+        label = v.name if not v.address else f"{v.name} — {v.address}"
+        if len(label) > 56:
+            label = label[:53] + "…"
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 {label}", callback_data=f"schvenuedel:{school_id}:{v.id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="➕ Добавить площадку", callback_data=f"schvenueadd:{school_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="◀ К школе", callback_data=f"schcard:{school_id}",
+    )])
+    if call.message:
+        await call.message.edit_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+
+@router.callback_query(F.data.startswith("schvenues:"))
+async def cb_school_venues(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    if await _member_or_none(call, school_id) is None:
+        return
+    await _render_school_venues(call, school_id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schvenueadd:"))
+async def cb_school_venue_add(
+    call: CallbackQuery, dialog_manager: DialogManager
+) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    if await _member_or_none(call, school_id) is None:
+        return
+    await call.answer()
+    await dialog_manager.start(
+        AddVenueSG.name, mode=StartMode.RESET_STACK, data={"school_id": school_id},
+    )
+
+
+@router.callback_query(F.data.startswith("schvenuedel:"))
+async def cb_school_venue_del_confirm(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    school_id, venue_id = int(parts[1]), int(parts[2])
+    if await _member_or_none(call, school_id) is None:
+        return
+    async with session_scope() as s:
+        venue = await venues_svc.get_venue(s, venue_id)
+        if venue is None or venue.school_id != school_id:
+            await call.answer("Уже удалена", show_alert=True)
+            return
+        name = venue.name
+    if call.message:
+        await call.message.edit_text(
+            f"Удалить площадку «{escape(name)}»? Группы, привязанные к ней, "
+            f"останутся без места.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🗑 Да, удалить",
+                    callback_data=f"schvenuedelok:{school_id}:{venue_id}",
+                )],
+                [InlineKeyboardButton(
+                    text="◀ Отмена", callback_data=f"schvenues:{school_id}",
+                )],
+            ]),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schvenuedelok:"))
+async def cb_school_venue_del(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    school_id, venue_id = int(parts[1]), int(parts[2])
+    if await _member_or_none(call, school_id) is None:
+        return
+    async with session_scope() as s:
+        venue = await venues_svc.get_venue(s, venue_id)
+        if venue is not None and venue.school_id == school_id:
+            await venues_svc.delete_venue(s, venue)
+    await _render_school_venues(call, school_id)
+    await call.answer("Удалена")
+
+
+async def _render_school_teachers(call: CallbackQuery, school_id: int) -> None:
+    async with session_scope() as s:
+        presets = await presets_svc.school_presets(s, school_id)
+    lines = [
+        "👤 <b>Преподаватели</b> — сохранённые связки «кто ведёт», "
+        "кнопки в мастере группы.",
+    ]
+    if presets:
+        lines.append("Тап по 🗑 удаляет связку.")
+    else:
+        lines.append("Пока пусто — добавь первую (например: «Аня + Иван»).")
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in presets:
+        label = p.note if len(p.note) <= 56 else p.note[:53] + "…"
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 {label}", callback_data=f"schtchdel:{school_id}:{p.id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="➕ Добавить связку", callback_data=f"schtchadd:{school_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="◀ К школе", callback_data=f"schcard:{school_id}",
+    )])
+    if call.message:
+        await call.message.edit_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+
+@router.callback_query(F.data.startswith("schteachers:"))
+async def cb_school_teachers(call: CallbackQuery) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    if await _member_or_none(call, school_id) is None:
+        return
+    await _render_school_teachers(call, school_id)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("schtchadd:"))
+async def cb_school_teacher_add(
+    call: CallbackQuery, dialog_manager: DialogManager
+) -> None:
+    school_id = int(call.data.split(":", 1)[1])
+    if await _member_or_none(call, school_id) is None:
+        return
+    await call.answer()
+    await dialog_manager.start(
+        AddTeacherPresetSG.note,
+        mode=StartMode.RESET_STACK,
+        data={"school_id": school_id},
+    )
+
+
+@router.callback_query(F.data.startswith("schtchdel:"))
+async def cb_school_teacher_del(call: CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    school_id, preset_id = int(parts[1]), int(parts[2])
+    if await _member_or_none(call, school_id) is None:
+        return
+    async with session_scope() as s:
+        preset = await presets_svc.get_preset(s, preset_id)
+        if preset is not None and preset.school_id == school_id:
+            await presets_svc.delete_preset(s, preset)
+    await _render_school_teachers(call, school_id)
+    await call.answer("Удалена")
 
 
 @router.callback_query(F.data.startswith("schlink:"))

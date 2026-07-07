@@ -20,6 +20,8 @@ from aiogram_dialog.test_tools import BotClient, MockMessageManager
 from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator
 
 from app.bot.dialogs import (
+    add_teacher_preset_dialog,
+    add_venue_dialog,
     broadcast_dialog,
     create_school_dialog,
     edit_group_dialog,
@@ -129,6 +131,8 @@ def _get_dispatcher() -> tuple[Dispatcher, MockMessageManager]:
         dp.include_router(rename_school_dialog)
         dp.include_router(edit_name_dialog)
         dp.include_router(broadcast_dialog)
+        dp.include_router(add_venue_dialog)
+        dp.include_router(add_teacher_preset_dialog)
         _MOCK = MockMessageManager()
         setup_dialogs(dp, message_manager=_MOCK)
         _DP = dp

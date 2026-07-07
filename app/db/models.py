@@ -171,6 +171,20 @@ class Venue(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TeacherPreset(Base):
+    """Сохранённая связка «кто ведёт» школы («Маша + Петя») — кнопки-подсказки
+    на шаге преподавателей в мастере группы, редактируются в меню школы."""
+
+    __tablename__ = "teacher_presets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[int] = mapped_column(
+        ForeignKey("schools.id", ondelete="CASCADE")
+    )
+    note: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Group(Base):
     __tablename__ = "groups"
 
@@ -183,6 +197,7 @@ class Group(Base):
     level: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..4
     weekdays: Mapped[str] = mapped_column(String(20))  # "0,2" — Mon,Wed (0=Mon)
     lesson_time: Mapped[str] = mapped_column(String(5))  # "19:00"
+    duration_min: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 60/90/120/…
     lead_hours: Mapped[int] = mapped_column(Integer, default=18)
     venue_id: Mapped[int | None] = mapped_column(
         ForeignKey("venues.id", ondelete="SET NULL"), nullable=True

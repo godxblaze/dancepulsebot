@@ -19,11 +19,12 @@ from aiogram_dialog.widgets.kbd import Button, Multiselect, Select, SwitchTo
 from aiogram_dialog.widgets.text import Const, Format
 
 from app.bot.dialogs.states import EditGroupSG, user_from
-from app.bot.utils import derive_group_name, format_group_title
+from app.bot.utils import derive_group_name, format_duration, format_group_title
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
+from app.services import teacher_presets as presets_svc
 from app.services import venues as venues_svc
 from app.services.schedule import format_weekdays
 
@@ -31,6 +32,7 @@ log = logging.getLogger(__name__)
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_DURATION_OPTIONS = [(60, "1 ч"), (90, "1,5 ч"), (120, "2 ч"), (180, "3 ч")]
 
 
 # ── shared helpers ───────────────────────────────────────────────────
@@ -109,9 +111,12 @@ async def _menu_getter(dialog_manager: DialogManager, **_: Any) -> dict:
         group = await groups_svc.get_group(s, group_id)
         if group is not None:
             title = format_group_title(group)
-            lines = [
+            schedule = (
                 f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"
-            ]
+            )
+            if group.duration_min:
+                schedule += f" ({format_duration(group.duration_min)})"
+            lines = [schedule]
             if group.style:
                 lines.append(f"Направление: {group.style}")
             if group.level is not None:
@@ -263,6 +268,29 @@ async def _on_time_typed(
     await manager.switch_to(EditGroupSG.menu)
 
 
+# ── duration ──────────────────────────────────────────────────────────
+
+
+async def _on_duration_pick(
+    _call: CallbackQuery, _widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    try:
+        minutes = int(item_id)
+    except ValueError:
+        return
+    if minutes not in {m for m, _ in _DURATION_OPTIONS}:
+        return
+    await _patch_group(manager, duration_min=minutes)
+    await manager.switch_to(EditGroupSG.menu)
+
+
+async def _on_duration_clear(
+    _call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
+    await _patch_group(manager, duration_min=None)
+    await manager.switch_to(EditGroupSG.menu)
+
+
 # ── venue ─────────────────────────────────────────────────────────────
 
 
@@ -313,22 +341,15 @@ async def _on_venue_clear(
     await manager.switch_to(EditGroupSG.menu)
 
 
-async def _on_venue_new_name_typed(
+async def _on_venue_typed(
     _msg: Message, _widget: TextInput, manager: DialogManager, value: str
 ) -> None:
+    """Новая площадка одной строкой (адрес или название студии). Заводим её в
+    школе РЕДАКТИРУЕМОЙ группы, а не в owned-школе admin'а — иначе co-admin
+    без своей школы получал бы орфанный Venue (и потенциально фантомную
+    «Моя школа»), никогда не привязанный к группе."""
     name = value.strip()
-    if not name:
-        return
-    manager.dialog_data["venue_new_name"] = name
-    await manager.switch_to(EditGroupSG.venue_new_address)
-
-
-async def _save_new_venue_and_attach(manager: DialogManager, address: str | None) -> None:
-    """Новый зал заводим в школе РЕДАКТИРУЕМОЙ группы, а не в owned-школе
-    admin'а — иначе co-admin без своей школы получал бы орфанный Venue
-    (и потенциально фантомную «Моя школа»), никогда не привязанный к группе."""
     user = user_from(manager)
-    name = manager.dialog_data.get("venue_new_name")
     if user is None or not name:
         return
     group_id = _gid(manager)
@@ -336,22 +357,9 @@ async def _save_new_venue_and_attach(manager: DialogManager, address: str | None
         group = await groups_svc.get_group(s, group_id)
         if group is None or group.school_id is None:
             return
-        venue = await venues_svc.create_venue(s, group.school_id, name, address)
+        venue = await venues_svc.create_venue(s, group.school_id, name[:120])
         venue_id = venue.id
     await _patch_group(manager, venue_id=venue_id)
-
-
-async def _on_venue_new_addr_typed(
-    _msg: Message, _widget: TextInput, manager: DialogManager, value: str
-) -> None:
-    await _save_new_venue_and_attach(manager, value.strip() or None)
-    await manager.switch_to(EditGroupSG.menu)
-
-
-async def _on_venue_new_addr_skip(
-    _call: CallbackQuery, _btn: Button, manager: DialogManager
-) -> None:
-    await _save_new_venue_and_attach(manager, None)
     await manager.switch_to(EditGroupSG.menu)
 
 
@@ -375,10 +383,52 @@ async def _on_room_clear(
 # ── teachers ──────────────────────────────────────────────────────────
 
 
+async def _teachers_getter(dialog_manager: DialogManager, **_: Any) -> dict:
+    presets: list = []
+    group_id = _gid(dialog_manager)
+    async with session_scope() as s:
+        group = await groups_svc.get_group(s, group_id)
+        if group is not None and group.school_id is not None:
+            presets = await presets_svc.school_presets(s, group.school_id)
+    items: list[tuple[int, str]] = []
+    for p in presets:
+        label = f"👤 {p.note}"
+        if len(label) > 64:
+            label = label[:61] + "…"
+        items.append((p.id, label))
+    return {"presets": items}
+
+
+async def _on_teachers_pick(
+    call: CallbackQuery, _widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    try:
+        preset_id = int(item_id)
+    except ValueError:
+        return
+    group_id = _gid(manager)
+    async with session_scope() as s:
+        preset = await presets_svc.get_preset(s, preset_id)
+        group = await groups_svc.get_group(s, group_id)
+        if preset is None or group is None or preset.school_id != group.school_id:
+            await call.answer()
+            return
+        note = preset.note
+    await _patch_group(manager, teachers_note=note)
+    await manager.switch_to(EditGroupSG.menu)
+
+
 async def _on_teachers_typed(
     _msg: Message, _widget: TextInput, manager: DialogManager, value: str
 ) -> None:
-    await _patch_group(manager, teachers_note=value.strip() or None)
+    note = value.strip() or None
+    if note:
+        group_id = _gid(manager)
+        async with session_scope() as s:
+            group = await groups_svc.get_group(s, group_id)
+            if group is not None and group.school_id is not None:
+                await presets_svc.get_or_create(s, group.school_id, note[:200])
+    await _patch_group(manager, teachers_note=note)
     await manager.switch_to(EditGroupSG.menu)
 
 
@@ -412,6 +462,7 @@ edit_group_dialog = Dialog(
         SwitchTo(Const("🎯 Уровень"), id="m_level", state=EditGroupSG.level),
         SwitchTo(Const("📅 Дни недели"), id="m_days", state=EditGroupSG.weekdays),
         SwitchTo(Const("🕐 Время"), id="m_time", state=EditGroupSG.lesson_time),
+        SwitchTo(Const("⏱ Длительность"), id="m_duration", state=EditGroupSG.duration),
         SwitchTo(Const("📍 Место"), id="m_venue", state=EditGroupSG.venue),
         SwitchTo(Const("🚪 Зал"), id="m_room", state=EditGroupSG.room),
         SwitchTo(Const("👤 Преподаватели"), id="m_teachers", state=EditGroupSG.teachers),
@@ -476,7 +527,23 @@ edit_group_dialog = Dialog(
         state=EditGroupSG.lesson_time,
     ),
     Window(
-        Const("Новое место?"),
+        Const("Сколько длится занятие?"),
+        Select(
+            Format("{item[1]}"),
+            id="ed_select",
+            item_id_getter=lambda item: str(item[0]),
+            items=_DURATION_OPTIONS,
+            on_click=_on_duration_pick,
+        ),
+        Button(Const("⏭ Очистить"), id="ed_clear", on_click=_on_duration_clear),
+        SwitchTo(Const("◀ Назад"), id="ed_back", state=EditGroupSG.menu),
+        state=EditGroupSG.duration,
+    ),
+    Window(
+        Const(
+            "Новое место? Выбери площадку или напиши новую одной строкой "
+            "(адрес или название студии):"
+        ),
         Select(
             Format("{item[1]}"),
             id="ev_select",
@@ -484,33 +551,11 @@ edit_group_dialog = Dialog(
             items="venues",
             on_click=_on_venue_pick,
         ),
-        SwitchTo(
-            Const("➕ Добавить новую"),
-            id="ev_new",
-            state=EditGroupSG.venue_new_name,
-        ),
         Button(Const("⏭ Очистить"), id="ev_clear", on_click=_on_venue_clear),
         SwitchTo(Const("◀ Назад"), id="ev_back", state=EditGroupSG.menu),
-        TextInput(id="ev_direct_input", on_success=_on_venue_new_name_typed),
+        TextInput(id="ev_direct_input", on_success=_on_venue_typed),
         getter=_venue_getter,
         state=EditGroupSG.venue,
-    ),
-    Window(
-        Const("Название новой площадки одной строкой:"),
-        TextInput(id="evn_name_input", on_success=_on_venue_new_name_typed),
-        SwitchTo(Const("◀ Назад"), id="evn_name_back", state=EditGroupSG.venue),
-        state=EditGroupSG.venue_new_name,
-    ),
-    Window(
-        Const("Адрес площадки (если хочешь). Можно пропустить:"),
-        TextInput(id="evn_addr_input", on_success=_on_venue_new_addr_typed),
-        Button(
-            Const("⏭ Пропустить"),
-            id="evn_addr_skip",
-            on_click=_on_venue_new_addr_skip,
-        ),
-        SwitchTo(Const("◀ Назад"), id="evn_addr_back", state=EditGroupSG.venue_new_name),
-        state=EditGroupSG.venue_new_address,
     ),
     Window(
         Const("Новый зал? Или нажми «Очистить», чтобы убрать."),
@@ -520,10 +565,21 @@ edit_group_dialog = Dialog(
         state=EditGroupSG.room,
     ),
     Window(
-        Const("Кто ведёт? Свободной строкой. Можно очистить, чтобы убрать."),
+        Const(
+            "Кто ведёт? Тапни сохранённую связку или напиши свободной "
+            "строкой. Можно очистить, чтобы убрать."
+        ),
+        Select(
+            Format("{item[1]}"),
+            id="et2_select",
+            item_id_getter=lambda item: str(item[0]),
+            items="presets",
+            on_click=_on_teachers_pick,
+        ),
         TextInput(id="et2_input", on_success=_on_teachers_typed),
         Button(Const("⏭ Очистить"), id="et2_clear", on_click=_on_teachers_clear),
         SwitchTo(Const("◀ Назад"), id="et2_back", state=EditGroupSG.menu),
+        getter=_teachers_getter,
         state=EditGroupSG.teachers,
     ),
 )

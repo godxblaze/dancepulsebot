@@ -9,7 +9,7 @@
     Хастл ур.2 — Пт 19:30 (на паузе для теста pause-UI)
 - В каждую — 20-30 фейковых Person'ов (tg_id в диапазоне 1_000_000-9_999_999,
   чтобы scripts.purge_fakes их потом снес).
-- Один venue «Wave Dance».
+- Один venue «Студия Ритм».
 - В Сальсе делает несколько persons с support_level — будет видно в /pool.
 - Расставляет несколько прошедших закрытых опросов с фейковыми ответами,
   чтобы /stats не был пустым.
@@ -115,7 +115,7 @@ async def main() -> None:
 
         # 2) Venue
         venue = await venues_svc.create_venue(
-            s, school_id, "Wave Dance", "Шлюзовая наб. 8с2"
+            s, school_id, "Студия Ритм", "Тверская 10"
         )
         venue_id = venue.id
 

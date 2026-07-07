@@ -5,6 +5,8 @@
 """
 from app.bot.dialogs.edit_group import edit_group_dialog
 from app.bot.dialogs.misc_dialogs import (
+    add_teacher_preset_dialog,
+    add_venue_dialog,
     broadcast_dialog,
     create_school_dialog,
     edit_name_dialog,
@@ -12,6 +14,8 @@ from app.bot.dialogs.misc_dialogs import (
 )
 from app.bot.dialogs.new_group import new_group_dialog
 from app.bot.dialogs.states import (
+    AddTeacherPresetSG,
+    AddVenueSG,
     BroadcastSG,
     CreateSchoolSG,
     EditGroupSG,
@@ -21,12 +25,16 @@ from app.bot.dialogs.states import (
 )
 
 __all__ = [
+    "AddTeacherPresetSG",
+    "AddVenueSG",
     "BroadcastSG",
     "CreateSchoolSG",
     "EditGroupSG",
     "EditNameSG",
     "NewGroupSG",
     "RenameSchoolSG",
+    "add_teacher_preset_dialog",
+    "add_venue_dialog",
     "broadcast_dialog",
     "create_school_dialog",
     "edit_group_dialog",

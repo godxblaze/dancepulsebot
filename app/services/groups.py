@@ -22,6 +22,7 @@ async def create_group(
     *,
     style: str | None = None,
     level: int | None = None,
+    duration_min: int | None = None,
     venue_id: int | None = None,
     room: str | None = None,
     teachers_note: str | None = None,
@@ -36,6 +37,7 @@ async def create_group(
         level=level,
         weekdays=weekdays,
         lesson_time=lesson_time,
+        duration_min=duration_min,
         lead_hours=lead_hours,
         venue_id=venue_id,
         room=room,
@@ -129,6 +131,7 @@ async def update_group(
     level: object = _UNSET,
     weekdays: object = _UNSET,
     lesson_time: object = _UNSET,
+    duration_min: object = _UNSET,
     venue_id: object = _UNSET,
     room: object = _UNSET,
     teachers_note: object = _UNSET,
@@ -152,6 +155,8 @@ async def update_group(
         group.weekdays = weekdays  # type: ignore[assignment]
     if lesson_time is not _UNSET:
         group.lesson_time = lesson_time  # type: ignore[assignment]
+    if duration_min is not _UNSET:
+        group.duration_min = duration_min  # type: ignore[assignment]
     if venue_id is not _UNSET:
         group.venue_id = venue_id  # type: ignore[assignment]
     if room is not _UNSET:

@@ -1,10 +1,13 @@
 """NewGroup wizard на aiogram-dialog.
 
-Поведение совместимо с прежним FSM-мастером:
-  style → (style_typing) → level → weekdays → lesson_time
-  → venue → (venue_new_name → venue_new_address) → room → teachers → create.
+  style → (style_typing) → level → weekdays → lesson_time → duration
+  → venue → room → teachers → create.
 
-После создания группы сразу отправляется invite-QR одним сообщением.
+Максимум кнопок: стили-подсказки (школьные + дефолтные), время 12:00–22:00,
+длительность 1/1,5/2/3 ч, площадки школы, сохранённые связки преподавателей.
+Новая площадка — прямой текст одной строкой на venue-окне (без отдельных
+вопросов «название»/«адрес»). После создания группы сразу отправляется
+invite-QR одним сообщением.
 """
 from __future__ import annotations
 
@@ -19,22 +22,44 @@ from aiogram.types import (
 )
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
-from aiogram_dialog.widgets.kbd import Back, Button, Cancel, Multiselect, Select, SwitchTo
+from aiogram_dialog.widgets.kbd import (
+    Back,
+    Button,
+    Cancel,
+    Group,
+    Multiselect,
+    Select,
+    SwitchTo,
+)
 from aiogram_dialog.widgets.text import Const, Format
 
 from app.bot.dialogs.states import NewGroupSG, user_from
-from app.bot.utils import format_group_title, get_bot_username, qr_png
+from app.bot.utils import format_duration, format_group_title, get_bot_username, qr_png
 from app.core.config import settings
 from app.db.session import session_scope
 from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import schools as schools_svc
+from app.services import teacher_presets as presets_svc
 from app.services import venues as venues_svc
 
 log = logging.getLogger(__name__)
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+# Дефолтные подсказки для свежей школы, у которой ещё нет своих направлений.
+_DEFAULT_STYLES = ["Бачата", "Сальса", "Кизомба"]
+_HOUR_OPTIONS = [f"{h:02d}:00" for h in range(12, 23)]  # 12:00 … 22:00
+_DURATION_OPTIONS = [(60, "1 ч"), (90, "1,5 ч"), (120, "2 ч"), (180, "3 ч")]
+
+
+async def _style_suggestions(session, school_id: int) -> list[str]:
+    """Направления школы + дефолтные, без дублей, максимум 6 кнопок."""
+    suggestions = await groups_svc.school_styles(session, school_id)
+    for st in _DEFAULT_STYLES:
+        if st not in suggestions:
+            suggestions.append(st)
+    return suggestions[:6]
 
 
 # ── getters ──────────────────────────────────────────────────────────
@@ -53,7 +78,7 @@ async def _target_school(session, manager: DialogManager, admin_id: int):
 
 
 async def _style_getter(dialog_manager: DialogManager, **_: Any) -> dict:
-    """Style-подсказки из школы, в которой создаётся группа."""
+    """Style-подсказки: направления школы + дефолтные (Бачата/Сальса/Кизомба)."""
     user = user_from(dialog_manager)
     suggestions: list[str] = []
     if user is not None:
@@ -62,8 +87,8 @@ async def _style_getter(dialog_manager: DialogManager, **_: Any) -> dict:
             if admin is not None:
                 school = await _target_school(s, dialog_manager, admin.id)
                 if school is not None:
-                    suggestions = await groups_svc.school_styles(s, school.id)
-    return {"styles": list(enumerate(suggestions[:6]))}
+                    suggestions = await _style_suggestions(s, school.id)
+    return {"styles": list(enumerate(suggestions))}
 
 
 async def _weekdays_getter(dialog_manager: DialogManager, **_: Any) -> dict:
@@ -91,6 +116,26 @@ async def _venue_getter(dialog_manager: DialogManager, **_: Any) -> dict:
     return {"venues": items}
 
 
+async def _teachers_getter(dialog_manager: DialogManager, **_: Any) -> dict:
+    """Сохранённые связки «кто ведёт» школы — кнопки-подсказки."""
+    user = user_from(dialog_manager)
+    presets: list = []
+    if user is not None:
+        async with session_scope() as s:
+            admin = await admins_svc.get_by_tg_id(s, user.id)
+            if admin is not None:
+                school = await _target_school(s, dialog_manager, admin.id)
+                if school is not None:
+                    presets = await presets_svc.school_presets(s, school.id)
+    items: list[tuple[int, str]] = []
+    for p in presets:
+        label = f"👤 {p.note}"
+        if len(label) > 64:
+            label = label[:61] + "…"
+        items.append((p.id, label))
+    return {"presets": items}
+
+
 # ── on_click / on_input ──────────────────────────────────────────────
 
 
@@ -105,7 +150,7 @@ async def _on_style_pick(
             if admin is not None:
                 school = await _target_school(s, manager, admin.id)
                 if school is not None:
-                    suggestions = await groups_svc.school_styles(s, school.id)
+                    suggestions = await _style_suggestions(s, school.id)
     try:
         idx = int(item_id)
     except ValueError:
@@ -178,6 +223,35 @@ async def _on_time_typed(
         await message.answer("Не похоже на время. Формат ЧЧ:ММ, например 19:00")
         return
     manager.dialog_data["lesson_time"] = f"{int(m.group(1)):02d}:{m.group(2)}"
+    await manager.switch_to(NewGroupSG.duration)
+
+
+async def _on_time_pick(
+    _call: CallbackQuery, _widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    if item_id not in _HOUR_OPTIONS:
+        return
+    manager.dialog_data["lesson_time"] = item_id
+    await manager.switch_to(NewGroupSG.duration)
+
+
+async def _on_duration_pick(
+    _call: CallbackQuery, _widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    try:
+        minutes = int(item_id)
+    except ValueError:
+        return
+    if minutes not in {m for m, _ in _DURATION_OPTIONS}:
+        return
+    manager.dialog_data["duration_min"] = minutes
+    await manager.switch_to(NewGroupSG.venue)
+
+
+async def _on_duration_skip(
+    _call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
+    manager.dialog_data["duration_min"] = None
     await manager.switch_to(NewGroupSG.venue)
 
 
@@ -209,28 +283,16 @@ async def _on_venue_skip(
     await manager.switch_to(NewGroupSG.room)
 
 
-async def _on_venue_new(
-    _call: CallbackQuery, _btn: Button, manager: DialogManager
-) -> None:
-    await manager.switch_to(NewGroupSG.venue_new_name)
-
-
-async def _on_venue_new_name_typed(
+async def _on_venue_typed(
     _message: Message, _widget: TextInput, manager: DialogManager, value: str
 ) -> None:
+    """Прямой текст на venue-окне — новая площадка одной строкой (адрес или
+    название студии, без отдельного вопроса про адрес)."""
     name = value.strip()
     if not name:
         return
-    manager.dialog_data["venue_new_name"] = name
-    await manager.switch_to(NewGroupSG.venue_new_address)
-
-
-async def _save_new_venue(manager: DialogManager, address: str | None) -> None:
     user = user_from(manager)
     if user is None:
-        return
-    name = manager.dialog_data.get("venue_new_name")
-    if not name:
         return
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, user.id)
@@ -239,22 +301,8 @@ async def _save_new_venue(manager: DialogManager, address: str | None) -> None:
         school = await _target_school(s, manager, admin.id)
         if school is None:
             return
-        venue = await venues_svc.create_venue(s, school.id, name, address)
+        venue = await venues_svc.create_venue(s, school.id, name[:120])
         manager.dialog_data["venue_id"] = venue.id
-
-
-async def _on_venue_new_addr_typed(
-    _message: Message, _widget: TextInput, manager: DialogManager, value: str
-) -> None:
-    address = value.strip() or None
-    await _save_new_venue(manager, address)
-    await manager.switch_to(NewGroupSG.room)
-
-
-async def _on_venue_new_addr_skip(
-    _call: CallbackQuery, _btn: Button, manager: DialogManager
-) -> None:
-    await _save_new_venue(manager, None)
     await manager.switch_to(NewGroupSG.room)
 
 
@@ -275,8 +323,44 @@ async def _on_room_skip(
 async def _on_teachers_typed(
     message: Message, _widget: TextInput, manager: DialogManager, value: str
 ) -> None:
-    manager.dialog_data["teachers"] = value.strip() or None
+    note = value.strip() or None
+    manager.dialog_data["teachers"] = note
+    if note:
+        # Введённая связка сразу становится кнопкой для следующих групп
+        # (редактируется в карточке школы).
+        user = user_from(manager)
+        if user is not None:
+            async with session_scope() as s:
+                admin = await admins_svc.get_by_tg_id(s, user.id)
+                school = (
+                    await _target_school(s, manager, admin.id)
+                    if admin is not None else None
+                )
+                if school is not None:
+                    await presets_svc.get_or_create(s, school.id, note[:200])
     await _finish_new_group(message, manager)
+
+
+async def _on_teachers_pick(
+    call: CallbackQuery, _widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    try:
+        preset_id = int(item_id)
+    except ValueError:
+        return
+    user = user_from(manager)
+    if user is None:
+        return
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, user.id)
+        preset = await presets_svc.get_preset(s, preset_id)
+        target = await _target_school(s, manager, admin.id) if admin else None
+        if preset is None or target is None or preset.school_id != target.id:
+            await call.answer()
+            return
+        manager.dialog_data["teachers"] = preset.note
+    if call.message:
+        await _finish_new_group(call.message, manager)
 
 
 async def _on_teachers_skip(
@@ -308,6 +392,7 @@ async def _finish_new_group(target: Message, manager: DialogManager) -> None:
     weekdays = ",".join(str(d) for d in data.get("weekdays", []))
     style = data.get("style")
     level = data.get("level")
+    duration_min = data.get("duration_min")
     venue_id = data.get("venue_id")
     room = data.get("room")
     teachers_note = data.get("teachers")
@@ -342,6 +427,7 @@ async def _finish_new_group(target: Message, manager: DialogManager) -> None:
             settings.default_lead_hours,
             style=style,
             level=level,
+            duration_min=duration_min,
             venue_id=venue_id,
             room=room,
             teachers_note=teachers_note,
@@ -350,7 +436,10 @@ async def _finish_new_group(target: Message, manager: DialogManager) -> None:
         code = group.join_code
         title = format_group_title(group)
         # Сводка прямо здесь — без cross-import'а из admin.py.
-        lines = [f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"]
+        schedule = f"Расписание: {format_weekdays(group.weekdays)} в {group.lesson_time}"
+        if group.duration_min:
+            schedule += f" ({format_duration(group.duration_min)})"
+        lines = [schedule]
         if group.style:
             lines.append(f"Направление: {group.style}")
         if group.level is not None:
@@ -444,13 +533,45 @@ new_group_dialog = Dialog(
         state=NewGroupSG.weekdays,
     ),
     Window(
-        Const("Во сколько начинается занятие? Формат ЧЧ:ММ, например 19:00"),
+        Const(
+            "Во сколько начинается занятие? Тапни или напиши своё время "
+            "(ЧЧ:ММ, например 19:30):"
+        ),
+        Group(
+            Select(
+                Format("{item}"),
+                id="time_select",
+                item_id_getter=str,
+                items=_HOUR_OPTIONS,
+                on_click=_on_time_pick,
+            ),
+            width=4,
+        ),
         TextInput(id="time_input", on_success=_on_time_typed),
         SwitchTo(Const("◀ Назад"), id="time_back", state=NewGroupSG.weekdays),
         state=NewGroupSG.lesson_time,
     ),
     Window(
-        Const("Где проходят занятия?"),
+        Const("Сколько длится занятие?"),
+        Group(
+            Select(
+                Format("{item[1]}"),
+                id="dur_select",
+                item_id_getter=lambda item: str(item[0]),
+                items=_DURATION_OPTIONS,
+                on_click=_on_duration_pick,
+            ),
+            width=4,
+        ),
+        Button(Const("⏭ Пропустить"), id="dur_skip", on_click=_on_duration_skip),
+        SwitchTo(Const("◀ Назад"), id="dur_back", state=NewGroupSG.lesson_time),
+        state=NewGroupSG.duration,
+    ),
+    Window(
+        Const(
+            "Где проходят занятия? Выбери площадку или напиши новую одной "
+            "строкой — адрес или название студии (например: «Тверская 10»):"
+        ),
         Select(
             Format("{item[1]}"),
             id="venue_select",
@@ -458,32 +579,11 @@ new_group_dialog = Dialog(
             items="venues",
             on_click=_on_venue_pick,
         ),
-        Button(Const("➕ Добавить новую"), id="venue_new", on_click=_on_venue_new),
         Button(Const("⏭ Пропустить"), id="venue_skip", on_click=_on_venue_skip),
-        SwitchTo(Const("◀ Назад"), id="venue_back", state=NewGroupSG.lesson_time),
-        TextInput(id="venue_direct_input", on_success=_on_venue_new_name_typed),
+        SwitchTo(Const("◀ Назад"), id="venue_back", state=NewGroupSG.duration),
+        TextInput(id="venue_direct_input", on_success=_on_venue_typed),
         getter=_venue_getter,
         state=NewGroupSG.venue,
-    ),
-    Window(
-        Const(
-            "Название площадки одной строкой "
-            "(например: «Шлюзовая 8с2» или «Студия Полевик»):"
-        ),
-        TextInput(id="venue_new_name_input", on_success=_on_venue_new_name_typed),
-        SwitchTo(Const("⏭ Отмена"), id="venue_new_cancel", state=NewGroupSG.venue),
-        state=NewGroupSG.venue_new_name,
-    ),
-    Window(
-        Const("Адрес (если хочешь). Можно пропустить:"),
-        TextInput(id="venue_new_addr_input", on_success=_on_venue_new_addr_typed),
-        Button(
-            Const("⏭ Пропустить"),
-            id="venue_new_addr_skip",
-            on_click=_on_venue_new_addr_skip,
-        ),
-        SwitchTo(Const("◀ Назад"), id="venue_new_addr_back", state=NewGroupSG.venue_new_name),
-        state=NewGroupSG.venue_new_address,
     ),
     Window(
         Const(
@@ -496,11 +596,20 @@ new_group_dialog = Dialog(
     ),
     Window(
         Const(
-            "Кто ведёт? Свободной строкой — например, «Маша + Петя». Можно пропустить:"
+            "Кто ведёт? Тапни сохранённую связку или напиши свободной строкой "
+            "— например, «Аня + Иван». Можно пропустить:"
+        ),
+        Select(
+            Format("{item[1]}"),
+            id="teachers_select",
+            item_id_getter=lambda item: str(item[0]),
+            items="presets",
+            on_click=_on_teachers_pick,
         ),
         TextInput(id="teachers_input", on_success=_on_teachers_typed),
         Button(Const("⏭ Пропустить"), id="teachers_skip", on_click=_on_teachers_skip),
         SwitchTo(Const("◀ Назад"), id="teachers_back", state=NewGroupSG.room),
+        getter=_teachers_getter,
         state=NewGroupSG.teachers,
     ),
 )

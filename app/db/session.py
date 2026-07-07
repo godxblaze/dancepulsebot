@@ -64,6 +64,7 @@ _LIGHTWEIGHT_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("support_calls", "picker_chat_id", "BIGINT"),
     ("support_calls", "picker_message_id", "BIGINT"),
     ("support_calls", "picker_has_keyboard", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("groups", "duration_min", "INTEGER"),
 )
 
 

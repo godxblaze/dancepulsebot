@@ -12,7 +12,12 @@ from typing import Any
 
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
 from aiogram_dialog.widgets.kbd import Button, Cancel
@@ -20,6 +25,8 @@ from aiogram_dialog.widgets.text import Const, Format
 
 from app.bot import ui
 from app.bot.dialogs.states import (
+    AddTeacherPresetSG,
+    AddVenueSG,
     BroadcastSG,
     CreateSchoolSG,
     EditNameSG,
@@ -33,11 +40,25 @@ from app.services import admins as admins_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
+from app.services import teacher_presets as presets_svc
+from app.services import venues as venues_svc
 
 log = logging.getLogger(__name__)
 
 
 # ── CreateSchool ─────────────────────────────────────────────────────
+
+
+async def _finish_create_school(message: Message, manager: DialogManager) -> None:
+    school_name = manager.dialog_data.get("school_name", "")
+    await message.answer(
+        f"✅ Школа «{escape(school_name)}» создана.\n\n"
+        f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
+        f"в карточке школы можно пригласить co-админа.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_menu_keyboard(),
+    )
+    await manager.done()
 
 
 async def _on_create_school_typed(
@@ -64,21 +85,43 @@ async def _on_create_school_typed(
         admin.has_completed_setup = True
         await s.flush()
         school_name = school.name
+        school_id = school.id
         already_had_school = existing is not None
     if already_had_school:
         # У admin'а уже была своя школа (напр. повторный визит в этот wizard) —
         # честно говорим, что новую не завели, а не врём про «создана».
-        head = f"У тебя уже есть школа «{escape(school_name)}» — новую заводить не стал."
-    else:
-        head = f"✅ Школа «{escape(school_name)}» создана."
-    await message.answer(
-        f"{head}\n\n"
-        f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
-        f"в карточке школы можно пригласить co-админа.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu_keyboard(),
-    )
-    await manager.done()
+        await message.answer(
+            f"У тебя уже есть школа «{escape(school_name)}» — новую заводить не стал.\n\n"
+            f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
+            f"в карточке школы можно пригласить co-админа.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_menu_keyboard(),
+        )
+        await manager.done()
+        return
+    manager.dialog_data["school_name"] = school_name
+    manager.dialog_data["school_id"] = school_id
+    await manager.switch_to(CreateSchoolSG.place)
+
+
+async def _on_create_school_place_typed(
+    message: Message, _widget: TextInput, manager: DialogManager, value: str
+) -> None:
+    place = value.strip()
+    if not place:
+        return
+    school_id = manager.dialog_data.get("school_id")
+    if school_id is not None:
+        async with session_scope() as s:
+            await venues_svc.create_venue(s, int(school_id), place[:120])
+    await _finish_create_school(message, manager)
+
+
+async def _on_create_school_place_skip(
+    call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
+    if call.message:
+        await _finish_create_school(call.message, manager)
 
 
 create_school_dialog = Dialog(
@@ -87,11 +130,25 @@ create_school_dialog = Dialog(
             "💓 Dance Pulse\n\n"
             "Ты получил статус админа — поздравляю! Дай название своей школе "
             "(контейнер, в котором будут жить твои группы и ученики). "
-            "Например: «Wave Dance» или «Школа Маши»."
+            "Например: «Школа сальсы» или «Студия Ритм»."
         ),
         TextInput(id="cs_name", on_success=_on_create_school_typed),
         Cancel(Const("⏭ Отмена")),
         state=CreateSchoolSG.name,
+    ),
+    Window(
+        Const(
+            "Где проходят занятия? Напиши адрес или название студии одной "
+            "строкой (например: «Тверская 10» или «Студия Ритм») — "
+            "это станет местом по умолчанию для твоих групп. Площадки можно "
+            "менять в карточке школы."
+        ),
+        TextInput(id="cs_place", on_success=_on_create_school_place_typed),
+        Button(
+            Const("⏭ Пропустить"), id="cs_place_skip",
+            on_click=_on_create_school_place_skip,
+        ),
+        state=CreateSchoolSG.place,
     ),
 )
 
@@ -334,7 +391,97 @@ broadcast_dialog = Dialog(
 )
 
 
+# ── AddVenue / AddTeacherPreset (из меню школы) ──────────────────────
+
+
+async def _member_school_id(manager: DialogManager) -> int | None:
+    """school_id из start_data, если открывший диалог — член этой школы."""
+    school_id = _school_id_from_start(manager)
+    user = user_from(manager)
+    if school_id is None or user is None:
+        return None
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, user.id)
+        if admin is None or not await schools_svc.is_member(s, school_id, admin.id):
+            return None
+    return school_id
+
+
+def _back_to_kb(text: str, callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=text, callback_data=callback_data)
+    ]])
+
+
+async def _on_add_venue_typed(
+    message: Message, _widget: TextInput, manager: DialogManager, value: str
+) -> None:
+    name = value.strip()
+    if not name:
+        return
+    school_id = await _member_school_id(manager)
+    if school_id is None:
+        await manager.done()
+        return
+    async with session_scope() as s:
+        await venues_svc.create_venue(s, school_id, name[:120])
+    await message.answer(
+        f"✅ Площадка «{escape(name[:120])}» добавлена.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_back_to_kb("📍 К площадкам", f"schvenues:{school_id}"),
+    )
+    await manager.done()
+
+
+add_venue_dialog = Dialog(
+    Window(
+        Const(
+            "Напиши место одной строкой — адрес или название студии "
+            "(например: «Тверская 10» или «Студия Ритм»):"
+        ),
+        TextInput(id="av_name", on_success=_on_add_venue_typed),
+        Cancel(Const("✖ Отмена")),
+        state=AddVenueSG.name,
+    ),
+)
+
+
+async def _on_add_preset_typed(
+    message: Message, _widget: TextInput, manager: DialogManager, value: str
+) -> None:
+    note = value.strip()
+    if not note:
+        return
+    school_id = await _member_school_id(manager)
+    if school_id is None:
+        await manager.done()
+        return
+    async with session_scope() as s:
+        await presets_svc.get_or_create(s, school_id, note[:200])
+    await message.answer(
+        f"✅ Сохранил: «{escape(note[:200])}».",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_back_to_kb("👤 К преподавателям", f"schteachers:{school_id}"),
+    )
+    await manager.done()
+
+
+add_teacher_preset_dialog = Dialog(
+    Window(
+        Const(
+            "Кто ведёт? Свободной строкой — например, «Аня + Иван». "
+            "Связка появится кнопкой в мастере группы:"
+        ),
+        TextInput(id="ap_note", on_success=_on_add_preset_typed),
+        Cancel(Const("✖ Отмена")),
+        state=AddTeacherPresetSG.note,
+    ),
+)
+
+
 __all__ = [
+    "add_teacher_preset_dialog",
+    "add_venue_dialog",
     "broadcast_dialog",
     "create_school_dialog",
     "edit_name_dialog",

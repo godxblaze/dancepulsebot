@@ -22,6 +22,12 @@ async def get_venue(session: AsyncSession, venue_id: int) -> Venue | None:
     return await session.get(Venue, venue_id)
 
 
+async def delete_venue(session: AsyncSession, venue: Venue) -> None:
+    """У групп, привязанных к площадке, venue_id обнулится (FK SET NULL)."""
+    await session.delete(venue)
+    await session.flush()
+
+
 async def school_venues(session: AsyncSession, school_id: int) -> list[Venue]:
     """Venues школы, oldest first — для venue-picker'а в мастере."""
     stmt = (

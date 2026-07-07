@@ -21,7 +21,7 @@ def user_from(manager: DialogManager) -> User | None:
 class NewGroupSG(StatesGroup):
     """Мастер создания группы:
     style → (style_typing if «ввести своё») → level → weekdays → lesson_time
-    → venue → (venue_new_name → venue_new_address if «новая») → room → teachers
+    → duration → venue (текст одной строкой заводит новую) → room → teachers
     """
 
     style = State()
@@ -29,23 +29,36 @@ class NewGroupSG(StatesGroup):
     level = State()
     weekdays = State()
     lesson_time = State()
+    duration = State()
     venue = State()
-    venue_new_name = State()
-    venue_new_address = State()
     room = State()
     teachers = State()
 
 
 class CreateSchoolSG(StatesGroup):
-    """Свежий admin даёт имя своей школе. Открывается из cmd_start."""
+    """Свежий admin даёт имя своей школе и (опционально) место занятий —
+    дефолтную площадку для будущих групп. Открывается из cmd_start."""
 
     name = State()
+    place = State()
 
 
 class RenameSchoolSG(StatesGroup):
     """Owner переименовывает школу. school_id в start_data."""
 
     name = State()
+
+
+class AddVenueSG(StatesGroup):
+    """Член школы добавляет площадку из меню школы. school_id в start_data."""
+
+    name = State()
+
+
+class AddTeacherPresetSG(StatesGroup):
+    """Член школы сохраняет связку «кто ведёт». school_id в start_data."""
+
+    note = State()
 
 
 class EditNameSG(StatesGroup):
@@ -72,8 +85,7 @@ class EditGroupSG(StatesGroup):
     level = State()
     weekdays = State()
     lesson_time = State()
+    duration = State()
     venue = State()
-    venue_new_name = State()
-    venue_new_address = State()
     room = State()
     teachers = State()

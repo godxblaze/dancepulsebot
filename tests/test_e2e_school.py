@@ -336,3 +336,51 @@ async def test_foreign_admin_blocked(db) -> None:
     assert any("owner" in a[0].lower() for a in link.answers)
     async with session_scope() as s:
         assert await schools_svc.get_timezone(s, sid) == "Europe/Moscow"  # unchanged
+
+
+async def test_foreign_admin_blocked_on_venues_and_teachers(db) -> None:
+    """Площадки и связки преподавателей — только членам школы: чужой admin
+    (со своей owned-школой) не видит списки и не может удалять/добавлять."""
+    from app.bot.handlers.school import (
+        cb_school_teacher_add,
+        cb_school_teacher_del,
+        cb_school_teachers,
+        cb_school_venue_add,
+        cb_school_venue_del,
+        cb_school_venue_del_confirm,
+        cb_school_venues,
+    )
+    from app.services import teacher_presets as presets_svc
+    from app.services import venues as venues_svc
+
+    bot = FakeBot()
+    _, sid, _ = await make_group()
+    async with session_scope() as s:
+        await admins_svc.get_or_create(s, 400, "x", "Чужой")
+        venue = await venues_svc.create_venue(s, sid, "Студия Ритм")
+        preset = await presets_svc.get_or_create(s, sid, "Аня + Иван")
+        venue_id, preset_id = venue.id, preset.id
+
+    for data, handler in (
+        (f"schvenues:{sid}", cb_school_venues),
+        (f"schvenuedel:{sid}:{venue_id}", cb_school_venue_del_confirm),
+        (f"schvenuedelok:{sid}:{venue_id}", cb_school_venue_del),
+        (f"schteachers:{sid}", cb_school_teachers),
+        (f"schtchdel:{sid}:{preset_id}", cb_school_teacher_del),
+    ):
+        call = cb(data, 400, name="Чужой", message=SentMessage(bot, 400, ""))
+        await handler(call)
+        assert call.answers and call.answers[-1][1] is True  # show_alert block
+
+    # add-диалоги: доступ отсекается ДО dialog_manager.start (None не трогается)
+    for data, handler in (
+        (f"schvenueadd:{sid}", cb_school_venue_add),
+        (f"schtchadd:{sid}", cb_school_teacher_add),
+    ):
+        call = cb(data, 400, name="Чужой", message=SentMessage(bot, 400, ""))
+        await handler(call, dialog_manager=None)
+        assert call.answers and call.answers[-1][1] is True
+
+    async with session_scope() as s:
+        assert len(await venues_svc.school_venues(s, sid)) == 1  # ничего не удалено
+        assert len(await presets_svc.school_presets(s, sid)) == 1

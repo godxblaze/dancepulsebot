@@ -8,6 +8,7 @@ venv/
 *.sqlite3-wal
 *.sqlite3-shm
 *.sqlite3.bak
+*.sqlite3.lock
 backups/
 logs/
 *.fsm.json

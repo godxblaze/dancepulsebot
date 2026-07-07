@@ -14,7 +14,12 @@ from datetime import UTC, datetime, timedelta
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.bot import ui
 from app.bot.handlers._access import accessible_group
@@ -135,9 +140,22 @@ async def cb_lesson_cancel_other(call: CallbackQuery, state: FSMContext) -> None
     if call.message:
         await call.message.edit_text(
             "Напиши причину отмены одной строкой — она пойдёт в уведомление "
-            "ученикам."
+            "ученикам.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="◀ Назад", callback_data=f"grpcancelreasonback:{group_id}:{ts}",
+            )]]),
         )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("grpcancelreasonback:"))
+async def cb_lesson_cancel_reason_back(call: CallbackQuery, state: FSMContext) -> None:
+    """«◀ Назад» с текстового шага причины — раньше единственным выходом был
+    невидимый /cancel; сбрасываем зависший CancelLesson.reason и возвращаем к
+    пресетам причины (parts[1]/[2] те же group_id/ts, cb_lesson_cancel_confirm
+    не смотрит на префикс callback_data)."""
+    await state.clear()
+    await cb_lesson_cancel_confirm(call)
 
 
 @router.message(Command("cancel"), CancelLesson.reason)

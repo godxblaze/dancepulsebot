@@ -37,6 +37,9 @@ class FakeDialogManager:
     async def start(self, *args, **kwargs) -> None:
         pass
 
+    def has_context(self) -> bool:
+        return False
+
 
 # ── /start role logic ────────────────────────────────────────────────
 

@@ -19,7 +19,7 @@ from aiogram.types import (
 )
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
-from aiogram_dialog.widgets.kbd import Back, Button, Multiselect, Select, SwitchTo
+from aiogram_dialog.widgets.kbd import Back, Button, Cancel, Multiselect, Select, SwitchTo
 from aiogram_dialog.widgets.text import Const, Format
 
 from app.bot.dialogs.states import NewGroupSG, user_from
@@ -404,6 +404,8 @@ new_group_dialog = Dialog(
         ),
         Button(Const("✏️ Ввести своё"), id="style_type", on_click=_on_style_type),
         Button(Const("⏭ Пропустить"), id="style_skip", on_click=_on_style_skip),
+        Cancel(Const("✖ Отмена")),
+        TextInput(id="style_direct_input", on_success=_on_style_typed),
         getter=_style_getter,
         state=NewGroupSG.style,
     ),
@@ -459,6 +461,7 @@ new_group_dialog = Dialog(
         Button(Const("➕ Добавить новую"), id="venue_new", on_click=_on_venue_new),
         Button(Const("⏭ Пропустить"), id="venue_skip", on_click=_on_venue_skip),
         SwitchTo(Const("◀ Назад"), id="venue_back", state=NewGroupSG.lesson_time),
+        TextInput(id="venue_direct_input", on_success=_on_venue_new_name_typed),
         getter=_venue_getter,
         state=NewGroupSG.venue,
     ),

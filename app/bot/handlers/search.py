@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.bot.handlers._access import accessible_group
 from app.bot.keyboards import (
@@ -24,6 +29,10 @@ from app.services import surveys as surveys_svc
 
 router = Router()
 
+_CANCEL_KEYBOARD = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="✖ Отмена", callback_data="searchcancel")]]
+)
+
 
 @router.callback_query(F.data.startswith("search:"))
 async def cb_search_start(call: CallbackQuery, state: FSMContext) -> None:
@@ -32,7 +41,19 @@ async def cb_search_start(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(EntitySearch.query)
     await state.update_data(search_kind=kind, search_ctx=ctx)
     if call.message:
-        await call.message.answer("🔍 Введи часть имени (или /cancel):")
+        await call.message.answer(
+            "🔍 Введи часть имени (или /cancel):", reply_markup=_CANCEL_KEYBOARD
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "searchcancel", EntitySearch.query)
+async def cb_search_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    """Видимая кнопка отмены — раньше единственным выходом был невидимый
+    /cancel, набираемый вручную."""
+    await state.clear()
+    if call.message:
+        await call.message.edit_text("Поиск отменён.")
     await call.answer()
 
 

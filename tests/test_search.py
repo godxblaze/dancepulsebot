@@ -1,7 +1,7 @@
 """Поиск по имени в списках людей."""
 from types import SimpleNamespace
 
-from app.bot.handlers.search import cb_search_start, on_search_query
+from app.bot.handlers.search import cb_search_cancel, cb_search_start, on_search_query
 from app.bot.states import EntitySearch
 from app.db.session import session_scope
 from app.services import admins, groups, persons
@@ -38,6 +38,11 @@ class FakeMsg:
 
     async def edit_reply_markup(self, reply_markup=None, **kw) -> None:
         self.reply_markup = reply_markup
+
+    async def edit_text(self, text: str, **kw) -> None:
+        self.text = text
+        if "reply_markup" in kw:
+            self.reply_markup = kw["reply_markup"]
 
 
 class FakeCb:
@@ -112,3 +117,19 @@ async def test_search_cancel(db) -> None:
     await on_search_query(msg, state)
     assert state.state is None
     assert "отмен" in msg.sent[-1][0].lower()
+
+
+async def test_search_cancel_button(db) -> None:
+    """Раньше единственный выход был невидимый /cancel — теперь есть видимая
+    inline-кнопка «✖ Отмена»."""
+    async with session_scope() as s:
+        await admins.get_or_create(s, 100, "t", "T")
+    state = FakeFSM()
+    start_cb = FakeCb("search:pool", 100)
+    await cb_search_start(start_cb, state)
+    assert start_cb.message.sent[-1][1] is not None  # visible cancel button sent
+
+    cancel_cb = FakeCb("searchcancel", 100)
+    await cb_search_cancel(cancel_cb, state)
+    assert state.state is None
+    assert "отмен" in cancel_cb.message.text.lower()

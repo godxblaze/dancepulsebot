@@ -127,6 +127,68 @@ async def __get_venue(s, venue_id):
     return await venues_svc.get_venue(s, venue_id)
 
 
+async def test_new_group_dialog_direct_text_on_style_window(db) -> None:
+    """Раньше style-окно принимало текст, только если сначала тапнуть «Ввести
+    своё» — прямой текст без тапа не продвигал мастер, а бесконечно повторял
+    тот же вопрос (реальный баг из пилота 2026-07-07). Теперь TextInput стоит
+    прямо на style-окне."""
+    await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/newgroup")
+    assert "Какое направление" in mock.last_message().text
+    await client.send("Бачата")  # без тапа "Ввести своё"
+    assert "Какой уровень" in mock.last_message().text  # продвинулся, не повторил
+
+
+async def test_new_group_dialog_direct_text_on_venue_window(db) -> None:
+    """Тот же паттерн на venue-окне: текст без тапа «Добавить новую» должен
+    завести новую площадку, а не зациклить мастер."""
+    await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/newgroup")
+    await click(client, mock, "Пропустить")   # style
+    await click(client, mock, "Пропустить")   # level
+    await click(client, mock, "Пн")
+    await click(client, mock, "Готово")
+    await client.send("18:00")
+    assert "Где проходят занятия" in mock.last_message().text
+    await client.send("Студия у дома")  # без тапа "Добавить новую"
+    assert "адрес" in mock.last_message().text.lower()
+
+
+async def test_new_group_dialog_cancel_from_style_window(db) -> None:
+    """Единственная точка выхода из мастера «Новая группа» без прохождения
+    всех 9 шагов — Cancel на первом окне (все остальные окна доступны через
+    «◀ Назад», который в итоге ведёт сюда)."""
+    await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/newgroup")
+    await click(client, mock, "Отмена")
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        groups = await groups_svc.admin_visible_groups(s, admin.id)
+    assert len(groups) == 1  # только группа из make_group, мастер не создал вторую
+
+
+async def test_new_group_dialog_survives_start_then_resets(db) -> None:
+    """Брошенный на середине мастер не должен переживать /start и перехватывать
+    дальнейшие тапы по нижнему меню (см. инцидент 2026-07-07: заброшенный
+    /newgroup поглощал тап «Школа» и повторял «Какое направление?»)."""
+    await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/newgroup")
+    assert "Какое направление" in mock.last_message().text  # мастер открыт, брошен
+
+    await client.send("/start")  # safe harbor — должен сбросить зависший стек
+    await client.send("🏫 Школа")
+    # school card came through as a plain message, not another dialog prompt
+    assert any("Состав" in t for t in bot.texts())
+
+
 async def test_new_group_dialog_skip_path(db) -> None:
     """The all-skip path: no style/level/venue/room/teachers — just days + time."""
     await make_group()
@@ -241,6 +303,24 @@ async def test_broadcast_dialog(db) -> None:
     # both students got the broadcast text
     bodies = bot.texts()
     assert sum(1 for t in bodies if "Завтра отмена" in t) >= 2
+
+
+async def test_edit_group_dialog_direct_text_on_style_window(db) -> None:
+    """Тот же паттерн, что в new_group: style-окно должно принимать текст
+    напрямую, без обязательного тапа «Ввести своё»."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+
+    await client.send("/groups")
+    await click_plain(client, bot, "Бачата")
+    await click_plain(client, bot, "Изменить")
+    await click(client, mock, "Направление")
+    await client.send("Кизомба")  # без тапа "Ввести своё"
+    async with session_scope() as s:
+        assert (await groups_svc.get_group(s, gid)).style == "Кизомба"
 
 
 async def test_edit_group_dialog(db) -> None:

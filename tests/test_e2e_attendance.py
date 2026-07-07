@@ -291,6 +291,35 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
     assert any("отменил другой админ" in m.text for m in bot.sent_to(820))
 
 
+async def test_cancel_lesson_reason_step_has_visible_back_button(db, monkeypatch) -> None:
+    """Раньше единственный выход с текстового шага причины был невидимый
+    /cancel — теперь есть кнопка «◀ Назад», которая сбрасывает зависший
+    CancelLesson.reason и возвращает к пресетам, а не оставляет его висеть."""
+    bot = FakeBot()
+    gid, sid, code = await make_group()
+    now = LESSON - timedelta(hours=2)
+    _pin_now(monkeypatch, now)
+    dt = await _first_upcoming(gid, now)
+    ts = int(dt.timestamp())
+
+    pick = SentMessage(bot, TEACHER_TG, "")
+    await cb_lesson_cancel_pick(cb(f"grpcancel:{gid}", TEACHER_TG, message=pick))
+    await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
+
+    state = FakeFSM()
+    await cb_lesson_cancel_other(
+        cb(f"grpcancelother:{gid}:{ts}", TEACHER_TG, message=pick), state
+    )
+    assert state.state == lc.CancelLesson.reason
+    assert pick.reply_markup is not None  # visible "◀ Назад", not just hidden /cancel
+
+    await lc.cb_lesson_cancel_reason_back(
+        cb(f"grpcancelreasonback:{gid}:{ts}", TEACHER_TG, message=pick), state
+    )
+    assert state.state is None  # no longer dangling
+    assert "Отменить занятие" in pick.text  # back at the reason-preset screen
+
+
 async def test_cancel_lesson_notifies_claimants_of_filled_call(db, monkeypatch) -> None:
     """Шаг 14: call закрыт по filled (успешный сценарий киллер-фичи) — отмена
     всё равно уведомляет всех claim'еров, не только при open/pending."""

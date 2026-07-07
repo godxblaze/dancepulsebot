@@ -102,6 +102,7 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     (осознанно принято, по аналогии с pilot_risks в docs/PILOT_AUDIT_2026-07-02.md)."""
     from app.db.models import SupportCallStatus
     from app.services import cancellations as cancellations_svc
+    from app.services import place_overrides as overrides_svc
     from app.services import supports as supports_svc
     from app.services import surveys as surveys_svc
     from app.services.schedule import utc_now
@@ -117,6 +118,7 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
             call.status = SupportCallStatus.closed
     await session.flush()
     await cancellations_svc.delete_future(session, group.id, utc_now())
+    await overrides_svc.delete_future(session, group.id, utc_now())
     if group.school_id is None:
         return []
     return await group_admin_tg_ids(session, group.id, group.school_id)

@@ -12,16 +12,15 @@ from app.bot.keyboards import (
     support_flip_keyboard,
     support_pick_keyboard,
 )
-from app.bot.utils import format_group_title, format_place
+from app.bot.utils import format_group_title
 from app.db.models import Gender, Person, SupportCallStatus
 from app.db.session import session_scope
-from app.scheduler.scheduler import send_support_invites
+from app.scheduler.scheduler import lesson_place, send_support_invites
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
-from app.services import venues as venues_svc
 from app.services.schedule import as_utc, format_lesson_at, utc_now
 
 log = logging.getLogger(__name__)
@@ -241,13 +240,8 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
             # status → open + сброс таймера «тишины» на момент отправки инвайтов,
             # иначе «никто не откликнулся» отсчитывается от создания call'а (вечер).
             await supports_svc.mark_invited(s, call_id)
-            venue = (
-                await venues_svc.get_venue(s, group.venue_id)
-                if group.venue_id is not None
-                else None
-            )
             title = format_group_title(group)
-            place = format_place(group, venue)
+            place = await lesson_place(s, group, as_utc(survey.lesson_at))
             teachers_note = group.teachers_note
             lesson_time = group.lesson_time
             lesson_at = survey.lesson_at

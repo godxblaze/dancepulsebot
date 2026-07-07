@@ -117,6 +117,9 @@ def group_actions_keyboard(
         ))
     if has_upcoming:
         flat.append(InlineKeyboardButton(
+            text="📍 Зал на занятие", callback_data=f"grpplace:{group_id}",
+        ))
+        flat.append(InlineKeyboardButton(
             text="🚫 Отменить занятие", callback_data=f"grpcancel:{group_id}",
         ))
     if has_closed_surveys:
@@ -258,6 +261,22 @@ def pick_lesson_to_cancel_keyboard(
             kb.button(text=f"🚫 {label} (уже отменено)", callback_data="noop")
         else:
             kb.button(text=label, callback_data=f"grpcanceldt:{group_id}:{ts}")
+    kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def pick_lesson_place_keyboard(
+    group_id: int, lessons: list[tuple[int, str, str | None]]
+) -> InlineKeyboardMarkup:
+    """Список ближайших дат занятий для задания места/зала; у дат с уже
+    заданным override место показано прямо на кнопке."""
+    kb = InlineKeyboardBuilder()
+    for ts, label, override in lessons:
+        text = f"{label} · 📍 {override}" if override else label
+        if len(text) > 60:
+            text = text[:57] + "…"
+        kb.button(text=text, callback_data=f"grpplacedt:{group_id}:{ts}")
     kb.button(text="◀ К группе", callback_data=f"grp:{group_id}")
     kb.adjust(1)
     return kb.as_markup()

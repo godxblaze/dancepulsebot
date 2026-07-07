@@ -22,6 +22,7 @@ from app.bot.handlers import (
     admin,
     attendance,
     lesson_cancel,
+    lesson_place,
     pool,
     recruit,
     school,
@@ -88,6 +89,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(pool.router)
     dp.include_router(search.router)
     dp.include_router(lesson_cancel.router)
+    dp.include_router(lesson_place.router)
     dp.include_router(school.router)
     dp.include_router(attendance.router)
     dp.include_router(admin.router)

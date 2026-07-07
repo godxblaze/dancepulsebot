@@ -1,7 +1,8 @@
-"""ClearStaleCancelState — menu-кнопка чистит зависший CancelLesson.reason;
-несвязанные state/текст остаются нетронутыми."""
+"""ClearStaleCancelState — menu-кнопка чистит зависшие текстовые шаги
+(CancelLesson.reason, SetLessonPlace.place); несвязанные state/текст
+остаются нетронутыми."""
 from app.bot.middlewares import ClearStaleCancelState
-from app.bot.states import CancelLesson
+from app.bot.states import CancelLesson, SetLessonPlace
 
 
 class _FSM:
@@ -32,6 +33,13 @@ async def test_menu_text_clears_stale_cancel_state() -> None:
     result = await mw(_noop_handler, _Msg("🏫 Школа"), {"state": fsm})
     assert fsm.cleared is True
     assert result == "handled"  # хендлер всё равно вызван — экран открывается
+
+
+async def test_menu_text_clears_stale_place_state() -> None:
+    mw = ClearStaleCancelState()
+    fsm = _FSM(state=SetLessonPlace.place.state)
+    await mw(_noop_handler, _Msg("🏫 Школа"), {"state": fsm})
+    assert fsm.cleared is True
 
 
 async def test_menu_text_leaves_unrelated_state_untouched() -> None:

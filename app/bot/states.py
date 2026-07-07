@@ -21,6 +21,12 @@ class CancelLesson(StatesGroup):
     confirm_reason = State()
 
 
+class SetLessonPlace(StatesGroup):
+    """Ввод места/зала одного конкретного занятия. group_id и ts — в FSM data."""
+
+    place = State()
+
+
 class EntitySearch(StatesGroup):
     """Поиск по имени в длинных списках людей (walk-in / pool / ростер).
     kind и контекст (survey_id/group_id) — в FSM data."""

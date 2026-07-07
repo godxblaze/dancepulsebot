@@ -35,6 +35,7 @@ from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
+from app.services import place_overrides as overrides_svc
 from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
@@ -62,6 +63,21 @@ ESCALATE_LEAD = timedelta(hours=6)
 # ESCALATE_LEAD=6ч) свежий picker эскалировал бы на следующем же тике (~15 мин),
 # не дав lead'у шанса среагировать.
 ESCALATE_MIN_GRACE = timedelta(hours=1)
+
+
+async def lesson_place(s, group: Group, lesson_at: datetime) -> str | None:
+    """Место КОНКРЕТНОГО занятия: per-lesson override («📍 Зал на занятие» в
+    карточке группы), иначе площадка+зал группы. Единая точка для опроса,
+    напоминаний, реактивации и инвайтов саппортам."""
+    override = await overrides_svc.get_place(s, group.id, lesson_at)
+    if override:
+        return override
+    venue = (
+        await venues_svc.get_venue(s, group.venue_id)
+        if group.venue_id is not None
+        else None
+    )
+    return format_place(group, venue)
 
 
 def _answer_deadline(
@@ -104,16 +120,11 @@ async def _poll_group(
         to_poll = await surveys_svc.persons_without_message(s, survey.id)
         coming = await surveys_svc.coming_by_gender(s, survey.id)
         survey_id = survey.id
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
+        place = await lesson_place(s, group, lesson_at)
 
     if not to_poll:
         return  # all members already polled
 
-    place = format_place(group, venue)
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
@@ -367,7 +378,7 @@ async def _send_recruit_picker(
     male: int,
     female: int,
     candidates: list,
-    venue,
+    place: str | None,
     tz: str | None,
     levels: dict[int, int] | None = None,
     can_expand: bool = False,
@@ -381,7 +392,6 @@ async def _send_recruit_picker(
         f"{header} <b>{escape(format_group_title(group))}</b> · "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} {group.lesson_time}",
     ]
-    place = format_place(group, venue)
     if place:
         head_lines.append(f"{ui.PLACE} {escape(place)}")
     head_lines.extend([
@@ -520,11 +530,7 @@ async def _maybe_recruit(
             return
         existing_call = await supports_svc.get_call_for_survey(s, survey_id)
         call_id = existing_call.id if existing_call is not None else None
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
+        place = await lesson_place(s, group, lesson_at)
 
     if call_id is None:
         # ── Фаза 1: вечерний разбор (call ещё не существует — никто другой не
@@ -586,7 +592,7 @@ async def _maybe_recruit(
                 send_kwargs = dict(
                     teacher_tgs=targets, call_id=new_call.id,
                     gender_needed=gender_needed, deficit=deficit, male=male,
-                    female=female, candidates=candidates, venue=venue,
+                    female=female, candidates=candidates, place=place,
                     levels=levels, can_expand=bool(colleagues), phase2=False,
                     unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                 )
@@ -693,7 +699,7 @@ async def _maybe_recruit(
                     send_kwargs = dict(
                         teacher_tgs=targets, call_id=call.id, gender_needed=short,
                         deficit=deficit, male=eff_male, female=eff_female,
-                        candidates=candidates, venue=venue, levels=levels,
+                        candidates=candidates, place=place, levels=levels,
                         can_expand=bool(colleagues), phase2=True,
                         unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                     )
@@ -706,7 +712,7 @@ async def _maybe_recruit(
         if auto_plan["invited"]:
             sent = await send_support_invites(
                 bot, call_id=auto_plan["call_id"], invited=auto_plan["invited"],
-                title=format_group_title(group), place=format_place(group, venue),
+                title=format_group_title(group), place=place,
                 teachers_note=group.teachers_note, lesson_time=group.lesson_time,
                 lesson_at=lesson_at, tz=tz,
             )
@@ -763,16 +769,11 @@ async def _maybe_remind(
             return
         to_remind = await surveys_svc.persons_to_remind(s, survey.id, window)
         survey_id = survey.id
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
+        place = await lesson_place(s, group, lesson_at)
 
     if not to_remind:
         return
 
-    place = format_place(group, venue)
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
@@ -855,11 +856,7 @@ async def _maybe_reactivate(
         survey_id = survey.id
         lapsed = await surveys_svc.lapsed_members(s, group.id, k=REACTIVATE_MISSES)
         pending_ids = {p.id for p in await surveys_svc.pending_persons(s, survey_id)}
-        venue = (
-            await venues_svc.get_venue(s, group.venue_id)
-            if group.venue_id is not None
-            else None
-        )
+        place = await lesson_place(s, group, lesson_at)
         targets = [
             (p.tg_user_id, p.id)
             for p in lapsed
@@ -869,7 +866,6 @@ async def _maybe_reactivate(
 
     if not targets:
         return
-    place = format_place(group, venue)
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",

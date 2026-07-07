@@ -230,6 +230,23 @@ class LessonCancellation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class LessonPlaceOverride(Base):
+    """Другое место/зал для одного конкретного занятия (школы, гоняющие группы
+    каждый раз по разным залам). Когда запись есть, все сообщения этого занятия
+    (опрос, напоминания, инвайты саппортам) показывают её вместо места группы."""
+
+    __tablename__ = "lesson_place_overrides"
+    __table_args__ = (
+        UniqueConstraint("group_id", "lesson_at", name="uq_place_override_group_lesson"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    lesson_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    place: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Person(Base):
     """A human inside one school — student and/or support. One row per
     (school, telegram account); group membership через Membership."""

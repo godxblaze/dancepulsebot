@@ -86,22 +86,24 @@ dancepulsebot/
 │   │   │   └── misc_dialogs.py # CreateSchool, RenameSchool, EditName, Broadcast
 │   │   └── handlers/         # фича-роутеры
 │   │       ├── _access.py    # shared: accessible_group / owned_group / demote
-│   │       ├── _callbacks.py # parse_cb helper
-│   │       ├── admin.py      # /start /help /grant /today /stats /groups + person card
+│   │       ├── admin.py      # /start /help /grant /today /stats /groups + person card, /status и /devstats разработчику
 │   │       ├── student.py    # /start с deep-link join, JoinFlow
 │   │       ├── survey.py     # ответы «приду / не приду» (att:*)
 │   │       ├── recruit.py    # picker + invite саппортов
 │   │       ├── school.py     # карточка школы, настройки автодобора, partner-invite
 │   │       ├── pool.py       # /pool с пагинацией и idempotency-guard
 │   │       ├── attendance.py # post-lesson отметка + walk-in
+│   │       ├── search.py     # «🔍 Поиск» по имени в длинных списках (walk-in / pool / ростер)
+│   │       ├── lesson_place.py # «📍 Зал на занятие» — override места одного занятия
 │   │       └── lesson_cancel.py # 3-шаговая отмена с опц. причиной
 │   ├── scheduler/   # scheduler.py — tick: опросы, авто-сводки, auto-reminders (4h/1h), рекрутинг, stale support pings
 │   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports, schedule
 │   └── main.py
 ├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes,
-│                    # dev_stats (текстовый срез), stats_dashboard (HTML-дашборд: `python -m scripts.stats_dashboard`,
-│                    # `--demo` — сэмпл-данные; тренд отклика, баланс пар, матрица посещаемости; read-only)
-└── tests/           # 352 теста, pytest + ruff гонятся через scripts/check.ps1
+│                    # dev_stats (текстовый срез, в боте то же — /devstats), stats_dashboard (HTML-дашборд:
+│                    # `python -m scripts.stats_dashboard`, `--demo` — сэмпл-данные; тренд отклика,
+│                    # баланс пар, матрица посещаемости; read-only)
+└── tests/           # 386 тестов, pytest + ruff гонятся через scripts/check.ps1
 ```
 
 ## Требования
@@ -141,7 +143,7 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 pytest tests/
 ```
 
-352 теста (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
+386 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
 
 ## Roadmap
 

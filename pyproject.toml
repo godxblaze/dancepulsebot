@@ -20,13 +20,12 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
     "ruff>=0.7,<1",
+    "mypy>=1.11,<2",
 ]
 # Живые e2e через настоящий Telegram (см. e2e/README.md). Не нужны для обычной
-# разработки — ставь отдельно: pip install -e ".[e2e]".
+# разработки — ставь отдельно: pip install -e ".[dev,e2e]".
 e2e = [
     "telethon>=1.36,<2",
-    "pytest>=8.3,<9",
-    "pytest-asyncio>=0.24,<1",
 ]
 
 [tool.ruff]

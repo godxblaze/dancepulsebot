@@ -6,6 +6,7 @@ Run once with the bot stopped (it sends real Telegram messages).
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -32,8 +33,10 @@ from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from app.services import venues as venues_svc
 
-GODBLAZE_TG = 791668206
-ANUBIS_TG = 6664457053
+# Telegram user_id демо-аккаунтов; переопределяются через env, дефолты —
+# аккаунты разработчика.
+GODBLAZE_TG = int(os.environ.get("DEMO_GODBLAZE_TG", "791668206"))
+ANUBIS_TG = int(os.environ.get("DEMO_ANUBIS_TG", "6664457053"))
 
 
 async def main() -> None:

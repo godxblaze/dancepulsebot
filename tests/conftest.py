@@ -1,3 +1,4 @@
+import contextlib
 import os
 
 # Point the app at a throwaway DB before any app module imports settings.
@@ -30,6 +31,19 @@ async def db():
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _cleanup_test_db():
+    """Убирает per-PID тест-БД (+ WAL/SHM) после прогона. У каждого
+    pytest-xdist воркера свой PID и свой файл, так что удаление безопасно
+    и для конкурентных прогонов. Best-effort: на Windows незакрытый хендл
+    не должен ронять зелёный прогон."""
+    yield
+    await engine.dispose()
+    for suffix in ("", "-wal", "-shm"):
+        with contextlib.suppress(OSError):
+            os.remove(os.environ["DB_PATH"] + suffix)
 
 
 # Прод admins.get_or_create НЕ создаёт школу — этот шаг идёт через явный

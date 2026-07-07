@@ -357,7 +357,7 @@ async def _on_venue_typed(
         group = await groups_svc.get_group(s, group_id)
         if group is None or group.school_id is None:
             return
-        venue = await venues_svc.create_venue(s, group.school_id, name[:120])
+        venue = await venues_svc.get_or_create(s, group.school_id, name[:120])
         venue_id = venue.id
     await _patch_group(manager, venue_id=venue_id)
     await manager.switch_to(EditGroupSG.menu)

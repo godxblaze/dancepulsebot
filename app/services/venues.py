@@ -18,6 +18,18 @@ async def create_venue(
     return venue
 
 
+async def get_or_create(
+    session: AsyncSession, school_id: int, name: str
+) -> Venue:
+    """Идемпотентно по точному тексту (симметрично teacher_presets) —
+    повторный ввод того же названия в мастере не плодит дублей в picker'е."""
+    stmt = select(Venue).where(Venue.school_id == school_id, Venue.name == name)
+    existing = (await session.execute(stmt)).scalars().first()
+    if existing is not None:
+        return existing
+    return await create_venue(session, school_id, name)
+
+
 async def get_venue(session: AsyncSession, venue_id: int) -> Venue | None:
     return await session.get(Venue, venue_id)
 

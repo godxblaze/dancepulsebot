@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram_dialog import DialogManager
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
 from app.bot import ui
 from app.bot.commands import grant_admin_commands, revoke_admin_commands
@@ -59,13 +59,10 @@ from app.bot.utils import (
 )
 from app.core.config import settings
 from app.db.models import (
-    Answer,
     Gender,
     Group,
     Person,
-    Response,
     School,
-    SchoolMember,
     SupportCall,
     SupportCallStatus,
     Survey,
@@ -73,6 +70,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import devstats as devstats_svc
 from app.services import exports as exports_svc
 from app.services import groups as groups_svc
 from app.services import persons as persons_svc
@@ -340,69 +338,10 @@ async def cmd_status(message: Message) -> None:
 async def _devstats_snapshot(s) -> list[dict]:
     """Per-school разрез вовлечённости за последние 4 недели для /devstats —
     в отличие от /status (плоские суммы по всей базе), тут видно, какая школа
-    реально живёт, а какая заглохла."""
-    since = utc_now() - timedelta(weeks=4)
-    schools = (await s.execute(select(School).order_by(School.id))).scalars().all()
-    rows: list[dict] = []
-    for school in schools:
-        n_admins = (await s.execute(
-            select(func.count()).select_from(SchoolMember)
-            .where(SchoolMember.school_id == school.id)
-        )).scalar_one()
-        n_groups = (await s.execute(
-            select(func.count()).select_from(Group)
-            .where(Group.school_id == school.id, Group.active.is_(True))
-        )).scalar_one()
-        last_activity = (await s.execute(
-            select(func.max(Survey.created_at))
-            .select_from(Survey)
-            .join(Group, Survey.group_id == Group.id)
-            .where(Group.school_id == school.id)
-        )).scalar_one()
-        # SQLite отдаёт naive-UTC — нормализуем к aware (конвенция persons.py),
-        # иначе sort ниже падает на сравнении с aware-фоллбэком datetime.min.
-        if last_activity is not None and last_activity.tzinfo is None:
-            last_activity = last_activity.replace(tzinfo=UTC)
-        total, yes, marked, attended = (await s.execute(
-            select(
-                func.count(Response.id),
-                func.sum(case((Response.answer == Answer.yes, 1), else_=0)),
-                func.sum(case((Response.actually_attended.is_not(None), 1), else_=0)),
-                func.sum(case((Response.actually_attended.is_(True), 1), else_=0)),
-            )
-            .select_from(Response)
-            .join(Survey, Response.survey_id == Survey.id)
-            .join(Group, Survey.group_id == Group.id)
-            .where(
-                Group.school_id == school.id,
-                Survey.lesson_at >= since,
-                Response.answer.is_not(None),
-            )
-        )).one()
-        stuck_calls = (await s.execute(
-            select(func.count())
-            .select_from(SupportCall)
-            .join(Survey, SupportCall.survey_id == Survey.id)
-            .join(Group, Survey.group_id == Group.id)
-            .where(
-                Group.school_id == school.id,
-                Survey.lesson_at >= since,
-                SupportCall.status.in_(
-                    (SupportCallStatus.pending, SupportCallStatus.open)
-                ),
-            )
-        )).scalar_one()
-        rows.append({
-            "name": school.name,
-            "admins": n_admins,
-            "groups": n_groups,
-            "last_activity": last_activity,
-            "responded": total or 0,
-            "yes": yes or 0,
-            "marked": marked or 0,
-            "attended": attended or 0,
-            "stuck_calls": stuck_calls,
-        })
+    реально живёт, а какая заглохла. Агрегация — в devstats_svc (общая с
+    scripts/dev_stats.py и scripts/stats_dashboard.py)."""
+    since = utc_now() - devstats_svc.WINDOW
+    rows = await devstats_svc.all_school_rows(s, since)
     rows.sort(
         key=lambda r: r["last_activity"] or datetime.min.replace(tzinfo=UTC),
         reverse=True,
@@ -427,7 +366,7 @@ async def cmd_devstats(message: Message) -> None:
     for r in rows:
         last = f"{r['last_activity']:%d.%m.%Y}" if r["last_activity"] else "никогда"
         lines = [
-            f"{ui.title(ui.STATS, escape(r['name']))} — "
+            f"{ui.title(ui.STATS, escape(r['school'].name))} — "
             f"{r['admins']} {ui.plural(r['admins'], 'админ', 'админа', 'админов')}, "
             f"{r['groups']} {ui.plural(r['groups'], 'группа', 'группы', 'групп')}",
             f"последняя активность: {last}",

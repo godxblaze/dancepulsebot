@@ -63,20 +63,11 @@ class SchoolDash:
 
 # ── загрузка из БД ───────────────────────────────────────────────────────
 async def load_from_db() -> list[SchoolDash]:
-    from sqlalchemy import case, func, select
+    from sqlalchemy import func, select
 
-    from app.db.models import (
-        Answer,
-        Gender,
-        Group,
-        Person,
-        Response,
-        School,
-        SupportCall,
-        SupportCallStatus,
-        Survey,
-    )
+    from app.db.models import Answer, Gender, Group, Person, Response, School
     from app.db.session import init_db, session_scope
+    from app.services import devstats as devstats_svc
     from app.services import surveys as surveys_svc
     from app.services.schedule import format_lesson_at
 
@@ -87,49 +78,8 @@ async def load_from_db() -> list[SchoolDash]:
     async with session_scope() as s:
         schools = (await s.execute(select(School).order_by(School.id))).scalars().all()
         for school in schools:
-            total, yes, marked, attended, noshow = (await s.execute(
-                select(
-                    func.count(Response.id),
-                    func.sum(case((Response.answer == Answer.yes, 1), else_=0)),
-                    func.sum(case((Response.actually_attended.is_not(None), 1), else_=0)),
-                    func.sum(case((Response.actually_attended.is_(True), 1), else_=0)),
-                    func.sum(case((
-                        (Response.answer == Answer.yes)
-                        & Response.actually_attended.is_(False), 1), else_=0)),
-                )
-                .select_from(Response)
-                .join(Survey, Response.survey_id == Survey.id)
-                .join(Group, Survey.group_id == Group.id)
-                .where(
-                    Group.school_id == school.id,
-                    Survey.lesson_at >= since,
-                    Response.answer.is_not(None),
-                )
-            )).one()
-            active_persons = (await s.execute(
-                select(func.count(func.distinct(Response.person_id)))
-                .select_from(Response)
-                .join(Survey, Response.survey_id == Survey.id)
-                .join(Group, Survey.group_id == Group.id)
-                .where(
-                    Group.school_id == school.id,
-                    Survey.lesson_at >= since,
-                    Response.answered_at.is_not(None),
-                )
-            )).scalar_one()
-            stuck = (await s.execute(
-                select(func.count())
-                .select_from(SupportCall)
-                .join(Survey, SupportCall.survey_id == Survey.id)
-                .join(Group, Survey.group_id == Group.id)
-                .where(
-                    Group.school_id == school.id,
-                    Survey.lesson_at >= since,
-                    SupportCall.status.in_(
-                        (SupportCallStatus.pending, SupportCallStatus.open)
-                    ),
-                )
-            )).scalar_one()
+            row = await devstats_svc.school_row(s, school, since)
+            active_persons = await devstats_svc.active_persons(s, school.id, since)
 
             def _pct(part, whole) -> str:
                 return f"{round(100 * (part or 0) / whole)}%" if whole else "—"
@@ -137,11 +87,11 @@ async def load_from_db() -> list[SchoolDash]:
             dash = SchoolDash(
                 name=school.name,
                 tiles={
-                    "Отклик (обещали)": _pct(yes, total),
-                    "Реальная посещаемость": _pct(attended, marked),
-                    "No-show": _pct(noshow, marked),
+                    "Отклик (обещали)": _pct(row["yes"], row["responded"]),
+                    "Реальная посещаемость": _pct(row["attended"], row["marked"]),
+                    "No-show": _pct(row["noshow"], row["marked"]),
                     "Активных учеников": str(active_persons),
-                    "Зависших доборов": str(stuck),
+                    "Зависших доборов": str(row["stuck_calls"]),
                 },
             )
 

@@ -113,7 +113,7 @@ async def _on_create_school_place_typed(
     school_id = manager.dialog_data.get("school_id")
     if school_id is not None:
         async with session_scope() as s:
-            await venues_svc.create_venue(s, int(school_id), place[:120])
+            await venues_svc.get_or_create(s, int(school_id), place[:120])
     await _finish_create_school(message, manager)
 
 
@@ -424,7 +424,7 @@ async def _on_add_venue_typed(
         await manager.done()
         return
     async with session_scope() as s:
-        await venues_svc.create_venue(s, school_id, name[:120])
+        await venues_svc.get_or_create(s, school_id, name[:120])
     await message.answer(
         f"✅ Площадка «{escape(name[:120])}» добавлена.",
         parse_mode=ParseMode.HTML,

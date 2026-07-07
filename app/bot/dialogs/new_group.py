@@ -301,7 +301,7 @@ async def _on_venue_typed(
         school = await _target_school(s, manager, admin.id)
         if school is None:
             return
-        venue = await venues_svc.create_venue(s, school.id, name[:120])
+        venue = await venues_svc.get_or_create(s, school.id, name[:120])
         manager.dialog_data["venue_id"] = venue.id
     await manager.switch_to(NewGroupSG.room)
 

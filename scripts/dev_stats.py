@@ -12,81 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from sqlalchemy import case, func, select
-
-from app.db.models import (
-    Answer,
-    Group,
-    Response,
-    School,
-    SchoolMember,
-    SupportCall,
-    SupportCallStatus,
-    Survey,
-)
+from app.db.models import School
 from app.db.session import init_db, session_scope
+from app.services import devstats as devstats_svc
 from app.services import groups as groups_svc
 from app.services import surveys as surveys_svc
 from app.services.schedule import format_lesson_at
-
-WINDOW = timedelta(weeks=4)
-
-
-async def _school_row(s, school: School, since: datetime) -> dict:
-    n_admins = (await s.execute(
-        select(func.count()).select_from(SchoolMember)
-        .where(SchoolMember.school_id == school.id)
-    )).scalar_one()
-    n_groups = (await s.execute(
-        select(func.count()).select_from(Group)
-        .where(Group.school_id == school.id, Group.active.is_(True))
-    )).scalar_one()
-    last_activity = (await s.execute(
-        select(func.max(Survey.created_at))
-        .select_from(Survey)
-        .join(Group, Survey.group_id == Group.id)
-        .where(Group.school_id == school.id)
-    )).scalar_one()
-    total, yes, marked, attended = (await s.execute(
-        select(
-            func.count(Response.id),
-            func.sum(case((Response.answer == Answer.yes, 1), else_=0)),
-            func.sum(case((Response.actually_attended.is_not(None), 1), else_=0)),
-            func.sum(case((Response.actually_attended.is_(True), 1), else_=0)),
-        )
-        .select_from(Response)
-        .join(Survey, Response.survey_id == Survey.id)
-        .join(Group, Survey.group_id == Group.id)
-        .where(
-            Group.school_id == school.id,
-            Survey.lesson_at >= since,
-            Response.answer.is_not(None),
-        )
-    )).one()
-    stuck_calls = (await s.execute(
-        select(func.count())
-        .select_from(SupportCall)
-        .join(Survey, SupportCall.survey_id == Survey.id)
-        .join(Group, Survey.group_id == Group.id)
-        .where(
-            Group.school_id == school.id,
-            Survey.lesson_at >= since,
-            SupportCall.status.in_((SupportCallStatus.pending, SupportCallStatus.open)),
-        )
-    )).scalar_one()
-    return {
-        "school": school,
-        "admins": n_admins,
-        "groups": n_groups,
-        "last_activity": last_activity,
-        "responded": total or 0,
-        "yes": yes or 0,
-        "marked": marked or 0,
-        "attended": attended or 0,
-        "stuck_calls": stuck_calls,
-    }
 
 
 def _pct(part: int, total: int) -> str:
@@ -130,12 +63,11 @@ async def _print_group_drilldown(s, school: School) -> None:
 
 async def run() -> None:
     await init_db()
-    since = datetime.now(UTC) - WINDOW
+    since = datetime.now(UTC) - devstats_svc.WINDOW
     query = sys.argv[1].lower() if len(sys.argv) > 1 else None
 
     async with session_scope() as s:
-        schools = (await s.execute(select(School).order_by(School.id))).scalars().all()
-        rows = [await _school_row(s, school, since) for school in schools]
+        rows = await devstats_svc.all_school_rows(s, since)
         if not rows:
             print("Школ пока нет.")
             return

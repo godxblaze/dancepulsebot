@@ -3,7 +3,21 @@ from datetime import datetime
 
 from app.db.models import Person, SurveyKind
 from app.db.session import session_scope
-from app.services import admins, groups, persons, surveys
+from app.services import admins, groups, persons, surveys, venues
+
+
+async def test_venue_get_or_create_dedups_exact_name(db) -> None:
+    """Повторный ввод того же названия площадки не плодит дубли в picker'е."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 1, "t", "T")
+        g = await groups.create_group(s, t.id, "G1", "0", "19:00", 18)
+        sid = g.school_id
+        v1 = await venues.get_or_create(s, sid, "Студия А")
+        v2 = await venues.get_or_create(s, sid, "Студия А")
+        v3 = await venues.get_or_create(s, sid, "Студия Б")
+        assert v1.id == v2.id
+        assert v3.id != v1.id
+        assert len(await venues.school_venues(s, sid)) == 2
 
 
 async def test_teacher_get_or_create_idempotent(db) -> None:

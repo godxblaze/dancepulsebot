@@ -26,6 +26,7 @@ from app.bot.dialogs.states import (
     RenameSchoolSG,
     user_from,
 )
+from app.bot.keyboards import admin_menu_keyboard
 from app.bot.utils import format_group_title
 from app.db.session import session_scope
 from app.services import admins as admins_svc
@@ -75,9 +76,8 @@ async def _on_create_school_typed(
         f"Дальше — снизу 👇 меню: создай первую группу через «➕ Новая группа», "
         f"в карточке школы можно пригласить co-админа.",
         parse_mode=ParseMode.HTML,
+        reply_markup=admin_menu_keyboard(),
     )
-    # Push reply-keyboard через handler — открыто здесь нельзя, manager.done()
-    # удалит inline-keyboard. Reply-меню юзеру уже было до старта diaologа.
     await manager.done()
 
 

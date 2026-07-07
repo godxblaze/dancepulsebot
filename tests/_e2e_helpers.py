@@ -16,11 +16,15 @@ from app.services import groups as groups_svc
 from tests._fakes import FakeBot, FakeCallback, FakeFSM, FakeMessage, SentMessage, fake_user
 
 _MSK = ZoneInfo("Europe/Moscow")
-# Занятие через 14 дней, 19:00 МСК — фиксированная календарная дата рано или
-# поздно оказывается в прошлом (on_attendance теперь гвардит на
-# as_utc(lesson_at) <= utc_now()), а срок от «сейчас» — нет.
+# Занятие через 14+ дней, 19:00 МСК, на ближайший понедельник — фиксированная
+# календарная дата рано или поздно оказывается в прошлом (on_attendance теперь
+# гвардит на as_utc(lesson_at) <= utc_now()), а срок от «сейчас» — нет. Понедельник
+# нужен, потому что make_group() создаёт группу с weekday=0 по умолчанию, а
+# «сегодня/завтра»-экраны match'ат LESSON именно по недельной recurrence группы.
+_now_msk = datetime.now(UTC).astimezone(_MSK)
+_days_to_monday = (0 - _now_msk.weekday()) % 7
 LESSON = (
-    (datetime.now(UTC).astimezone(_MSK) + timedelta(days=14))
+    (_now_msk + timedelta(days=_days_to_monday + 14))
     .replace(hour=19, minute=0, second=0, microsecond=0)
     .astimezone(UTC)
 )

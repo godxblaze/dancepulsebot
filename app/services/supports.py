@@ -87,7 +87,7 @@ async def set_status(
 
 
 async def dismiss_call(session: AsyncSession, call_id: int) -> bool:
-    """Lead закрыл picker кнопкой «Не сейчас · баланс ок». Закрываем call
+    """Lead закрыл picker кнопкой «Баланс ок». Закрываем call
     (status closed = «nothing was needed»), но только если он ещё pending —
     иначе гонка с уже отправленными инвайтами (picksend). Ставим topup_done,
     чтобы фаза-2 добора остатка не воскресила call и не прислала picker снова

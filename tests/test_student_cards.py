@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from app.bot import ui
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons
@@ -50,12 +51,12 @@ async def test_survey_card_structure(db, monkeypatch) -> None:
     card = next(m.text for m in bot.sent if "Придёшь?" in m.text)
     assert card.startswith("💓 <b>")             # бренд + жирный тайтл
     assert "📅 <b>" in card and "в 19:00" in card  # дата·время-мета
-    assert "\n\nПридёшь?" in card                  # CTA отделён пустой строкой
+    assert "\n\n<b>Придёшь?</b>" in card           # CTA отделён пустой строкой, жирный
 
 
-async def test_survey_summary_shows_who_is_coming_split() -> None:
-    """Итоговая сводка: заголовок через format_group_title, бар и блок «кто идёт»
-    с разбивкой 🕺/💃 (соц-доказательство — ключевой запрос пользователя)."""
+async def test_survey_summary_shows_balance_with_names() -> None:
+    """Итоговая сводка: заголовок через format_group_title, общий бар, баланс
+    пар 🕺/💃 с именами (сигнал для добора) и статусы отдельным блоком."""
     group = SimpleNamespace(name="Сальса", style="Сальса", level=1, lesson_time="19:00")
     summary = SurveySummary(
         total=5, yes=3, no=1, pending=1, no_names=["Олег"], pending_names=["Дима"]
@@ -63,19 +64,20 @@ async def test_survey_summary_shows_who_is_coming_split() -> None:
     coming = ComingRoster(male=["Боря"], female=["Аня", "Маша"], unknown=[])
     text = sched._format_summary(group, LESSON, summary, coming=coming)
     assert "💓 <b>Сальса · ур.1</b> — итоги опроса" in text
-    assert "придут <b>3/5</b>" in text and "█" in text
-    assert "Идут 3 человека:" in text
-    assert "🕺 1: Боря" in text and "💃 2: Аня, Маша" in text
-    assert "❌ не придут: Олег" in text and "⏳ молчат: Дима" in text
+    assert "придут <b>3/5</b>" in text and ui.BAR_FILLED in text
+    assert "🕺" in text and "1 — Боря" in text
+    assert "💃" in text and "2 — Аня, Маша" in text
+    # статусы — отдельным блоком через пустую строку
+    assert "\n\n❌ не придут: Олег" in text and "⏳ молчат: Дима" in text
 
 
-async def test_survey_summary_plural_singular() -> None:
-    """n=1 — корректная русская форма («Идёт 1 человек»), без бага «… : 1»."""
+async def test_survey_summary_single_female() -> None:
+    """Одна идущая: баланс-строка 💃 с именем, 🕺-строка с нулём не теряется."""
     group = SimpleNamespace(name="X", style="X", level=None, lesson_time="19:00")
     summary = SurveySummary(
         total=1, yes=1, no=0, pending=0, no_names=[], pending_names=[]
     )
     coming = ComingRoster(male=[], female=["Аня"], unknown=[])
     text = sched._format_summary(group, LESSON, summary, coming=coming)
-    assert "Идёт 1 человек:" in text
-    assert "💃 1: Аня" in text
+    assert "💃" in text and "1 — Аня" in text
+    assert "🕺" in text  # нулевая шкала парней всё равно видна

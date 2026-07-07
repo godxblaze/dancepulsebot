@@ -532,9 +532,9 @@ async def _build_today_view(teacher_id: int, span: str):
                 f"{ui.bar(summary.yes, summary.total)}",
             ]
             if summary.no_names:
-                lines.append(f"{ui.NO} {escape(', '.join(summary.no_names))}")
+                lines.append(f"{ui.NO} не придут: {escape(', '.join(summary.no_names))}")
             if summary.pending_names:
-                lines.append(f"{ui.PENDING} {escape(', '.join(summary.pending_names))}")
+                lines.append(f"{ui.PENDING} молчат: {escape(', '.join(summary.pending_names))}")
             if summary.undelivered:
                 lines.append(
                     f"{ui.UNDELIVERED} не дошло: {summary.undelivered} (не запустили бота)"
@@ -546,7 +546,9 @@ async def _build_today_view(teacher_id: int, span: str):
     if not blocks:
         empty = "На неделе занятий нет." if span == "week" else "На сегодня и завтра занятий нет."
         return empty, today_ping_keyboard([], span=span)
-    return "\n\n".join(blocks), today_ping_keyboard(pending_by_group, span=span)
+    # Тонкий разделитель между группами — на 3+ блоках пустой строки мало.
+    sep = f"\n{ui.DIVIDER}\n"
+    return sep.join(blocks), today_ping_keyboard(pending_by_group, span=span)
 
 
 async def _send_export_files(message: Message, teacher) -> None:
@@ -628,16 +630,17 @@ async def _build_stats_text(teacher, scope: str) -> str | None:
                 total_yes += summary.yes
                 total_all += summary.total
                 when_str = format_lesson_at(survey.lesson_at, "%d.%m", tz=tz_name)
+                # Компактно: «▰▰▰▰▰▰▱▱▱▱  25.06 · 6/10 → 5 (no-show 1)» — полная
+                # строка с «обещали/пришли» переносится на узких экранах.
                 line = (
                     f"{ui.bar(summary.yes, summary.total)}  "
-                    f"{when_str} · обещали {summary.yes}/{summary.total}"
+                    f"{when_str} · {summary.yes}/{summary.total}"
                 )
                 if summary.actual_attended is not None:
-                    # «обещали M → пришли N (no-show: K)»
                     no_show = max(0, summary.yes - summary.actual_attended)
-                    line += f" → пришли {summary.actual_attended}"
+                    line += f" → {summary.actual_attended}"
                     if no_show:
-                        line += f" (no-show: {no_show})"
+                        line += f" (no-show {no_show})"
                     total_actual_attended += summary.actual_attended
                     total_actual_marked += summary.actual_marked
                 lines.append(line)

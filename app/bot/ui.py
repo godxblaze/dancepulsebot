@@ -35,6 +35,7 @@ PAIR = "👯"    # занятие в /today (пара танцоров)
 YES = "✅"
 NO = "❌"
 PENDING = "⏳"
+DEADLINE = "⏰"  # «ответь до…» — не путать с PENDING (⏳ = «молчит» в сводках)
 UNDELIVERED = "📵"  # опрос не дошёл (заблокировали бота / не нажали Start) — не «молчит»
 BOX = "☐"
 # Действия
@@ -67,6 +68,15 @@ TIMEZONE = "🌐"
 # пары — мягкий социальный стимул прийти, без штрафов/баллов.
 COMMITMENT = "Без тебя пара останется без партнёра."
 
+# Тонкий разделитель блоков в многогрупповых сводках (/today): пустой строки
+# мало, когда блоков 3+ — они сливаются в одну простыню.
+DIVIDER = "─" * 12
+
+
+def no_gender_warning(n: int) -> str:
+    """Строка «ответившие без пола не в балансе» — одна на все экраны добора."""
+    return f"⚠️ ещё {n} без пола — не в балансе; проставь в карточке ученика."
+
 
 # ── Русская плюрализация ────────────────────────────────────────────────
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -95,26 +105,48 @@ def plural_with_count(n: int, one: str, few: str, many: str) -> str:
 
 
 # ── Прогресс-бар (единственная реализация в проекте) ────────────────────
+BAR_FILLED = "▰"
+BAR_EMPTY = "▱"
+
+
 def bar(filled: int, total: int, width: int = 10) -> str:
-    """Текстовый прогресс-бар из блоков, напр. ███████░░░ (фикс. ширина)."""
+    """Текстовый прогресс-бар, напр. ▰▰▰▰▰▰▰▱▱▱ (фикс. ширина).
+
+    Глифы ▰/▱ легче сплошных блоков █/░ — не сливаются в «кирпич» и
+    одинаково читаются в light/dark темах Telegram.
+    """
     if total <= 0:
-        return "░" * width
+        return BAR_EMPTY * width
     n = max(0, min(width, round(width * filled / total)))
     if filled > 0 and n == 0:
         # round-half-to-even может дать 0 блоков при реальном ненулевом вкладе
         # (напр. filled=1, total=20, width=10 → round(0.5)==0) — бар не должен
         # выглядеть полностью пустым, если кто-то реально есть.
         n = 1
-    return "█" * n + "░" * (width - n)
+    return BAR_FILLED * n + BAR_EMPTY * (width - n)
 
 
-def balance_bars(male: int, female: int) -> str:
-    """Двухстрочный блок гендерного баланса пар: 🕺-бар и 💃-бар одной шкалы."""
+def balance_bars(
+    male: int,
+    female: int,
+    male_names: Iterable[str] | None = None,
+    female_names: Iterable[str] | None = None,
+) -> str:
+    """Двухстрочный блок гендерного баланса пар: 🕺-бар и 💃-бар одной шкалы.
+
+    С `male_names`/`female_names` к строкам добавляются имена (экранируются) —
+    так сводка препода совмещает баланс и ростер в двух строках.
+    """
     total = male + female
-    return (
-        f"{MALE} {bar(male, total)} {male}\n"
-        f"{FEMALE} {bar(female, total)} {female}"
-    )
+    lines = [
+        f"{MALE} {bar(male, total)} {male}",
+        f"{FEMALE} {bar(female, total)} {female}",
+    ]
+    for i, names in enumerate((male_names, female_names)):
+        listed = ", ".join(names) if names is not None else ""
+        if listed:
+            lines[i] += f" — {escape(listed)}"
+    return "\n".join(lines)
 
 
 class _Roster(Protocol):

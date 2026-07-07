@@ -853,6 +853,7 @@ def support_pick_keyboard(
     коллег уровня нет). `can_expand` — показать кнопку «➕ из пула коллег»."""
     levels = levels or {}
     kb = InlineKeyboardBuilder()
+    n_single = len(candidates)
     for p in candidates:
         mark = "✅" if p.id in selected else "☐"
         lvl = f" · ур.{levels[p.id]}" if p.id in levels else ""
@@ -861,9 +862,12 @@ def support_pick_keyboard(
         )
     if can_expand:
         kb.button(text="➕ из пула коллег", callback_data=f"pickmore:{call_id}")
+        n_single += 1
+    # Действия — парой в последнем ряду: иная форма ряда визуально отделяет их
+    # от одноколоночного списка кандидатов (меньше шанс промахнуться).
     kb.button(text=f"📨 Позвать ({len(selected)})", callback_data=f"picksend:{call_id}")
-    kb.button(text="✗ Не сейчас · баланс ок", callback_data=f"picknope:{call_id}")
-    kb.adjust(1)
+    kb.button(text="✗ Баланс ок", callback_data=f"picknope:{call_id}")
+    kb.adjust(*([1] * n_single), 2)
     return kb.as_markup()
 
 
@@ -910,12 +914,14 @@ MENU_TEXTS = frozenset({
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     """Persistent bottom menu for the admin — instead of typing slash-commands."""
     # «Новая группа» уехала в карточку школы, «Экспорт» — в /stats.
+    # Ряды по смыслу: работа с группами / аналитика и добор / школа /
+    # сервисное (имя, помощь) — «Моё имя» не на одном уровне со «Школой».
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MENU_GROUPS), KeyboardButton(text=MENU_TODAY)],
             [KeyboardButton(text=MENU_STATS), KeyboardButton(text=MENU_POOL)],
-            [KeyboardButton(text=MENU_SCHOOL), KeyboardButton(text=MENU_NAME)],
-            [KeyboardButton(text=MENU_HELP)],
+            [KeyboardButton(text=MENU_SCHOOL)],
+            [KeyboardButton(text=MENU_NAME), KeyboardButton(text=MENU_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,

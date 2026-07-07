@@ -127,8 +127,11 @@ async def _poll_group(
         body_lines.extend(coming_block.split("\n"))
     deadline = _answer_deadline(lesson_at, evening_time, now, tz)
     if deadline:
-        body_lines.append(f"{ui.PENDING} ответь до {deadline}")
-    body_lines.append("Придёшь?")
+        body_lines.append(f"{ui.DEADLINE} ответь до {deadline}")
+    # CTA отделён пустой строкой и жирным — не тонет в соц-блоке и дедлайне.
+    if body_lines:
+        body_lines.append("")
+    body_lines.append("<b>Придёшь?</b>")
     text = ui.card(
         ui.title(ui.BRAND, escape(format_group_title(group))),
         meta=meta,
@@ -213,15 +216,29 @@ def _format_summary(
         f"придут <b>{summary.yes}/{summary.total}</b>  "
         f"{ui.bar(summary.yes, summary.total)}",
     ]
-    coming_block = ui.format_coming(coming) if coming is not None else ""
-    if coming_block:
-        body.extend(coming_block.split("\n"))
+    # Баланс пар + имена по полу — главный сигнал для решения о доборе.
+    if coming is not None and coming.total:
+        body.extend(
+            ui.balance_bars(
+                len(coming.male), len(coming.female),
+                male_names=coming.male, female_names=coming.female,
+            ).split("\n")
+        )
+        if coming.unknown:
+            body.append(f"• {len(coming.unknown)}: {escape(', '.join(coming.unknown))}")
+    # Проблемные статусы — отдельным блоком, чтобы не сливались с ростером.
+    statuses: list[str] = []
     if summary.no_names:
-        body.append(f"{ui.NO} не придут: {escape(', '.join(summary.no_names))}")
+        statuses.append(f"{ui.NO} не придут: {escape(', '.join(summary.no_names))}")
     if summary.pending_names:
-        body.append(f"{ui.PENDING} молчат: {escape(', '.join(summary.pending_names))}")
+        statuses.append(f"{ui.PENDING} молчат: {escape(', '.join(summary.pending_names))}")
     if summary.undelivered:
-        body.append(f"{ui.UNDELIVERED} не дошло: {summary.undelivered} (не запустили бота)")
+        statuses.append(
+            f"{ui.UNDELIVERED} не дошло: {summary.undelivered} (не запустили бота)"
+        )
+    if statuses:
+        body.append("")
+        body.extend(statuses)
     return ui.card(
         ui.title(ui.BRAND, escape(format_group_title(group))) + " — итоги опроса",
         meta=f"занятие {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {group.lesson_time}",
@@ -307,24 +324,29 @@ async def send_support_invites(
     tz: str | None,
 ) -> int:
     """Единый путь рассылки приглашений «нужна помощь» саппортам. Используется
-    и ручным picker'ом (recruit.py), и авто-режимами open_race/auto_top. Шлёт
-    plain-text (без HTML, как и прежний picker-invite). Возвращает число
-    успешно отправленных."""
-    text_lines = [
-        "🆘 Нужна помощь!",
-        f"«{title}» — {format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {lesson_time}.",
+    и ручным picker'ом (recruit.py), и авто-режимами open_race/auto_top.
+    Собирается через ui.card + HTML — как остальные экраны Pulse; title/place/
+    note приходят сырыми и экранируются здесь. Возвращает число успешно
+    отправленных."""
+    meta = [
+        f"{ui.CALENDAR} <b>«{escape(title)}» — "
+        f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {lesson_time}</b>",
     ]
-    if place:
-        text_lines.append(f"📍 {place}")
     if teachers_note:
-        text_lines.append(f"👤 {teachers_note}")
-    text_lines.append("Не хватает пары — сможешь подойти выручить?")
-    text = "\n".join(text_lines)
+        meta.append(f"{ui.TEACHER} {escape(teachers_note)}")
+    text = ui.card(
+        ui.title(ui.SUPPORT, "Нужна помощь!"),
+        meta=meta,
+        body="Не хватает пары — сможешь подойти выручить?",
+        footer=f"{ui.PLACE} {escape(place)}" if place else None,
+    )
     sent = 0
     for tg_id, _name in invited:
         try:
             await send_with_retry(
-                bot, tg_id, text, reply_markup=support_ask_keyboard(call_id)
+                bot, tg_id, text,
+                reply_markup=support_ask_keyboard(call_id),
+                parse_mode=ParseMode.HTML,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Could not invite support %s: %s", tg_id, e)
@@ -369,9 +391,7 @@ async def _send_recruit_picker(
     ])
     if unknown:
         # Ответившие «приду» без пола не попадают в баланс — бар может врать.
-        head_lines.append(
-            f"⚠️ ещё {unknown} без пола — не в балансе; проставь в карточке ученика."
-        )
+        head_lines.append(ui.no_gender_warning(unknown))
     head = "\n".join(head_lines)
     if candidates:
         body = head + "\n\nОтметь, кого позвать:"
@@ -443,7 +463,7 @@ def _auto_recruit_plan(
         )
     if unknown:
         # Ответившие «приду» без пола не попадают в баланс — как в _send_recruit_picker.
-        lead_text += f"\n⚠️ ещё {unknown} без пола — не в балансе; проставь в карточке ученика."
+        lead_text += f"\n{ui.no_gender_warning(unknown)}"
     return dict(
         call_id=call_id,
         invited=[(p.tg_user_id, p.full_name) for p in to_invite],
@@ -756,7 +776,6 @@ async def _maybe_remind(
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
-        "Напоминаю, что скоро занятие.",
     ]
     if group.teachers_note:
         meta.append(f"{ui.TEACHER} {escape(group.teachers_note)}")
@@ -764,7 +783,12 @@ async def _maybe_remind(
     text = ui.card(
         ui.title(ui.REMINDER, escape(format_group_title(group))),
         meta=meta,
-        body=[ui.COMMITMENT, "Придёшь?"],
+        body=[
+            "Напоминаю, что скоро занятие.",
+            ui.COMMITMENT,
+            "",
+            "<b>Придёшь?</b>",
+        ],
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
 
@@ -849,12 +873,16 @@ async def _maybe_reactivate(
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
-        "Давно тебя не было — соскучились!",
     ]
     text = ui.card(
         ui.title(ui.BRAND, escape(format_group_title(group))),
         meta=meta,
-        body=[ui.COMMITMENT, "Придёшь?"],
+        body=[
+            "Давно тебя не было — соскучились!",
+            ui.COMMITMENT,
+            "",
+            "<b>Придёшь?</b>",
+        ],
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
     for tg_id, pid in targets:

@@ -30,19 +30,19 @@ def test_plural_with_count() -> None:
 
 
 def test_bar_fixed_width_and_glyphs() -> None:
-    assert ui.bar(0, 10) == "░" * 10
-    assert ui.bar(10, 10) == "█" * 10
-    assert ui.bar(5, 10) == "█████░░░░░"
+    assert ui.bar(0, 10) == ui.BAR_EMPTY * 10
+    assert ui.bar(10, 10) == ui.BAR_FILLED * 10
+    assert ui.bar(5, 10) == ui.BAR_FILLED * 5 + ui.BAR_EMPTY * 5
     # фикс-ширина всегда соблюдается
     assert len(ui.bar(3, 7)) == 10
     assert len(ui.bar(3, 7, width=6)) == 6
     # деление на ноль не падает — пустой бар
-    assert ui.bar(0, 0) == "░" * 10
+    assert ui.bar(0, 0) == ui.BAR_EMPTY * 10
     # только два глифа
-    assert set(ui.bar(4, 9)) <= {"█", "░"}
+    assert set(ui.bar(4, 9)) <= {ui.BAR_FILLED, ui.BAR_EMPTY}
     # round-half-to-even: round(10*1/20)==round(0.5)==0 — но filled=1 реален,
     # бар не должен выглядеть полностью пустым.
-    assert ui.bar(1, 20).count("█") == 1
+    assert ui.bar(1, 20).count(ui.BAR_FILLED) == 1
 
 
 def test_balance_bars() -> None:
@@ -52,7 +52,14 @@ def test_balance_bars() -> None:
     assert lines[0].startswith(ui.MALE) and lines[0].endswith("8")
     assert lines[1].startswith(ui.FEMALE) and lines[1].endswith("2")
     # обе шкалы — одной длины (10)
-    assert "█" in lines[0] and "░" in lines[0]
+    assert ui.BAR_FILLED in lines[0] and ui.BAR_EMPTY in lines[0]
+
+
+def test_balance_bars_with_names_escapes() -> None:
+    out = ui.balance_bars(1, 2, male_names=["Боря"], female_names=["Аня", "М&М"])
+    lines = out.split("\n")
+    assert lines[0].endswith("1 — Боря")
+    assert lines[1].endswith("2 — Аня, М&amp;М")  # имена экранируются
 
 
 def test_card_structure() -> None:

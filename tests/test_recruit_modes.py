@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import text
 
 from app.bot.handlers.recruit import cb_support_pick_nope
@@ -68,6 +69,7 @@ async def test_set_recruit_mode_rejects_invalid(db) -> None:
         assert admin.recruit_mode == RecruitMode.curated.value
 
 
+@pytest.mark.schema_mutating  # DROP COLUMN мимо metadata — схему после теста пересоздать
 async def test_migration_adds_recruit_mode_to_old_db(db) -> None:
     """Старая БД без колонки → миграция добавляет её с дефолтом curated;
     существующие строки получают curated."""

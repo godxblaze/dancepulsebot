@@ -98,7 +98,7 @@ dancepulsebot/
 │   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports, schedule
 │   └── main.py
 ├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes
-└── tests/           # 352 теста, pytest + ruff гонятся через scripts/check.ps1
+└── tests/           # 365 тестов, pytest + ruff гонятся через scripts/check.ps1
 ```
 
 ## Требования
@@ -135,10 +135,11 @@ SQLite-файл (`dance.sqlite3`) создаётся при первом ста�
 ## Тесты
 
 ```powershell
-pytest tests/
+pytest tests/          # серийно, ~28с
+pytest tests/ -n 8     # параллельно (pytest-xdist), ~12с — так гоняет и scripts/check.ps1
 ```
 
-352 теста (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
+365 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Схема БД строится один раз на процесс, между тестами данные сносятся одним `executescript`; тесты, мутирующие DDL, помечены `@pytest.mark.schema_mutating`. Не ставь `-n auto` — на многоядерной машине старт десятков воркеров съедает выигрыш. Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
 
 ## Roadmap
 

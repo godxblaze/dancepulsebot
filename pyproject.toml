@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
+    "pytest-xdist>=3.6,<4",
     "ruff>=0.7,<1",
 ]
 # Живые e2e через настоящий Telegram (см. e2e/README.md). Не нужны для обычной
@@ -40,3 +41,6 @@ select = ["E", "F", "I", "B", "UP", "ASYNC"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
+markers = [
+    "schema_mutating: тест меняет DDL (регрессии миграций) — conftest пересоздаёт схему до и после",
+]

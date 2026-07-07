@@ -1,7 +1,10 @@
 import os
 
 # Point the app at a throwaway DB before any app module imports settings.
-os.environ["DB_PATH"] = "_pytest_dance.sqlite3"
+# Per-PID filename — иначе конкурентные pytest-процессы (напр. Stop-hook этой
+# сессии и другой параллельной Claude-сессии в том же репо) делят один файл и
+# гоняют DROP/CREATE TABLE друг у друга из-под ног («no such table» флейки).
+os.environ["DB_PATH"] = f"_pytest_dance_{os.getpid()}.sqlite3"
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402

@@ -21,7 +21,7 @@
 Одноразовая настройка:
 
 ```powershell
-pip install -e ".[e2e]"
+pip install -e ".[dev,e2e]"
 
 # 1. api_id / api_hash с https://my.telegram.org → API development tools — в .env:
 #    E2E_API_ID=...   E2E_API_HASH=...

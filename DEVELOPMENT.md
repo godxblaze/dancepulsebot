@@ -198,7 +198,7 @@ pytest tests/
 прокликать `@dancepulsebot` через настоящий Telegram — каталог [e2e/](e2e/):
 
 - **[e2e/live/](e2e/live/)** — Telethon: user-аккаунт по MTProto шлёт боту сообщения
-  и жмёт inline-кнопки программно. Headless, повторяемый suite. `pip install -e ".[e2e]"`,
+  и жмёт inline-кнопки программно. Headless, повторяемый suite. `pip install -e ".[dev,e2e]"`,
   одноразовый `python -m e2e.live.login`, затем `pytest e2e/live -v`.
 - **[e2e/web/](e2e/web/)** — Playwright MCP: клики в видимом web.telegram.org + скриншоты,
   для визуальных спот-чеков (нужен Node.js).

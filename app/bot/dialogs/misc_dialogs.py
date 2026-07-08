@@ -46,6 +46,15 @@ from app.services import venues as venues_svc
 log = logging.getLogger(__name__)
 
 
+async def on_cancel_notify(
+    call: CallbackQuery, _btn: Button, _manager: DialogManager
+) -> None:
+    """Единый фидбек Cancel-кнопок: молчаливое снятие клавиатуры на пилоте
+    читается как «бот завис» — шлём короткое подтверждение."""
+    if call.message:
+        await call.message.answer("⏭ Отменено")
+
+
 # ── CreateSchool ─────────────────────────────────────────────────────
 
 
@@ -133,7 +142,7 @@ create_school_dialog = Dialog(
             "Например: «Школа сальсы» или «Студия Ритм»."
         ),
         TextInput(id="cs_name", on_success=_on_create_school_typed),
-        Cancel(Const("⏭ Отмена")),
+        Cancel(Const("⏭ Отмена"), on_click=on_cancel_notify),
         state=CreateSchoolSG.name,
     ),
     Window(
@@ -194,7 +203,7 @@ rename_school_dialog = Dialog(
     Window(
         Const("Напиши новое название школы."),
         TextInput(id="rs_name", on_success=_on_rename_school_typed),
-        Cancel(Const("⏭ Отмена")),
+        Cancel(Const("⏭ Отмена"), on_click=on_cancel_notify),
         state=RenameSchoolSG.name,
     ),
 )
@@ -260,7 +269,7 @@ edit_name_dialog = Dialog(
             "Сейчас: «{current}»"
         ),
         TextInput(id="en_name", on_success=_on_edit_name_typed),
-        Cancel(Const("⏭ Отмена")),
+        Cancel(Const("⏭ Отмена"), on_click=on_cancel_notify),
         getter=_edit_name_getter,
         state=EditNameSG.name,
         parse_mode=ParseMode.HTML,
@@ -368,6 +377,23 @@ async def _on_broadcast_send(
     await manager.done()
 
 
+async def _on_broadcast_cancel(
+    call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
+    """Broadcast открывается из карточки группы и съедает её — на Cancel
+    возвращаем карточку заново, а не голое «Отменено». Импорт ленивый —
+    admin.py сам лениво импортирует dialogs."""
+    if call.message is None:
+        return
+    group_id = manager.dialog_data.get("group_id") or _group_id_from_start(manager)
+    if group_id is None:
+        await call.message.answer("⏭ Отменено")
+        return
+    from app.bot.handlers.admin import send_group_card
+
+    await send_group_card(call.message, call.from_user.id, int(group_id))
+
+
 broadcast_dialog = Dialog(
     Window(
         Const(
@@ -375,7 +401,7 @@ broadcast_dialog = Dialog(
             "Чтобы передумать — нажми «Отмена»."
         ),
         TextInput(id="bc_text", on_success=_on_broadcast_text_typed),
-        Cancel(Const("⏭ Отмена")),
+        Cancel(Const("⏭ Отмена"), on_click=_on_broadcast_cancel),
         state=BroadcastSG.text,
     ),
     Window(
@@ -383,7 +409,7 @@ broadcast_dialog = Dialog(
             "📢 Будет отправлено {count_phrase} «{title}»:\n\n<i>{text}</i>"
         ),
         Button(Const("📨 Отправить"), id="bc_send", on_click=_on_broadcast_send),
-        Cancel(Const("◀ Отмена")),
+        Cancel(Const("◀ Отмена"), on_click=_on_broadcast_cancel),
         getter=_broadcast_preview_getter,
         parse_mode=ParseMode.HTML,
         state=BroadcastSG.confirm,
@@ -440,7 +466,7 @@ add_venue_dialog = Dialog(
             "(например: «Тверская 10» или «Студия Ритм»):"
         ),
         TextInput(id="av_name", on_success=_on_add_venue_typed),
-        Cancel(Const("✖ Отмена")),
+        Cancel(Const("✖ Отмена"), on_click=on_cancel_notify),
         state=AddVenueSG.name,
     ),
 )
@@ -473,7 +499,7 @@ add_teacher_preset_dialog = Dialog(
             "Связка появится кнопкой в мастере группы:"
         ),
         TextInput(id="ap_note", on_success=_on_add_preset_typed),
-        Cancel(Const("✖ Отмена")),
+        Cancel(Const("✖ Отмена"), on_click=on_cancel_notify),
         state=AddTeacherPresetSG.note,
     ),
 )

@@ -229,7 +229,8 @@ async def test_new_group_dialog_direct_text_on_venue_window(db) -> None:
 async def test_new_group_dialog_cancel_from_style_window(db) -> None:
     """Единственная точка выхода из мастера «Новая группа» без прохождения
     всех 9 шагов — Cancel на первом окне (все остальные окна доступны через
-    «◀ Назад», который в итоге ведёт сюда)."""
+    «◀ Назад», который в итоге ведёт сюда). Отмена не должна быть немой —
+    иначе на пилоте выглядит, будто бот завис."""
     await make_group()
     client, mock, bot = make_client(TG)
 
@@ -239,6 +240,7 @@ async def test_new_group_dialog_cancel_from_style_window(db) -> None:
         admin = await admins_svc.get_by_tg_id(s, TG)
         groups = await groups_svc.admin_visible_groups(s, admin.id)
     assert len(groups) == 1  # только группа из make_group, мастер не создал вторую
+    assert any("Отменено" in t for t in bot.texts())
 
 
 async def test_new_group_dialog_survives_start_then_resets(db) -> None:
@@ -374,6 +376,40 @@ async def test_broadcast_dialog(db) -> None:
     assert sum(1 for t in bodies if "Завтра отмена" in t) >= 2
 
 
+async def test_broadcast_dialog_cancel_shows_group_card(db) -> None:
+    """«Отмена» в broadcast раньше молча снимала клавиатуру. Диалог открылся
+    из карточки группы и съел её — возвращаем карточку заново."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+
+    await client.send("/groups")
+    await click_plain(client, bot, "Бачата")
+    await click_plain(client, bot, "Сообщение")
+    assert "отправлю всем" in mock.last_message().text
+
+    before = len(bot.outbox)
+    await click(client, mock, "Отмена")
+    cards = [m for m in bot.outbox[before:] if "Бачата" in (m.text or "")]
+    assert cards, "после «Отмена» не вернулась карточка группы"
+
+
+async def test_rename_school_dialog_cancel_feedback(db) -> None:
+    """Cancel в остальных диалогах шлёт «⏭ Отменено», а не молчит."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/school")
+    await click_plain(client, bot, "Переименовать школу")
+    assert "новое название" in mock.last_message().text
+    await click(client, mock, "Отмена")
+    assert any("Отменено" in t for t in bot.texts())
+    async with session_scope() as s:
+        assert (await schools_svc.get_school(s, sid)).name != "Отменено"
+
+
 async def test_edit_group_dialog_direct_text_on_style_window(db) -> None:
     """Тот же паттерн, что в new_group: style-окно должно принимать текст
     напрямую, без обязательного тапа «Ввести своё»."""
@@ -476,9 +512,35 @@ async def test_edit_group_dialog(db) -> None:
     await click(client, mock, "Очистить")
     assert (await get_group()).venue_id is None
 
-    # finish
+    # finish → настоящая карточка группы (см. отдельный тест ниже)
     await click(client, mock, "К группе")
-    assert any("Готово" in t for t in bot.texts())
+    assert bot.find_button_message("Ученики") is not None
+
+
+async def test_edit_group_dialog_back_to_group_shows_card(db) -> None:
+    """«◀ К группе» из меню редактора должен показать карточку группы —
+    как одноимённые кнопки в «Ответственных» и «Зале на занятие», а не
+    отсылать к /groups текстом (живой e2e-прогон 2026-07-08)."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+
+    await client.send("/groups")
+    await click_plain(client, bot, "Бачата")
+    await click_plain(client, bot, "Изменить")
+    assert "Что меняем" in mock.last_message().text
+
+    before = len(bot.outbox)
+    await click(client, mock, "К группе")
+    cards = [m for m in bot.outbox[before:] if "Бачата" in (m.text or "")]
+    assert cards, "после «К группе» не пришла карточка группы"
+    buttons = [
+        b.text for row in cards[-1].reply_markup.inline_keyboard for b in row
+    ]
+    assert any("Ученики" in t for t in buttons), buttons
+    assert any("Изменить" in t for t in buttons), buttons
 
 
 async def test_edit_group_dialog_notifies_on_reschedule_with_open_survey(db) -> None:

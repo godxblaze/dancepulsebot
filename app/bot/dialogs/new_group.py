@@ -33,6 +33,7 @@ from aiogram_dialog.widgets.kbd import (
 )
 from aiogram_dialog.widgets.text import Const, Format
 
+from app.bot.dialogs.misc_dialogs import on_cancel_notify
 from app.bot.dialogs.states import NewGroupSG, user_from
 from app.bot.utils import format_duration, format_group_title, get_bot_username, qr_png
 from app.core.config import settings
@@ -493,7 +494,7 @@ new_group_dialog = Dialog(
         ),
         Button(Const("✏️ Ввести своё"), id="style_type", on_click=_on_style_type),
         Button(Const("⏭ Пропустить"), id="style_skip", on_click=_on_style_skip),
-        Cancel(Const("✖ Отмена")),
+        Cancel(Const("✖ Отмена"), on_click=on_cancel_notify),
         TextInput(id="style_direct_input", on_success=_on_style_typed),
         getter=_style_getter,
         state=NewGroupSG.style,

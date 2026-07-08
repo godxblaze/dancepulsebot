@@ -229,7 +229,8 @@ async def test_new_group_dialog_direct_text_on_venue_window(db) -> None:
 async def test_new_group_dialog_cancel_from_style_window(db) -> None:
     """Единственная точка выхода из мастера «Новая группа» без прохождения
     всех 9 шагов — Cancel на первом окне (все остальные окна доступны через
-    «◀ Назад», который в итоге ведёт сюда)."""
+    «◀ Назад», который в итоге ведёт сюда). Отмена не должна быть немой —
+    иначе на пилоте выглядит, будто бот завис."""
     await make_group()
     client, mock, bot = make_client(TG)
 
@@ -239,6 +240,7 @@ async def test_new_group_dialog_cancel_from_style_window(db) -> None:
         admin = await admins_svc.get_by_tg_id(s, TG)
         groups = await groups_svc.admin_visible_groups(s, admin.id)
     assert len(groups) == 1  # только группа из make_group, мастер не создал вторую
+    assert any("Отменено" in t for t in bot.texts())
 
 
 async def test_new_group_dialog_survives_start_then_resets(db) -> None:
@@ -372,6 +374,40 @@ async def test_broadcast_dialog(db) -> None:
     # both students got the broadcast text
     bodies = bot.texts()
     assert sum(1 for t in bodies if "Завтра отмена" in t) >= 2
+
+
+async def test_broadcast_dialog_cancel_shows_group_card(db) -> None:
+    """«Отмена» в broadcast раньше молча снимала клавиатуру. Диалог открылся
+    из карточки группы и съел её — возвращаем карточку заново."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+
+    await client.send("/groups")
+    await click_plain(client, bot, "Бачата")
+    await click_plain(client, bot, "Сообщение")
+    assert "отправлю всем" in mock.last_message().text
+
+    before = len(bot.outbox)
+    await click(client, mock, "Отмена")
+    cards = [m for m in bot.outbox[before:] if "Бачата" in (m.text or "")]
+    assert cards, "после «Отмена» не вернулась карточка группы"
+
+
+async def test_rename_school_dialog_cancel_feedback(db) -> None:
+    """Cancel в остальных диалогах шлёт «⏭ Отменено», а не молчит."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+
+    await client.send("/school")
+    await click_plain(client, bot, "Переименовать школу")
+    assert "новое название" in mock.last_message().text
+    await click(client, mock, "Отмена")
+    assert any("Отменено" in t for t in bot.texts())
+    async with session_scope() as s:
+        assert (await schools_svc.get_school(s, sid)).name != "Отменено"
 
 
 async def test_edit_group_dialog_direct_text_on_style_window(db) -> None:

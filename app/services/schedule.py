@@ -55,14 +55,22 @@ def school_tz_zone(tz_name: str | None = None) -> ZoneInfo:
     return ZoneInfo(settings.timezone)
 
 
+_WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
 def format_lesson_at(
     dt: datetime, fmt: str = "%d.%m в %H:%M", *, tz: str | None = None,
 ) -> str:
     """Aware UTC → строка в указанном TZ школы. Naive datetime трактуется
-    как UTC (legacy fallback). tz=None → settings.timezone."""
+    как UTC (legacy fallback). tz=None → settings.timezone. `%a` подставляется
+    русским сокращением (Пн..Вс) по местному дню недели — strftime дал бы
+    английское из C-локали."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(school_tz_zone(tz)).strftime(fmt)
+    local = dt.astimezone(school_tz_zone(tz))
+    if "%a" in fmt:
+        fmt = fmt.replace("%a", _WEEKDAYS_SHORT[local.weekday()])
+    return local.strftime(fmt)
 
 
 def parse_weekdays(weekdays: str) -> set[int]:
@@ -71,9 +79,8 @@ def parse_weekdays(weekdays: str) -> set[int]:
 
 
 def format_weekdays(weekdays: str) -> str:
-    names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     days = sorted(parse_weekdays(weekdays))
-    return ", ".join(names[d] for d in days) if days else "—"
+    return ", ".join(_WEEKDAYS_SHORT[d] for d in days) if days else "—"
 
 
 def format_weekday_long(dt: datetime, *, tz: str | None = None) -> str:

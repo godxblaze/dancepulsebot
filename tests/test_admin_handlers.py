@@ -206,9 +206,14 @@ async def test_devstats_mixed_activity_does_not_crash(db) -> None:
         active = await admins.get_or_create(s, 201, "a1", "Активный")
         await admins.get_or_create(s, 202, "a2", "Тихий")
         g = await groups.create_group(s, active.id, "Сальса", "0", "19:00", 18)
-        await surveys.get_or_create_survey(
+        p, _ = await persons.add_to_group(s, g, 301, "u", "Ученик")
+        survey, _ = await surveys.get_or_create_survey(
             s, g.id, SurveyKind.attendance, datetime(2026, 5, 25, 16, 0, tzinfo=UTC)
         )
+        # last_activity считает только опрошенные surveys (см. devstats.py) —
+        # без Response-строки он неотличим от backfill-заглушки пропущенного
+        # занятия и не должен участвовать в срезе активности.
+        await surveys.ensure_responses(s, survey.id, [p.id])
         rows = await _devstats_snapshot(s)
 
     assert len(rows) == 2
@@ -216,6 +221,23 @@ async def test_devstats_mixed_activity_does_not_crash(db) -> None:
     assert rows[0]["last_activity"] is not None
     assert rows[0]["last_activity"].tzinfo is not None
     assert rows[1]["last_activity"] is None
+
+
+async def test_devstats_ignores_backfilled_survey_without_responses(db) -> None:
+    """Survey без единой Response-строки — бэкфилл занятия, пропущенного во
+    время даунтайма бота (scheduler.backfill_missed_surveys), а не реальная
+    активность. Не должен ложно «омолаживать» last_activity стухшей школы."""
+    from app.bot.handlers.admin import _devstats_snapshot
+
+    async with session_scope() as s:
+        admin = await admins.get_or_create(s, 301, "a3", "Стухший")
+        g = await groups.create_group(s, admin.id, "Бачата", "0", "19:00", 18)
+        await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, datetime(2026, 6, 1, 16, 0, tzinfo=UTC)
+        )  # backfill-заглушка: без ensure_responses
+        rows = await _devstats_snapshot(s)
+
+    assert rows[0]["last_activity"] is None
 
 
 # ── /today ───────────────────────────────────────────────────────────

@@ -38,7 +38,14 @@ async def school_row(session: AsyncSession, school: School, since: datetime) -> 
         select(func.max(Survey.created_at))
         .select_from(Survey)
         .join(Group, Survey.group_id == Group.id)
-        .where(Group.school_id == school.id)
+        .where(
+            Group.school_id == school.id,
+            # Backfill (scheduler.backfill_missed_surveys) заводит closed Survey
+            # без единой Response-строки задним числом — его created_at=«сейчас»
+            # ложно омолодил бы стухшую школу. Считаем активностью только
+            # survey, по которому реально кого-то опросили.
+            select(Response.id).where(Response.survey_id == Survey.id).exists(),
+        )
     )).scalar_one()
     # SQLite отдаёт naive-UTC — нормализуем к aware (конвенция persons.py),
     # иначе потребители падают на сравнении с aware-датами.

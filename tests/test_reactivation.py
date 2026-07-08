@@ -104,6 +104,24 @@ async def test_lapsed_members_ignores_cancelled_lessons(db) -> None:
     assert active_id not in [p.id for p in lapsed]
 
 
+async def test_lapsed_members_ignores_backfilled_empty_survey(db) -> None:
+    """Survey без единой Response-строки — бэкфилл занятия, пропущенного во
+    время даунтайма бота (см. scheduler.backfill_missed_surveys). Без фильтра
+    он занял бы место в «последних k», и т.к. ни у кого нет там Response,
+    lapsed_members молча вернул бы пусто вместо реального лапседа."""
+    ids = await _setup_group()
+    async with session_scope() as s:
+        backfilled, _ = await surveys.get_or_create_survey(
+            s, ids.group_id, SurveyKind.attendance, PAST1 - timedelta(days=1)
+        )
+        backfilled.status = SurveyStatus.closed
+        backfilled.summary_sent = True
+        await s.flush()
+    async with session_scope() as s:
+        lapsed = await surveys.lapsed_members(s, ids.group_id, k=2)
+    assert [p.id for p in lapsed] == [ids.lapsed]
+
+
 async def test_lapsed_member_gets_one_reactivation(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)

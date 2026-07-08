@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from html import escape
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
@@ -46,10 +48,19 @@ from app.services.schedule import (
     format_lesson_at,
     format_weekday_long,
     next_lesson_at,
+    past_lessons_since,
     utc_now,
 )
 
 log = logging.getLogger(__name__)
+
+# Watchdog (scripts/watchdog_bot.ps1) следит за свежестью этого файла — если
+# event loop завис (тик умер, а процесс остался «зелёным»), heartbeat
+# перестаёт обновляться и watchdog рестартует Task Scheduler-задачу.
+HEARTBEAT_FILE = Path("logs/heartbeat")
+# Насколько глубоко в прошлое искать пропущенные во время даунтайма занятия
+# при старте/тике — сутки с запасом перекрывают типичный простой пилота.
+BACKFILL_LOOKBACK = timedelta(hours=24)
 
 # Опрос должен уйти не позже чем за столько до вечернего разбора, чтобы к
 # фиксации у людей было время ответить (иначе фаза 1 считает пустой опрос).
@@ -986,9 +997,62 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
                 await supports_svc.mark_pending_notified(s, call_id)
 
 
+async def _heartbeat_tick() -> None:
+    """Раз в минуту — атомарная отметка «event loop жив» для watchdog'а.
+    tmp-файл + os.replace, чтобы watchdog никогда не читал недописанный файл
+    (иначе поймал бы ложное «heartbeat повреждён»)."""
+    HEARTBEAT_FILE.parent.mkdir(exist_ok=True)
+    tmp = HEARTBEAT_FILE.with_suffix(".tmp")
+    tmp.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+    os.replace(tmp, HEARTBEAT_FILE)
+
+
+async def backfill_missed_surveys(now: datetime) -> int:
+    """Занятие, чьё poll-окно целиком пришлось на даунтайм бота, иначе бы
+    бесследно выпало из статистики — tick() создаёт Survey только когда сам
+    доживает до окна. Здесь догоняем задним числом: для каждой активной
+    группы ищем occurrence'ы расписания за последние `BACKFILL_LOOKBACK`,
+    у которых ещё нет Survey, и заводим его сразу closed — опрос/напоминания/
+    добор по нему не нужны, занятие уже прошло. Response-строки не создаём
+    (иначе всем участникам задним числом влепили бы «прогул» — см.
+    surveys.lapsed_members/recent_closed_surveys, которые эти пустые surveys
+    исключают). Идемпотентно (get_or_create по уникальному индексу)."""
+    since = now - BACKFILL_LOOKBACK
+    created = 0
+    async with session_scope() as s:
+        groups = await groups_svc.active_groups(s)
+        tz_cache: dict[int, str] = {}
+        for group in groups:
+            tz = None
+            if group.school_id is not None:
+                if group.school_id not in tz_cache:
+                    tz_cache[group.school_id] = await schools_svc.get_timezone(
+                        s, group.school_id
+                    )
+                tz = tz_cache[group.school_id]
+            occurrences = past_lessons_since(
+                group.weekdays, group.lesson_time, now, since, tz=tz
+            )
+            for lesson_at in occurrences:
+                if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
+                    continue
+                survey, was_created = await surveys_svc.get_or_create_survey(
+                    s, group.id, SurveyKind.attendance, lesson_at
+                )
+                if was_created:
+                    survey.status = SurveyStatus.closed
+                    survey.summary_sent = True
+                    await s.flush()
+                    created += 1
+    if created:
+        log.info("Backfill: создано %d closed survey(s) для пропущенных занятий", created)
+    return created
+
+
 async def tick(bot: Bot) -> None:
     """Runs every 15 min: close past surveys, send polls, auto-summaries and recruit."""
     now = utc_now()
+    await backfill_missed_surveys(now)
     async with session_scope() as s:
         closed = await surveys_svc.close_past_surveys(s, now)
     if closed:
@@ -1102,5 +1166,18 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
-    log.info("Scheduler built — attendance tick every 15 min, conflict sentinel every 5 min")
+    sched.add_job(
+        _heartbeat_tick,
+        "interval",
+        minutes=1,
+        id="heartbeat",
+        next_run_time=datetime.now(ZoneInfo(settings.timezone)),
+        misfire_grace_time=60,
+        max_instances=1,
+        coalesce=True,
+    )
+    log.info(
+        "Scheduler built — attendance tick every 15 min, conflict sentinel every 5 min, "
+        "heartbeat every 1 min"
+    )
     return sched

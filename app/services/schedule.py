@@ -179,3 +179,41 @@ def upcoming_lessons(
             if len(result) >= n:
                 break
     return result
+
+
+def past_lessons_since(
+    weekdays: str,
+    lesson_time: str,
+    now_utc: datetime,
+    since_utc: datetime,
+    *,
+    tz: str | None = None,
+) -> list[datetime]:
+    """Occurrence'ы расписания в (since_utc, now_utc] — обратное к
+    `upcoming_lessons`, для backfill'а занятий, пропущенных во время
+    даунтайма бота. Пустой список — если weekdays пуст или окно не
+    захватывает ни одного дня."""
+    days = parse_weekdays(weekdays)
+    if not days:
+        return []
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=UTC)
+    if since_utc.tzinfo is None:
+        since_utc = since_utc.replace(tzinfo=UTC)
+    school_tz = school_tz_zone(tz)
+    since_local = since_utc.astimezone(school_tz)
+    now_local = now_utc.astimezone(school_tz)
+    hour, minute = (int(x) for x in lesson_time.split(":"))
+    result: list[datetime] = []
+    span_days = (now_local.date() - since_local.date()).days
+    for offset in range(0, span_days + 1):
+        day = (since_local + timedelta(days=offset)).date()
+        if day.weekday() not in days:
+            continue
+        candidate_local = datetime(
+            day.year, day.month, day.day, hour, minute, tzinfo=school_tz,
+        )
+        candidate_utc = candidate_local.astimezone(UTC)
+        if since_utc < candidate_utc <= now_utc:
+            result.append(candidate_utc)
+    return result

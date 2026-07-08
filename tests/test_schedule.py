@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.services.schedule import (
@@ -8,6 +8,7 @@ from app.services.schedule import (
     format_weekdays,
     next_lesson_at,
     parse_weekdays,
+    past_lessons_since,
 )
 
 _MSK = ZoneInfo("Europe/Moscow")
@@ -100,3 +101,36 @@ def test_evening_fix_at_morning_lesson_still_prev_day() -> None:
     fix = evening_fix_at(lesson, "20:00", tz="Europe/Moscow")
     assert fix == _msk(2026, 5, 24, 20, 0)
     assert fix < lesson
+
+
+def test_past_lessons_since_finds_missed_occurrence() -> None:
+    # Занятия Пн/Ср 19:00 МСК. Бот лежал с вс 12:00 до вт 12:00 — понедельничное
+    # занятие целиком пришлось на даунтайм и должно найтись бэкфиллом.
+    since = _msk(2026, 5, 24, 12, 0)  # воскресенье
+    now = _msk(2026, 5, 26, 12, 0)  # вторник
+    assert past_lessons_since("0,2", "19:00", now, since) == [_msk(2026, 5, 25, 19, 0)]
+
+
+def test_past_lessons_since_excludes_boundaries() -> None:
+    # Ровно на границах (since, now] занятие не входит.
+    lesson = _msk(2026, 5, 25, 19, 0)
+    assert past_lessons_since("0", "19:00", lesson, lesson) == []
+    now = lesson - timedelta(seconds=1)
+    since = lesson - timedelta(days=7)
+    assert past_lessons_since("0", "19:00", now, since) == []
+
+
+def test_past_lessons_since_no_weekdays() -> None:
+    now = _msk(2026, 5, 26, 12, 0)
+    since = now - timedelta(days=2)
+    assert past_lessons_since("", "19:00", now, since) == []
+
+
+def test_past_lessons_since_multiple_occurrences() -> None:
+    # Окно захватывает оба занятия недели (Пн и Ср).
+    since = _msk(2026, 5, 24, 0, 0)  # воскресенье
+    now = _msk(2026, 5, 28, 0, 0)  # четверг
+    assert past_lessons_since("0,2", "19:00", now, since) == [
+        _msk(2026, 5, 25, 19, 0),
+        _msk(2026, 5, 27, 19, 0),
+    ]

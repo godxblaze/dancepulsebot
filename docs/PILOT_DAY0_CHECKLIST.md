@@ -3,11 +3,12 @@
 Команды копируются как есть, запускать из корня проекта в PowerShell от администратора
 (регистрация Task Scheduler-задач требует прав администратора).
 
-## 1. Task Scheduler — автозапуск + бэкап
+## 1. Task Scheduler — автозапуск + бэкап + watchdog
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install_bot_task.ps1
 powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
+powershell -ExecutionPolicy Bypass -File scripts/install_watchdog_task.ps1
 ```
 
 Проверка:
@@ -15,10 +16,18 @@ powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
 ```powershell
 Get-ScheduledTaskInfo -TaskName "DancePulseBot"
 Get-ScheduledTaskInfo -TaskName "DancePulseBackup"
+Get-ScheduledTaskInfo -TaskName "DancePulseWatchdog"
 ```
 
-Обе задачи зарегистрированы под принципалом SYSTEM (`ServiceAccount`) — стартуют
+Все три задачи зарегистрированы под принципалом SYSTEM (`ServiceAccount`) — стартуют
 без логина пользователя. Запустить бота сейчас: `Start-ScheduledTask -TaskName "DancePulseBot"`.
+
+`DancePulseWatchdog` — рестартует `DancePulseBot`, если event loop завис
+(процесс жив, но heartbeat в `logs/heartbeat` не обновлялся >10 мин) или
+задача не в состоянии `Running`; шлёт алерт `DEVELOPER_ID` напрямую через
+Telegram Bot API (работает, даже если сам бот не поднимается). Проверка после
+установки: `Get-ScheduledTaskInfo -TaskName "DancePulseWatchdog"` — `LastRunTime`
+должен обновляться каждые 5 минут.
 
 ## 2. Свежая боевая БД
 

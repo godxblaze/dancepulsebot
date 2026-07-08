@@ -1,14 +1,15 @@
 """Integration tests for the attendance scheduler tick."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import select
 
-from app.db.models import SurveyKind, SurveyStatus
+from app.db.models import Response, SurveyKind, SurveyStatus
 from app.db.session import session_scope
 from app.scheduler import scheduler as sched
-from app.services import admins, groups, persons, surveys
+from app.services import admins, cancellations, groups, persons, surveys
 
 # Школа в Europe/Moscow (UTC+3). Тесты пишут датавремя в местном
 # восприятии «19:00 в понедельник в Москве», а в БД и сравнениях оно живёт
@@ -427,3 +428,94 @@ async def test_reactivate_does_not_double_message_freshly_polled_lapsed(db, free
     assert any(
         m.chat_id == 300 and "соскучились" in m.text for m in bot.sent
     )
+
+
+async def test_heartbeat_tick_writes_atomic_timestamp(tmp_path, monkeypatch) -> None:
+    hb = tmp_path / "sub" / "heartbeat"
+    monkeypatch.setattr(sched, "HEARTBEAT_FILE", hb)
+    await sched._heartbeat_tick()
+    assert hb.exists()
+    assert not hb.with_suffix(".tmp").exists()  # tmp-файл не остался — os.replace отработал
+    ts = datetime.fromisoformat(hb.read_text(encoding="utf-8"))
+    assert ts.tzinfo is not None  # aware UTC, не naive
+
+
+async def test_backfill_creates_closed_survey_for_missed_lesson(db) -> None:
+    """Занятие целиком прошло во время даунтайма (никакой tick его не
+    застал) — backfill находит его по расписанию и заводит closed survey
+    без Response-строк."""
+    group_id = await _make_group(n_students=2)
+    now = MONDAY_LESSON + timedelta(hours=2)  # бот «ожил» через 2ч после занятия
+    created = await sched.backfill_missed_surveys(now)
+    assert created == 1
+
+    async with session_scope() as s:
+        survey = await surveys.find_attendance_survey(s, group_id, MONDAY_LESSON)
+        assert survey is not None
+        assert survey.status == SurveyStatus.closed
+        assert survey.summary_sent is True
+        responses = (await s.execute(
+            select(Response).where(Response.survey_id == survey.id)
+        )).scalars().all()
+        assert responses == []  # никому не начислен «прогул»
+
+
+async def test_backfill_skips_cancelled_lesson(db) -> None:
+    await _make_group(n_students=2)
+    async with session_scope() as s:
+        await cancellations.cancel(s, (await groups.active_groups(s))[0].id, MONDAY_LESSON)
+    now = MONDAY_LESSON + timedelta(hours=2)
+    created = await sched.backfill_missed_surveys(now)
+    assert created == 0
+
+
+async def test_backfill_skips_existing_survey(db) -> None:
+    """Обычный тик уже успел завести survey (например открыл его до сбоя) —
+    backfill не должен его трогать/пересоздавать."""
+    group_id = await _make_group(n_students=2)
+    async with session_scope() as s:
+        survey, _ = await surveys.get_or_create_survey(
+            s, group_id, SurveyKind.attendance, MONDAY_LESSON
+        )
+        assert survey.status == SurveyStatus.open
+
+    now = MONDAY_LESSON + timedelta(hours=2)
+    created = await sched.backfill_missed_surveys(now)
+    assert created == 0
+    async with session_scope() as s:
+        survey = await surveys.find_attendance_survey(s, group_id, MONDAY_LESSON)
+        assert survey.status == SurveyStatus.open  # backfill не тронул статус
+
+
+async def test_backfill_skips_lessons_older_than_lookback(db) -> None:
+    await _make_group(n_students=2)
+    now = MONDAY_LESSON + timedelta(days=3)  # занятие вне 24ч lookback
+    created = await sched.backfill_missed_surveys(now)
+    assert created == 0
+    async with session_scope() as s:
+        survey = await surveys.find_attendance_survey(
+            s, (await groups.active_groups(s))[0].id, MONDAY_LESSON
+        )
+        assert survey is None
+
+
+async def test_backfill_is_idempotent(db) -> None:
+    await _make_group(n_students=2)
+    now = MONDAY_LESSON + timedelta(hours=2)
+    assert await sched.backfill_missed_surveys(now) == 1
+    assert await sched.backfill_missed_surveys(now) == 0  # повторный проход ничего не создаёт
+
+
+async def test_tick_backfills_missed_lesson_without_polling_it(db, freeze) -> None:
+    """Полный путь через tick(): занятие пропущено (даунтайм), backfill
+    заводит closed survey, а обычный per-group проход его не трогает (он уже
+    в прошлом) — никому не уходит поздний опрос по нему."""
+    group_id = await _make_group(n_students=2)
+    freeze(MONDAY_LESSON + timedelta(hours=2))
+    bot = FakeBot()
+    await sched.tick(bot)
+
+    assert bot.sent == []  # занятие уже прошло — поздний опрос никому не ушёл
+    async with session_scope() as s:
+        survey = await surveys.find_attendance_survey(s, group_id, MONDAY_LESSON)
+        assert survey is not None and survey.status == SurveyStatus.closed

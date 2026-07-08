@@ -219,11 +219,21 @@ def _not_cancelled(query_group_id_col, query_lesson_at_col):
     return ~cancelled.exists()
 
 
+def _has_responses(query_survey_id_col):
+    """Анти-джойн наоборот: survey без единой Response-строки — это backfill
+    занятия, пропущенного во время даунтайма бота (см. scheduler.backfill_missed_surveys),
+    не реальные данные. Без фильтра он бы занял место в «последних k» и
+    ложно обнулял историю посещаемости / B5-стрик, никого не отметив."""
+    has_any = select(Response.id).where(Response.survey_id == query_survey_id_col)
+    return has_any.exists()
+
+
 async def recent_closed_surveys(
     session: AsyncSession, group_id: int, limit: int = 5
 ) -> list[Survey]:
     """Closed attendance surveys, newest first. Отменённые занятия исключены —
-    их Survey тоже закрыт, но занятия не было."""
+    их Survey тоже закрыт, но занятия не было. Backfilled surveys (без единой
+    Response-строки — см. scheduler.backfill_missed_surveys) тоже исключены."""
     stmt = (
         select(Survey)
         .where(
@@ -231,6 +241,7 @@ async def recent_closed_surveys(
             Survey.kind == SurveyKind.attendance,
             Survey.status == SurveyStatus.closed,
             _not_cancelled(Survey.group_id, Survey.lesson_at),
+            _has_responses(Survey.id),
         )
         .order_by(Survey.lesson_at.desc())
         .limit(limit)
@@ -252,6 +263,7 @@ async def lapsed_members(
             Survey.kind == SurveyKind.attendance,
             Survey.status == SurveyStatus.closed,
             _not_cancelled(Survey.group_id, Survey.lesson_at),
+            _has_responses(Survey.id),
         )
         .order_by(Survey.lesson_at.desc())
         .limit(k)

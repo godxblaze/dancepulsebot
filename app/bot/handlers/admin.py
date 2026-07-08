@@ -800,6 +800,49 @@ async def cb_groups_list(call: CallbackQuery) -> None:
     await call.answer()
 
 
+async def _build_group_card(
+    s, group, tg_user_id: int, *,
+    back_cb: str = "grplist", back_label: str = "◀ К списку",
+):
+    """(text, markup) карточки группы. `group` — уже проверенная accessible-группа."""
+    teacher = await admins_svc.get_by_tg_id(s, tg_user_id)
+    is_owner = (
+        teacher is not None
+        and await schools_svc.is_owner(s, group.school_id, teacher.id)
+    )
+    count = await persons_svc.count_members(s, group.id)
+    summary = await _format_group_summary(s, group)
+    title = format_group_title(group)
+    has_upcoming, has_closed = await _group_card_extras(s, group)
+    paused_line = (
+        "" if group.active
+        else f"\n{ui.PAUSE} <b>на паузе</b> — опросы не рассылаются"
+    )
+    text = (
+        f"{ui.title(ui.GROUP, escape(title))}\n"
+        f"{summary}{paused_line}\n"
+        f"Опрос приходит за {group.lead_hours} ч до занятия\n"
+        f"{ui.STUDENTS} {ui.plural_with_count(count, 'ученик', 'ученика', 'учеников')}"
+    )
+    markup = group_actions_keyboard(
+        group.id, is_owner, group.active,
+        has_upcoming=has_upcoming, has_closed_surveys=has_closed,
+        back_cb=back_cb, back_label=back_label,
+    )
+    return text, markup
+
+
+async def send_group_card(message: Message, tg_user_id: int, group_id: int) -> None:
+    """Карточка группы новым сообщением — для возврата из dialog'ов, где
+    edit_text исходного окна невозможен. Нет доступа — молча no-op."""
+    async with session_scope() as s:
+        group = await _accessible_group(s, group_id, tg_user_id)
+        if group is None:
+            return
+        text, markup = await _build_group_card(s, group, tg_user_id)
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
 @router.callback_query(F.data.startswith("grp:"))
 async def cb_group_card(call: CallbackQuery) -> None:
     parts = (call.data or "").split(":")
@@ -814,35 +857,10 @@ async def cb_group_card(call: CallbackQuery) -> None:
         if group is None:
             await call.answer("Группа не найдена", show_alert=True)
             return
-        teacher = await admins_svc.get_by_tg_id(s, call.from_user.id)
-        is_owner = (
-            teacher is not None
-            and await schools_svc.is_owner(s, group.school_id, teacher.id)
+        text, markup = await _build_group_card(
+            s, group, call.from_user.id, back_cb=back_cb, back_label=back_label,
         )
-        count = await persons_svc.count_members(s, group_id)
-        summary = await _format_group_summary(s, group)
-        title = format_group_title(group)
-        is_active = group.active
-        has_upcoming, has_closed = await _group_card_extras(s, group)
-        paused_line = (
-            "" if is_active
-            else f"\n{ui.PAUSE} <b>на паузе</b> — опросы не рассылаются"
-        )
-        text = (
-            f"{ui.title(ui.GROUP, escape(title))}\n"
-            f"{summary}{paused_line}\n"
-            f"Опрос приходит за {group.lead_hours} ч до занятия\n"
-            f"{ui.STUDENTS} {ui.plural_with_count(count, 'ученик', 'ученика', 'учеников')}"
-        )
-    await call.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=group_actions_keyboard(
-            group_id, is_owner, is_active,
-            has_upcoming=has_upcoming, has_closed_surveys=has_closed,
-            back_cb=back_cb, back_label=back_label,
-        ),
-    )
+    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     await call.answer()
 
 

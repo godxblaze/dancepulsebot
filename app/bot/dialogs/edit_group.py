@@ -445,11 +445,15 @@ async def _on_teachers_clear(
 async def _on_done(
     call: CallbackQuery, _btn: Button, manager: DialogManager
 ) -> None:
-    """Закрыть dialog. Не отрисовываем карточку — пользователь увидит её через
-    /groups; диалог сам пишет «Сохранил» каждый раз."""
+    """Закрыть dialog и показать карточку группы — как одноимённые кнопки
+    в «Ответственных» и «Зале на занятие». Импорт ленивый: admin.py сам
+    лениво импортирует dialogs."""
+    from app.bot.handlers.admin import send_group_card
+
+    group_id = _gid(manager)
     await manager.done()
     if call.message:
-        await call.message.answer("✅ Готово. Открой /groups чтобы увидеть карточку.")
+        await send_group_card(call.message, call.from_user.id, group_id)
 
 
 # ── Dialog ────────────────────────────────────────────────────────────

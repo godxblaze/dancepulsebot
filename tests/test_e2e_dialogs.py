@@ -476,9 +476,35 @@ async def test_edit_group_dialog(db) -> None:
     await click(client, mock, "Очистить")
     assert (await get_group()).venue_id is None
 
-    # finish
+    # finish → настоящая карточка группы (см. отдельный тест ниже)
     await click(client, mock, "К группе")
-    assert any("Готово" in t for t in bot.texts())
+    assert bot.find_button_message("Ученики") is not None
+
+
+async def test_edit_group_dialog_back_to_group_shows_card(db) -> None:
+    """«◀ К группе» из меню редактора должен показать карточку группы —
+    как одноимённые кнопки в «Ответственных» и «Зале на занятие», а не
+    отсылать к /groups текстом (живой e2e-прогон 2026-07-08)."""
+    gid, sid, code = await make_group()
+    client, mock, bot = make_client(TG)
+    async with session_scope() as s:
+        admin = await admins_svc.get_by_tg_id(s, TG)
+        await groups_svc.set_group_admin(s, gid, admin.id, True)
+
+    await client.send("/groups")
+    await click_plain(client, bot, "Бачата")
+    await click_plain(client, bot, "Изменить")
+    assert "Что меняем" in mock.last_message().text
+
+    before = len(bot.outbox)
+    await click(client, mock, "К группе")
+    cards = [m for m in bot.outbox[before:] if "Бачата" in (m.text or "")]
+    assert cards, "после «К группе» не пришла карточка группы"
+    buttons = [
+        b.text for row in cards[-1].reply_markup.inline_keyboard for b in row
+    ]
+    assert any("Ученики" in t for t in buttons), buttons
+    assert any("Изменить" in t for t in buttons), buttons
 
 
 async def test_edit_group_dialog_notifies_on_reschedule_with_open_survey(db) -> None:

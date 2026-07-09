@@ -7,6 +7,7 @@ import sys
 
 from app.bot.bot import build_bot, build_dispatcher
 from app.bot.commands import apply_bot_profile, grant_admin_commands, set_default_commands
+from app.bot.outbox_worker import run_sender_worker
 from app.core.alerts import alert_developer
 from app.core.config import settings
 from app.core.instance_lock import InstanceLock
@@ -16,6 +17,19 @@ from app.scheduler.scheduler import build_scheduler
 from app.services import admins as admins_svc
 
 log = logging.getLogger("dance.main")
+
+# Backpressure (Phase 8): без ограничения aiogram планирует по asyncio.Task на
+# КАЖДЫЙ входящий update независимо — после простоя (рестарт/деплой) сотни
+# накопленных апдейтов от Telegram открыли бы сотни конкурентных DB-сессий
+# разом, раньше исчерпав пул, чем бот успеет разгрести очередь. Пул
+# (app/db/session.py) — pool_size=10 + max_overflow=20 = 30 сессий одновременно.
+# Планировщик-тик и outbox sender worker обрабатывают свою работу строго
+# последовательно (не конкурентно — см. их циклы) и держат максимум по одной
+# сессии каждый; 25 оставляет им и разовым фоновым job'ам (conflict sentinel,
+# fsm cleanup) комфортный запас, не подходя вплотную к пределу пула.
+# Используем встроенный механизм aiogram 3.27 (Dispatcher.start_polling
+# tasks_concurrency_limit=...) — своя семафор-обвязка не нужна.
+UPDATE_CONCURRENCY_LIMIT = 25
 
 
 async def run() -> bool:
@@ -94,8 +108,15 @@ async def _run_locked() -> bool:
             # там Ctrl+C прилетит как KeyboardInterrupt в asyncio.run().
             pass
 
-    polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+    polling = asyncio.create_task(
+        dp.start_polling(
+            bot, handle_signals=False, tasks_concurrency_limit=UPDATE_CONCURRENCY_LIMIT
+        )
+    )
     waiter = asyncio.create_task(stop_event.wait())
+    # Outbox sender worker — independent of the scheduler tick/heartbeat above,
+    # stopped via the same stop_event so a single signal shuts down both.
+    outbox_task = asyncio.create_task(run_sender_worker(bot, stop_event))
 
     success = True
     try:
@@ -131,6 +152,13 @@ async def _run_locked() -> bool:
                 pass
         log.info("Stopping scheduler (waiting for current tick)…")
         scheduler.shutdown(wait=True)
+        log.info("Stopping outbox sender worker…")
+        if not outbox_task.done():
+            outbox_task.cancel()
+            try:
+                await outbox_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         await dp.storage.close()
         await bot.session.close()
         log.info("Shutdown complete")

@@ -52,13 +52,16 @@ async def test_start_new_user_is_not_teacher(db) -> None:
     assert any("ссылк" in r.lower() for r in msg.replies)  # guest view
 
 
-async def test_start_developer_becomes_teacher(db, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "developer_id", 777)
+async def test_start_developer_sees_dev_menu_by_default(db, monkeypatch) -> None:
+    """Phase 10: первый /start разработчика (ui_mode по умолчанию —
+    'developer') показывает dev-меню, БЕЗ авто-промоушена в admin — тот
+    автосоздавался раньше при каждом /start, теперь только в teacher-режиме."""
+    monkeypatch.setattr(settings, "developer_ids", [777])
     msg = FakeMessage(user_id=777)
     await cmd_start(msg, FakeDialogManager())
     async with session_scope() as s:
-        assert await admins.get_by_tg_id(s, 777) is not None
-    assert msg.markups[-1] is not None  # teacher menu keyboard
+        assert await admins.get_by_tg_id(s, 777) is None  # НЕ авто-промоушен
+    assert "Dev-режим" in msg.replies[-1]
 
 
 async def test_start_known_teacher_shows_menu(db) -> None:
@@ -85,7 +88,7 @@ async def test_start_student_sees_home_not_teacher(db) -> None:
 
 
 async def test_grant_makes_teacher(db, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "developer_id", 777)
+    monkeypatch.setattr(settings, "developer_ids", [777])
     bot = FakeBot()
     await cmd_grant(FakeMessage(777), SimpleNamespace(args="555"), bot)
     async with session_scope() as s:
@@ -94,7 +97,7 @@ async def test_grant_makes_teacher(db, monkeypatch) -> None:
 
 
 async def test_grant_ignored_for_non_developer(db, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "developer_id", 777)
+    monkeypatch.setattr(settings, "developer_ids", [777])
     bot = FakeBot()
     await cmd_grant(FakeMessage(999), SimpleNamespace(args="555"), bot)
     async with session_scope() as s:
@@ -102,7 +105,7 @@ async def test_grant_ignored_for_non_developer(db, monkeypatch) -> None:
 
 
 async def test_grant_already_teacher(db, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "developer_id", 777)
+    monkeypatch.setattr(settings, "developer_ids", [777])
     async with session_scope() as s:
         await admins.get_or_create(s, 555, "t", "Уже Препод")
     msg = FakeMessage(777)

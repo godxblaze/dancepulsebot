@@ -9,6 +9,7 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import groups, persons, surveys
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 LESSON = (
@@ -41,6 +42,18 @@ class FakeCallback:
         self.answers.append(text)
 
 
+async def _poll(bot, group, lesson_at, now, **kwargs) -> None:
+    """_poll_group now only enqueues — drain through the real sender worker
+    so bot.sent reflects delivery, same as before Phase 4."""
+    await sched._poll_group(bot, group, lesson_at, now, **kwargs)
+    await drain_outbox(bot)
+
+
+async def _remind(bot, group, lesson_at, now, **kwargs) -> None:
+    await sched._maybe_remind(bot, group, lesson_at, now, **kwargs)
+    await drain_outbox(bot)
+
+
 async def _group_two_members(name_a="Аня", name_b="Боря"):
     async with session_scope() as s:
         t = await admins_svc.get_or_create(s, 100, "t", "Препод")
@@ -64,7 +77,7 @@ async def test_poll_card_omits_social_proof_when_nobody_coming(db) -> None:
     gid = await _group_two_members()
     group = await _get_group(gid)
     bot = FakeBot()
-    await sched._poll_group(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     assert bot.sent
     # никто ещё не ответил «да» → блока «Идёт/Идут» нет
     assert all("Идёт" not in t and "Идут" not in t for _, t in bot.sent)
@@ -73,7 +86,7 @@ async def test_poll_card_omits_social_proof_when_nobody_coming(db) -> None:
 async def test_poll_card_shows_social_proof_after_yes(db) -> None:
     gid = await _group_two_members()
     group = await _get_group(gid)
-    await sched._poll_group(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     # Аня отвечает «да», добавляем новенького
     async with session_scope() as s:
         survey = await surveys.find_attendance_survey(s, gid, LESSON)
@@ -83,7 +96,7 @@ async def test_poll_card_shows_social_proof_after_yes(db) -> None:
         await persons.add_to_group(s, g, 202, "u", "Вася")
     group = await _get_group(gid)
     bot = FakeBot()
-    await sched._poll_group(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     card = next(t for c, t in bot.sent if c == 202)  # карточка новенького
     assert ("Идёт" in card or "Идут" in card) and "Аня" in card
 
@@ -96,7 +109,7 @@ async def test_poll_card_escapes_coming_names(db) -> None:
         await persons.set_gender(s, evil.id, Gender.male)
         gid = g.id
     group = await _get_group(gid)
-    await sched._poll_group(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     async with session_scope() as s:
         survey = await surveys.find_attendance_survey(s, gid, LESSON)
         ev = await persons.get_in_group(s, gid, 200)
@@ -105,7 +118,7 @@ async def test_poll_card_escapes_coming_names(db) -> None:
         await persons.add_to_group(s, g, 201, "u", "Новый")
     group = await _get_group(gid)
     bot = FakeBot()
-    await sched._poll_group(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     card = next(t for c, t in bot.sent if c == 201)
     assert "&lt;b&gt;Хакер&lt;/b&gt;" in card  # имя эскейпнуто
     assert "<b>Хакер</b>" not in card  # сырого HTML нет
@@ -118,7 +131,7 @@ async def test_poll_card_shows_deadline_from_evening_fix(db) -> None:
     gid = await _group_two_members()
     group = await _get_group(gid)
     bot = FakeBot()
-    await sched._poll_group(
+    await _poll(
         bot, group, LESSON, _BEFORE_FIX, tz="Europe/Moscow", evening_time="20:00"
     )
     assert bot.sent
@@ -130,7 +143,7 @@ async def test_poll_card_no_deadline_when_fix_passed(db) -> None:
     group = await _get_group(gid)
     bot = FakeBot()
     # за 2ч до занятия вечерняя фиксация уже прошла → дедлайн не показываем
-    await sched._poll_group(
+    await _poll(
         bot, group, LESSON, LESSON - timedelta(hours=2),
         tz="Europe/Moscow", evening_time="20:00",
     )
@@ -145,10 +158,10 @@ async def test_reminder_has_commitment_copy(db) -> None:
     gid = await _group_two_members()
     group = await _get_group(gid)
     # сначала опрос, чтобы появились Response с message_id (молчат)
-    await sched._poll_group(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
+    await _poll(FakeBot(), group, LESSON, _BEFORE_FIX, tz="Europe/Moscow")
     bot = FakeBot()
     # 4h-окно (1ч < until <= 4ч)
-    await sched._maybe_remind(
+    await _remind(
         bot, group, LESSON, LESSON - timedelta(hours=2), tz="Europe/Moscow"
     )
     rem = [t for _, t in bot.sent]

@@ -10,6 +10,7 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import groups, persons, supports, surveys
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 LESSON = (
@@ -113,6 +114,7 @@ async def test_picker_send_saves_message_ref(db) -> None:
     ctx = await _imbalanced_curated()
     bot = FakeBot()
     await sched._maybe_recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=3))
+    await drain_outbox(bot)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call.picker_chat_id == ctx.lead_tg

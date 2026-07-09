@@ -9,11 +9,14 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -129,13 +132,16 @@ class SchoolMember(Base):
     __tablename__ = "school_members"
     __table_args__ = (
         UniqueConstraint("school_id", "admin_id", name="uq_school_members"),
+        # admin_id-led lookups (admin_schools/school_role) filter further by role;
+        # school_id trails for the rarer school-scoped-by-role queries.
+        Index("ix_school_members_admin_role_school", "admin_id", "role", "school_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     school_id: Mapped[int] = mapped_column(ForeignKey("schools.id", ondelete="CASCADE"))
     admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"))
     role: Mapped[SchoolMemberRole] = mapped_column(
-        Enum(SchoolMemberRole, name="school_member_role"),
+        Enum(SchoolMemberRole, name="school_member_role", native_enum=False),
         default=SchoolMemberRole.coadmin,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -187,6 +193,15 @@ class TeacherPreset(Base):
 
 class Group(Base):
     __tablename__ = "groups"
+
+    __table_args__ = (
+        # Grepped app/services/groups.py: active_groups() filters on `active`
+        # alone (no school_id in the SQL WHERE anywhere in the codebase) — a
+        # school_id-composite index would just be dead weight on the second
+        # column, so single-column instead of the originally-proposed
+        # (active, school_id) composite. See Phase 2 EXPLAIN ANALYZE notes.
+        Index("ix_groups_active", "active"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     school_id: Mapped[int | None] = mapped_column(
@@ -254,6 +269,9 @@ class Person(Base):
     __tablename__ = "persons"
     __table_args__ = (
         UniqueConstraint("school_id", "tg_user_id", name="uq_persons_school_tg"),
+        # find_by_tg/find_all_by_tg look up by tg_user_id across all schools — the
+        # composite unique above doesn't help a school-less lookup.
+        Index("ix_persons_tg_user_id", "tg_user_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -264,7 +282,7 @@ class Person(Base):
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(200))
     gender: Mapped[Gender | None] = mapped_column(
-        Enum(Gender, name="gender"), nullable=True
+        Enum(Gender, name="gender", native_enum=False), nullable=True
     )
     # support_level переехал в SupportPoolEntry (per-teacher pool).
     helped_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -282,6 +300,9 @@ class Membership(Base):
     __tablename__ = "memberships"
     __table_args__ = (
         UniqueConstraint("person_id", "group_id", name="uq_memberships_person_group"),
+        # group_members looks up by group_id alone — the composite unique above
+        # (person_id-led) doesn't help the group-side lookup.
+        Index("ix_memberships_group_id", "group_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -328,14 +349,18 @@ class Survey(Base):
     __tablename__ = "surveys"
     __table_args__ = (
         UniqueConstraint("group_id", "kind", "lesson_at", name="uq_surveys_group_kind_lesson"),
+        # close_past_surveys scans open surveys past their lesson time every tick.
+        Index("ix_surveys_status_lesson_at", "status", "lesson_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
-    kind: Mapped[SurveyKind] = mapped_column(Enum(SurveyKind, name="survey_kind"))
+    kind: Mapped[SurveyKind] = mapped_column(
+        Enum(SurveyKind, name="survey_kind", native_enum=False)
+    )
     lesson_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[SurveyStatus] = mapped_column(
-        Enum(SurveyStatus, name="survey_status"), default=SurveyStatus.open
+        Enum(SurveyStatus, name="survey_status", native_enum=False), default=SurveyStatus.open
     )
     summary_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -345,12 +370,19 @@ class Response(Base):
     __tablename__ = "responses"
     __table_args__ = (
         UniqueConstraint("survey_id", "person_id", name="uq_responses_survey_person"),
+        # person_id-led lookups (drop responses for a leaving member) aren't
+        # covered by the survey_id-led unique constraint above.
+        Index("ix_responses_person_survey", "person_id", "survey_id"),
+        # answer-filtered aggregates per survey (summary/devstats).
+        Index("ix_responses_survey_answer", "survey_id", "answer"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     survey_id: Mapped[int] = mapped_column(ForeignKey("surveys.id", ondelete="CASCADE"))
     person_id: Mapped[int] = mapped_column(ForeignKey("persons.id", ondelete="CASCADE"))
-    answer: Mapped[Answer | None] = mapped_column(Enum(Answer, name="answer"), nullable=True)
+    answer: Mapped[Answer | None] = mapped_column(
+        Enum(Answer, name="answer", native_enum=False), nullable=True
+    )
     # «Реально пришёл?» — заполняется preподом после занятия. None = не отмечено.
     actually_attended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -366,14 +398,22 @@ class SupportCall(Base):
     """A drive to recruit supports for one lesson's gender imbalance."""
 
     __tablename__ = "support_calls"
-    __table_args__ = (UniqueConstraint("survey_id", name="uq_support_calls_survey"),)
+    __table_args__ = (
+        UniqueConstraint("survey_id", name="uq_support_calls_survey"),
+        # Scheduler scans pending_unnotified_calls/no_reply_calls every tick,
+        # filtering by status then a created_at range — created_at trails as the
+        # column with the widest range predicate.
+        Index("ix_support_calls_status_created_at", "status", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     survey_id: Mapped[int] = mapped_column(ForeignKey("surveys.id", ondelete="CASCADE"))
-    gender: Mapped[Gender] = mapped_column(Enum(Gender, name="support_call_gender"))
+    gender: Mapped[Gender] = mapped_column(
+        Enum(Gender, name="support_call_gender", native_enum=False)
+    )
     needed: Mapped[int] = mapped_column(Integer)
     status: Mapped[SupportCallStatus] = mapped_column(
-        Enum(SupportCallStatus, name="support_call_status"),
+        Enum(SupportCallStatus, name="support_call_status", native_enum=False),
         default=SupportCallStatus.pending,
     )
     # Помечается, когда scheduler отправил «никто не откликнулся за X часов» —
@@ -411,3 +451,108 @@ class SupportClaim(Base):
     # отмечено. helped_count считается по числу claim'ов с attended=True.
     attended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageOutbox(Base):
+    """Durable send queue — every outbound Telegram message goes through here
+    instead of a direct `bot.send_message` in a loop, so a crash mid-fan-out
+    doesn't silently lose messages and a single slow/rate-limited recipient
+    doesn't block the rest of the batch.
+
+    `status` is plain VARCHAR (not native_enum), values: `pending` (never
+    attempted, or scheduled for a retry), `sent`, `terminal_failed` (gave up
+    after `app.services.outbox.MAX_ATTEMPTS`). No separate transient
+    "in-flight" status: a worker claims a row via `SELECT ... FOR UPDATE SKIP
+    LOCKED` and holds that row lock for the duration of the send attempt, so
+    the row is never externally visible mid-attempt — it resolves straight
+    from `pending` to `sent`/`terminal_failed`, or back to `pending` with a
+    pushed-forward `scheduled_at` for a retry."""
+
+    __tablename__ = "message_outbox"
+    __table_args__ = (
+        UniqueConstraint("business_key", name="uq_message_outbox_business_key"),
+        # Dequeue query: WHERE status='pending' AND scheduled_at<=now()
+        # ORDER BY priority DESC, scheduled_at.
+        Index("ix_message_outbox_dequeue", "status", "priority", "scheduled_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    business_key: Mapped[str] = mapped_column(String(200))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    payload_json: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Nullable — только broadcast-каскады (Phase 5) заполняют его. Прямой FK
+    # избавляет progress-запрос от парсинга business_key строк.
+    broadcast_id: Mapped[int | None] = mapped_column(
+        ForeignKey("broadcasts.id", ondelete="CASCADE"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Broadcast(Base):
+    """One broadcast run — the parent record. Per-recipient delivery state
+    lives in `message_outbox` rows (`broadcast_id` FK), not duplicated here.
+
+    `scope_type`/`scope_payload_json` are deliberately general (not a plain
+    `group_id` column) so Phase 11's global developer broadcast (scope: all
+    schools / one school / a subset; audience: all Person / Admin-only) reuses
+    this exact table without a schema migration — Phase 5 itself only ever
+    writes `scope_type="group"`."""
+
+    __tablename__ = "broadcasts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(20))
+    scope_payload_json: Mapped[dict] = mapped_column(JSONB)
+    audience_type: Mapped[str] = mapped_column(String(20))
+    text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    created_by_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FSMState(Base):
+    """Postgres-backed aiogram FSM storage (Phase 6, replaces JsonFileStorage —
+    a whole-file rewrite on every dialog transition serialized the entire
+    event loop under concurrent onboarding). `key` is the same composite
+    string `app/bot/fsm_storage.py` always built (bot_id:chat_id:user_id:
+    thread_id:business_connection_id:destiny) — `destiny` MUST stay part of
+    it: aiogram-dialog's stack vs. per-intent context collide into the same
+    key without it (this project hit a real `KeyError: 'state'` from exactly
+    that mistake once). `data` holds `{"state": ..., "data": {...}}`, mirroring
+    the old JSON file's per-key slot shape."""
+
+    __tablename__ = "fsm_state"
+    __table_args__ = (
+        # TTL cleanup scans WHERE updated_at < threshold.
+        Index("ix_fsm_state_updated_at", "updated_at"),
+    )
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    data: Mapped[dict] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DevUiPref(Base):
+    """Phase 10: какой UI разработчик видит на /start — `developer` (dev-меню
+    +дашборд) или `teacher` (проходит ровно тот же путь, что настоящий
+    препод/новый юзер — дожфудинг). НЕ привязана к Admin (`tg_user_id`, не
+    FK) — разработчику необязательно иметь собственную школу, чтобы
+    пользоваться dev-режимом."""
+
+    __tablename__ = "dev_ui_pref"
+
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    ui_mode: Mapped[str] = mapped_column(String(20), default="developer")

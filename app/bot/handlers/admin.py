@@ -41,6 +41,8 @@ from app.bot.keyboards import (
     attendance_keyboard,
     confirm_delete_keyboard,
     confirm_remove_from_group_keyboard,
+    dev_dashboard_keyboard,
+    developer_menu_keyboard,
     gender_from_code,
     group_actions_keyboard,
     group_admins_keyboard,
@@ -70,6 +72,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import dev_ui as dev_ui_svc
 from app.services import devstats as devstats_svc
 from app.services import exports as exports_svc
 from app.services import groups as groups_svc
@@ -156,14 +159,26 @@ async def _attendance_csv_for(session, admin) -> bytes:
 # ── registration & help ──────────────────────────────────────────────
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
-    tg = message.from_user
-    if not tg:
-        return
+async def _render_start(target: Message, tg, dialog_manager: DialogManager) -> None:
+    """Тело /start, параметризованное явным `tg` (не `target.from_user`) —
+    вызывается и из cmd_start (message-контекст), и из dev-режима toggle
+    (callback-контекст, где target=call.message принадлежит боту, а не
+    тапнувшему юзеру)."""
+    if tg.id in settings.developer_ids:
+        async with session_scope() as s:
+            ui_mode = await dev_ui_svc.get_ui_mode(s, tg.id)
+        if ui_mode == "developer":
+            await target.answer(
+                f"{ui.title(ui.BRAND, 'Dev-режим')}\n\nВыбери, что показать.",
+                reply_markup=developer_menu_keyboard(),
+            )
+            return
+        # ui_mode == "teacher" — НЕ шорткатим: падаем в точно ту же ветку,
+        # что и обычный препод/новый юзер ниже (дожфудинг реального пути).
+
     async with session_scope() as s:
         teacher = await admins_svc.get_by_tg_id(s, tg.id)
-        if teacher is None and tg.id == settings.developer_id:
+        if teacher is None and tg.id in settings.developer_ids:
             teacher = await admins_svc.get_or_create(
                 s, tg.id, tg.username, tg.full_name or f"id{tg.id}"
             )
@@ -174,7 +189,7 @@ async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
             completed_setup = bool(teacher.has_completed_setup)
     if teacher is None:
         # everyone is a student by default — teacher status is granted via /grant
-        await show_student_home(message)
+        await show_student_home(target)
         return
     if dialog_manager.has_context():
         # /start — безопасная гавань: закрыть любой зависший wizard (напр.
@@ -188,8 +203,9 @@ async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
         except Exception as e:  # noqa: BLE001
             log.warning("reset_stack on /start failed for %s: %s", tg.id, e)
     if not admin_schools and not completed_setup:
-        # Свежий admin: только что получил /grant или первый /start developer'а.
-        # Первый шаг — назвать собственную школу через CreateSchool dialog.
+        # Свежий admin: только что получил /grant, первый /start developer'а,
+        # или developer в teacher-режиме без своей школы (Phase 10 — тот же
+        # путь, что у любого нового препода, без спецкейса).
         from aiogram_dialog import StartMode
 
         from app.bot.dialogs import CreateSchoolSG
@@ -202,18 +218,94 @@ async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
         async with session_scope() as s:
             await admins_svc.delete_admin(s, teacher.id)
         try:
-            await revoke_admin_commands(message.bot, tg.id)
+            await revoke_admin_commands(target.bot, tg.id)
         except Exception as e:  # noqa: BLE001
             log.warning("revoke admin cmds for %s failed: %s", tg.id, e)
-        await show_student_home(message)
+        await show_student_home(target)
         return
-    await message.answer(
+    await target.answer(
         "💓 Dance Pulse\n\n"
         "Я опрашиваю учеников перед каждым занятием и сам собираю саппортов, "
         "когда в паре перекос.\n\n"
         "Всё — кнопками меню снизу 👇",
         reply_markup=admin_menu_keyboard(),
     )
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, dialog_manager: DialogManager) -> None:
+    tg = message.from_user
+    if not tg:
+        return
+    await _render_start(message, tg, dialog_manager)
+
+
+@router.message(Command("devmode"))
+async def cmd_devmode(message: Message, dialog_manager: DialogManager) -> None:
+    """Dev-only переключатель ui_mode — команда (не кнопка нижнего меню),
+    доступна из ОБОИХ режимов, не трогая реальную teacher-клавиатуру (весь
+    смысл teacher-режима — дублировать её 1-в-1, без дев-примесей)."""
+    tg = message.from_user
+    if not tg or tg.id not in settings.developer_ids:
+        return
+    async with session_scope() as s:
+        await dev_ui_svc.toggle_ui_mode(s, tg.id)
+    await _render_start(message, tg, dialog_manager)
+
+
+@router.callback_query(F.data == "devmode:toggle")
+async def cb_dev_mode_toggle(call: CallbackQuery, dialog_manager: DialogManager) -> None:
+    tg = call.from_user
+    if tg is None or tg.id not in settings.developer_ids or call.message is None:
+        await call.answer()
+        return
+    async with session_scope() as s:
+        new_mode = await dev_ui_svc.toggle_ui_mode(s, tg.id)
+    await call.answer("Режим препода" if new_mode == "teacher" else "Dev-режим")
+    await _render_start(call.message, tg, dialog_manager)
+
+
+@router.callback_query(F.data == "devmenu")
+async def cb_dev_menu(call: CallbackQuery) -> None:
+    tg = call.from_user
+    if tg is None or tg.id not in settings.developer_ids or call.message is None:
+        await call.answer()
+        return
+    await call.message.edit_text(
+        f"{ui.title(ui.BRAND, 'Dev-режим')}\n\nВыбери, что показать.",
+        reply_markup=developer_menu_keyboard(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "devdash")
+async def cb_dev_dashboard(call: CallbackQuery) -> None:
+    tg = call.from_user
+    if tg is None or tg.id not in settings.developer_ids or call.message is None:
+        await call.answer()
+        return
+    async with session_scope() as s:
+        text = await _build_dev_dashboard_text(s)
+    await call.message.edit_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=dev_dashboard_keyboard()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "devbcaststart")
+async def cb_dev_broadcast_start(call: CallbackQuery, dialog_manager: DialogManager) -> None:
+    """Phase 11: единственная точка входа в глобальную рассылку — только из
+    dev-меню, только для settings.developer_ids. Никакая другая кнопка/
+    команда/deep-link не может стартовать этот dialog."""
+    tg = call.from_user
+    if tg is None or tg.id not in settings.developer_ids:
+        await call.answer()
+        return
+    from aiogram_dialog import StartMode
+
+    from app.bot.dialogs import DevBroadcastSG
+    await dialog_manager.start(DevBroadcastSG.scope, mode=StartMode.RESET_STACK)
+    await call.answer()
 
 
 @router.message(Command("help"))
@@ -237,8 +329,8 @@ async def cmd_myid(message: Message) -> None:
 async def cmd_grant(message: Message, command: CommandObject, bot: Bot) -> None:
     """Developer-only — grant teacher status to a telegram id."""
     tg = message.from_user
-    if not tg or tg.id != settings.developer_id:
-        return  # only the developer; silent for everyone else
+    if not tg or tg.id not in settings.developer_ids:
+        return  # only developers; silent for everyone else
     arg = (command.args or "").strip()
     if not arg.isdigit():
         await message.answer("Использование: /grant <id> — число (узнать: /myid).")
@@ -319,10 +411,10 @@ async def _health_snapshot(s) -> dict[str, int]:
 
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
-    """DB-хелсчек для разработчика (settings.developer_id): жив ли бот и его
-    масштаб. Не в публичном меню — для всех прочих молчим."""
+    """DB-хелсчек для разработчиков (settings.developer_ids): жив ли бот и
+    его масштаб. Не в публичном меню — для всех прочих молчим."""
     tg = message.from_user
-    if tg is None or settings.developer_id <= 0 or tg.id != settings.developer_id:
+    if tg is None or tg.id not in settings.developer_ids:
         return
     async with session_scope() as s:
         snap = await _health_snapshot(s)
@@ -349,19 +441,10 @@ async def _devstats_snapshot(s) -> list[dict]:
     return rows
 
 
-@router.message(Command("devstats"))
-async def cmd_devstats(message: Message) -> None:
-    """Разработчику: кто из школ реально пользуется ботом и с каким успехом
-    (отклик на опросы, реальная посещаемость, зависший добор), за 4 недели.
-    Дополняет /status — тот же гейт по settings.developer_id."""
-    tg = message.from_user
-    if tg is None or settings.developer_id <= 0 or tg.id != settings.developer_id:
-        return
-    async with session_scope() as s:
-        rows = await _devstats_snapshot(s)
-    if not rows:
-        await message.answer("Школ пока нет.")
-        return
+def _school_stats_blocks(rows: list[dict]) -> list[str]:
+    """Общий текстовый блок per-school разреза — используется и /devstats, и
+    dev-дашбордом (Phase 10), чтобы не разъезжались две реализации одного и
+    того же."""
     blocks: list[str] = []
     for r in rows:
         last = f"{r['last_activity']:%d.%m.%Y}" if r["last_activity"] else "никогда"
@@ -385,10 +468,70 @@ async def cmd_devstats(message: Message) -> None:
         if r["stuck_calls"]:
             lines.append(f"{ui.SLEEP} зависший добор: {r['stuck_calls']}")
         blocks.append("\n".join(lines))
+    return blocks
+
+
+@router.message(Command("devstats"))
+async def cmd_devstats(message: Message) -> None:
+    """Разработчикам: кто из школ реально пользуется ботом и с каким успехом
+    (отклик на опросы, реальная посещаемость, зависший добор), за 4 недели.
+    Дополняет /status — тот же гейт по settings.developer_ids."""
+    tg = message.from_user
+    if tg is None or tg.id not in settings.developer_ids:
+        return
+    async with session_scope() as s:
+        rows = await _devstats_snapshot(s)
+    if not rows:
+        await message.answer("Школ пока нет.")
+        return
+    blocks = _school_stats_blocks(rows)
     await message.answer(
         f"{ui.title(ui.TROPHY, 'Dev stats — по школам')}\n\n" + "\n\n".join(blocks),
         parse_mode=ParseMode.HTML,
     )
+
+
+async def _build_dev_dashboard_text(s) -> str:
+    """Phase 10 dev-дашборд: тот же per-school разрез, что /devstats, плюс
+    Phase 9 метрики (outbox — тот же сигнал, что и rate-limit давление на
+    отправку, отдельного счётчика для него нет; последний тик; живые
+    in-process gauges с рестарта процесса)."""
+    since = utc_now() - devstats_svc.WINDOW
+    rows = await _devstats_snapshot(s)
+    health = await devstats_svc.outbox_health(s)
+    send_counts = await devstats_svc.outbox_send_counts(s, since)
+    session_stats = devstats_svc.session_duration_stats()
+    cb_stats = devstats_svc.callback_latency_stats()
+    tick = devstats_svc.last_tick_stats()
+
+    age_min = int((health["oldest_pending_age_seconds"] or 0) / 60)
+    outbox_block = "\n".join([
+        ui.title(ui.SUPPORT, "Outbox / rate-limit"),
+        f"в очереди: {health['pending']}"
+        + (f", старейшая ждёт {age_min} мин" if health["pending"] else ""),
+        f"за 4 нед.: sent {send_counts['sent']} · failed {send_counts['failed']} "
+        f"· blocked {send_counts['blocked']} · retrying {send_counts['retrying']}",
+    ])
+
+    if tick is not None:
+        tick_block = "\n".join([
+            ui.title(ui.CALENDAR, "Последний тик"),
+            f"{tick['total_seconds']:.1f}s" + (" ⚠️ медленный" if tick["was_slow"] else ""),
+        ])
+    else:
+        tick_block = "\n".join([ui.title(ui.CALENDAR, "Последний тик"), "ещё не было"])
+
+    load_block = "\n".join([
+        ui.title(ui.SETTINGS, "Нагрузка (с рестарта процесса)"),
+        f"DB-сессии: {session_stats['count']}, "
+        f"avg {session_stats['avg_seconds'] * 1000:.0f} мс, "
+        f"max {session_stats['max_seconds'] * 1000:.0f} мс",
+        f"callback: {cb_stats['count']}, avg {cb_stats['avg_seconds'] * 1000:.0f} мс",
+    ])
+
+    blocks = [ui.title(ui.TROPHY, "Dev dashboard"), outbox_block, tick_block, load_block]
+    blocks.extend(_school_stats_blocks(rows) if rows else ["Школ пока нет."])
+    return "\n\n".join(blocks)
 
 
 @router.message(Command("today"))

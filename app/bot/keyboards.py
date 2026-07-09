@@ -954,6 +954,28 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def developer_menu_keyboard() -> InlineKeyboardMarkup:
+    """Phase 10: dev-режим на /start — инлайн (не persistent-меню снизу,
+    чтобы не путаться с реальной teacher-клавиатурой)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{ui.STATS} Статистика", callback_data="devdash")],
+        # Phase 11 — единственная точка входа в глобальную рассылку.
+        [InlineKeyboardButton(
+            text=f"{ui.BROADCAST} Глобальная рассылка", callback_data="devbcaststart",
+        )],
+        [InlineKeyboardButton(
+            text=f"{ui.TEACHER} Режим препода", callback_data="devmode:toggle",
+        )],
+    ])
+
+
+def dev_dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="devdash")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="devmenu")],
+    ])
+
+
 def stats_keyboard(scope: str) -> InlineKeyboardMarkup:
     """Переключатель охвата статистики (школа ↔ мои группы) + экспорт CSV."""
     if scope == "school":

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -9,20 +11,20 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.bot import ui
+from app.bot import fsm_storage, ui
 from app.bot.keyboards import (
     attendance_keyboard,
     lesson_card_keyboard,
     support_ask_keyboard,
     support_pick_keyboard,
 )
-from app.bot.utils import format_group_title, format_place, send_with_retry
-from app.core.alerts import alert_developer
+from app.bot.utils import format_group_title, format_place
+from app.core.alerts import alert_developer, alert_developer_throttled
 from app.core.config import settings
 from app.core.logging import LOG_FILE
+from app.core.metrics import last_tick as _last_tick
 from app.core.sentinel import ConflictSentinel
 from app.db.models import (
     Admin,
@@ -35,7 +37,9 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
+from app.services import devstats as devstats_svc
 from app.services import groups as groups_svc
+from app.services import outbox as outbox_svc
 from app.services import persons as persons_svc
 from app.services import place_overrides as overrides_svc
 from app.services import schools as schools_svc
@@ -75,6 +79,48 @@ ESCALATE_LEAD = timedelta(hours=6)
 # не дав lead'у шанса среагировать.
 ESCALATE_MIN_GRACE = timedelta(hours=1)
 
+# Порог «медленного» тика (Phase 7 — метрики). При масштабе пилота (десятки
+# групп, см. Phase 1 data-volume finding) тик должен укладываться в единицы
+# секунд; 60с уже сигнализирует о реальной деградации (пропавший индекс,
+# N+1-паттерн в per-group цикле) — задолго до того, как это могло бы
+# угрожать 15-минутному интервалу самого тика или узкому 1h-окну напоминаний.
+SLOW_TICK_THRESHOLD = timedelta(seconds=60)
+
+# Phase 9 — outbox застрял, если ЛИБО очередь непомерно выросла, ЛИБО
+# старейшая строка ждёт слишком долго. 100: при RATE_PER_SECOND=25
+# (outbox_worker.py) очередь такого размера в норме разгребается за секунды —
+# устойчивый остаток такого масштаба значит воркер стоит, не отстаёт.
+# 30 минут: опросы/напоминания привязаны к 1h/4h окнам — застрявшая на
+# полчаса строка уже осмысленно опоздала.
+OUTBOX_STUCK_PENDING = 100
+OUTBOX_STUCK_AGE = timedelta(minutes=30)
+
+
+async def _check_outbox_health(bot: Bot) -> None:
+    """Раз за тик — сигнал «воркер встал» разработчику (анти-спам 1/час, см.
+    alert_developer_throttled). Метрика берётся из devstats.py (единая точка
+    агрегации, Phase 9), не отдельным запросом здесь."""
+    async with session_scope() as s:
+        health = await devstats_svc.outbox_health(s)
+    age = health["oldest_pending_age_seconds"] or 0
+    if health["pending"] >= OUTBOX_STUCK_PENDING or age >= OUTBOX_STUCK_AGE.total_seconds():
+        await alert_developer_throttled(
+            bot, "stuck_outbox",
+            f"⚠️ Outbox застрял: {health['pending']} в очереди, "
+            f"старейшая строка ждёт {int(age / 60)} мин.",
+        )
+
+
+@contextmanager
+def _stage_timer(durations: dict[str, float], key: str):
+    """Аккумулирует время выполнения блока в durations[key] — один и тот же
+    key может накапливаться много раз за тик (напр. per-group цикл)."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        durations[key] = durations.get(key, 0.0) + (time.monotonic() - start)
+
 
 async def lesson_place(s, group: Group, lesson_at: datetime) -> str | None:
     """Место КОНКРЕТНОГО занятия: per-lesson override («📍 Зал на занятие» в
@@ -112,7 +158,7 @@ async def _poll_group(
     *,
     tz: str | None = None,
     evening_time: str | None = None,
-) -> None:
+) -> int:
     """Ensure the survey exists, then message everyone who hasn't been polled yet.
 
     Идемпотентно по пере-tick'у: tg_message_id на Response отмечает «опрос отправлен»,
@@ -134,7 +180,7 @@ async def _poll_group(
         place = await lesson_place(s, group, lesson_at)
 
     if not to_poll:
-        return  # all members already polled
+        return 0  # all members already polled
 
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
@@ -160,70 +206,31 @@ async def _poll_group(
         body=body_lines,
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
-    sent = 0
-    for p in to_poll:
-        try:
-            msg = await send_with_retry(
-                bot,
-                p.tg_user_id,
-                text,
-                reply_markup=attendance_keyboard(survey_id),
-                parse_mode=ParseMode.HTML,
+    # Delivery + terminal/transient classification now lives in the outbox
+    # sender worker (`app.bot.outbox_worker._on_resolved`, kind=attendance_poll)
+    # — set_message_id(-1) on permanent failure driven off the outbox's own
+    # outcome. reminded_4h/1h pre-marking, though, is decided HERE at enqueue
+    # time (this tick's `now`) and carried in the payload — not recomputed at
+    # actual delivery time, which could be a different tick/moment (real
+    # deploy: seconds later; tests: `utc_now` is only patched at the
+    # scheduler-module level, so a fresh call from the worker would read the
+    # real wall clock instead of the frozen test time).
+    until = lesson_at - now
+    markup = attendance_keyboard(survey_id)
+    async with session_scope() as s:
+        for p in to_poll:
+            payload = outbox_svc.build_payload(
+                text, reply_markup=markup, parse_mode=ParseMode.HTML.value,
+                kind="attendance_poll", survey_id=survey_id, person_id=p.id,
+                mark_reminded_4h=until <= timedelta(hours=4),
+                mark_reminded_1h=until <= timedelta(hours=1),
             )
-        except (TelegramForbiddenError, TelegramNotFound) as e:
-            # Terminal: пользователь заблокировал бота или чат недоступен.
-            # Помечаем -1, чтобы persons_without_message больше его не возвращал.
-            log.info(
-                "survey=%s person=%s tg=%s — terminal delivery failure (%s); "
-                "marking as undeliverable",
-                survey_id, p.id, p.tg_user_id, type(e).__name__,
-            )
-            async with session_scope() as s:
-                await surveys_svc.set_message_id(s, survey_id, p.id, -1)
-            continue
-        except TelegramBadRequest as e:
-            # «chat not found» / «user is deactivated» прилетают сюда — тоже terminal.
-            msg_l = str(e).lower()
-            if any(k in msg_l for k in ("not found", "deactivated", "blocked")):
-                log.info(
-                    "survey=%s person=%s tg=%s — terminal (%s); marking as undeliverable",
-                    survey_id, p.id, p.tg_user_id, e,
-                )
-                async with session_scope() as s:
-                    await surveys_svc.set_message_id(s, survey_id, p.id, -1)
-                continue
-            log.warning(
-                "survey=%s person=%s tg=%s — BadRequest (transient?), will retry: %s",
-                survey_id, p.id, p.tg_user_id, e,
-            )
-            continue
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "survey=%s person=%s tg=%s — send failed, will retry: %s",
-                survey_id, p.id, p.tg_user_id, e,
-            )
-            continue
-        try:
-            async with session_scope() as s:
-                await surveys_svc.set_message_id(s, survey_id, p.id, msg.message_id)
-                # Первая доставка уже внутри reminder-окна — заранее метим
-                # соответствующие флаги, чтобы _maybe_remind не дублировал.
-                until = lesson_at - now
-                if until <= timedelta(hours=4):
-                    await surveys_svc.mark_reminded(s, survey_id, p.id, "4h")
-                if until <= timedelta(hours=1):
-                    await surveys_svc.mark_reminded(s, survey_id, p.id, "1h")
-        except Exception as e:  # noqa: BLE001
-            log.error(
-                "survey=%s person=%s tg=%s — message sent (mid=%s) but message_id "
-                "persistence failed, risk of re-send next tick: %s",
-                survey_id, p.id, p.tg_user_id, msg.message_id, e,
-            )
-        sent += 1
+            await outbox_svc.enqueue(s, f"attendance:{survey_id}:{p.id}", p.tg_user_id, payload)
     log.info(
-        "Survey %s polled %d/%d outstanding member(s) of «%s»",
-        survey_id, sent, len(to_poll), group.name,
+        "Survey %s enqueued poll for %d outstanding member(s) of «%s»",
+        survey_id, len(to_poll), group.name,
     )
+    return len(to_poll)
 
 
 def _format_summary(
@@ -275,16 +282,19 @@ async def _maybe_send_summary(
     now: datetime,
     *,
     tz: str | None = None,
-) -> None:
+) -> int:
     """Once per lesson, halfway through the poll window, send every admin of the
-    group the same auto-summary. mark_summary_sent ставится только после хотя бы
-    одной успешной отправки, чтобы недосланные адресаты доехали на след. tick."""
+    group the same auto-summary. `mark_summary_sent` fires from the outbox
+    worker's `_on_resolved` hook (kind=summary) as soon as ANY admin's row
+    resolves `sent` — idempotent, so multiple admins succeeding just calls it
+    more than once harmlessly. Not marked here: this function only enqueues,
+    delivery is async now."""
     if now < lesson_at - timedelta(hours=group.lead_hours / 2):
-        return
+        return 0
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
         if survey is None or survey.status != SurveyStatus.open or survey.summary_sent:
-            return
+            return 0
         summary = await surveys_svc.summarize(s, survey.id)
         coming = await surveys_svc.coming_by_gender(s, survey.id)
         admin_tg_ids = await groups_svc.group_admin_tg_ids(
@@ -292,41 +302,21 @@ async def _maybe_send_summary(
         )
         survey_id = survey.id
 
-    if not admin_tg_ids:
-        return
-    text = _format_summary(group, lesson_at, summary, coming=coming, tz=tz)
-    markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
-    delivered = 0
-    terminal = 0
-    for tg in admin_tg_ids:
-        try:
-            await send_with_retry(bot, tg, text, parse_mode=ParseMode.HTML, reply_markup=markup)
-            delivered += 1
-        except (TelegramForbiddenError, TelegramNotFound):
-            log.info("Admin tg=%s заблокировал бота — auto-summary skipped", tg)
-            terminal += 1
-        except Exception as e:  # noqa: BLE001
-            log.warning("Failed to send auto-summary to admin %s: %s", tg, e)
-    if delivered == 0:
-        # Никто не получил. Не метим summary_sent — дошлём на следующих tick'ах.
-        # Транзиентные сбои само собой ретраятся. Terminal (препод заблокировал
-        # бота / ещё не нажал Start — типичный старт пилота) тоже ретраим: как
-        # только препод станет доступен, сводка доедет. Окно ограничено — survey
-        # закроется после занятия и этот код перестанет срабатывать.
-        if terminal:
-            log.warning(
-                "Auto-summary survey %s: все %d админ(ов) недоступны "
-                "(заблокировали бота / не нажали Start). Повторю на след. tick.",
-                survey_id, terminal,
+        if not admin_tg_ids:
+            return 0
+        text = _format_summary(group, lesson_at, summary, coming=coming, tz=tz)
+        markup = lesson_card_keyboard(group.id, survey_id, summary.pending)
+        for tg in admin_tg_ids:
+            payload = outbox_svc.build_payload(
+                text, reply_markup=markup, parse_mode=ParseMode.HTML.value,
+                kind="summary", survey_id=survey_id,
             )
-        return
-    # Хотя бы один админ получил — больше слать не нужно.
-    async with session_scope() as s:
-        await surveys_svc.mark_summary_sent(s, survey_id)
+            await outbox_svc.enqueue(s, f"summary:{survey_id}:{tg}", tg, payload)
     log.info(
-        "Auto-summary for survey %s sent to %d/%d admin(s)",
-        survey_id, delivered, len(admin_tg_ids),
+        "Auto-summary for survey %s enqueued for %d admin(s)",
+        survey_id, len(admin_tg_ids),
     )
+    return len(admin_tg_ids)
 
 
 def _gender_plural(gender: Gender) -> str:
@@ -334,10 +324,10 @@ def _gender_plural(gender: Gender) -> str:
 
 
 async def send_support_invites(
-    bot: Bot,
+    session,
     *,
     call_id: int,
-    invited: list[tuple[int, str]],
+    invited: list[tuple[int, int, str]],
     title: str,
     place: str | None,
     teachers_note: str | None,
@@ -348,8 +338,10 @@ async def send_support_invites(
     """Единый путь рассылки приглашений «нужна помощь» саппортам. Используется
     и ручным picker'ом (recruit.py), и авто-режимами open_race/auto_top.
     Собирается через ui.card + HTML — как остальные экраны Pulse; title/place/
-    note приходят сырыми и экранируются здесь. Возвращает число успешно
-    отправленных."""
+    note приходят сырыми и экранируются здесь. Enqueues via the outbox on the
+    CALLER's session/transaction (atomicity — see cb_support_pick_send) —
+    delivery happens later, async, via the sender worker. `invited` is
+    (person_id, tg_user_id, full_name). Returns the number enqueued."""
     meta = [
         f"{ui.CALENDAR} <b>«{escape(title)}» — "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} в {lesson_time}</b>",
@@ -362,23 +354,16 @@ async def send_support_invites(
         body="Не хватает пары — сможешь подойти выручить?",
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
-    sent = 0
-    for tg_id, _name in invited:
-        try:
-            await send_with_retry(
-                bot, tg_id, text,
-                reply_markup=support_ask_keyboard(call_id),
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("Could not invite support %s: %s", tg_id, e)
-            continue
-        sent += 1
-    return sent
+    markup = support_ask_keyboard(call_id)
+    for person_id, tg_id, _name in invited:
+        payload = outbox_svc.build_payload(
+            text, reply_markup=markup, parse_mode=ParseMode.HTML.value, kind="support_invite",
+        )
+        await outbox_svc.enqueue(session, f"support_invite:{call_id}:{person_id}", tg_id, payload)
+    return len(invited)
 
 
 async def _send_recruit_picker(
-    bot: Bot,
     *,
     teacher_tgs: list[int],
     group: Group,
@@ -425,26 +410,18 @@ async def _send_recruit_picker(
     else:
         body = head + "\n\nВ пуле нет подходящих саппортов — добавь через /pool."
         markup = None
-    sent_ref: tuple[int, int] | None = None
-    for tg in teacher_tgs:
-        try:
-            msg = await send_with_retry(
-                bot, tg, body, reply_markup=markup, parse_mode=ParseMode.HTML
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("Could not ask admin %s about supports: %s", tg, e)
-            continue
-        mid = getattr(msg, "message_id", None)
-        if sent_ref is None and mid is not None:
-            sent_ref = (tg, mid)
-    # B8: запоминаем сообщение с баланс-строкой, чтобы обновлять его при claim/skip.
-    # has_keyboard: markup не None → это живой picker (кнопки выбора саппортов),
-    # его текст _refresh_balance трогать не должен (см. recruit.py).
-    if sent_ref is not None:
-        async with session_scope() as s:
-            await supports_svc.set_picker_ref(
-                s, call_id, sent_ref[0], sent_ref[1], has_keyboard=markup is not None
-            )
+    # B8: запоминаем сообщение с баланс-строкой, чтобы обновлять его при claim/skip
+    # (has_keyboard: markup не None → живой picker, _refresh_balance его не трогает,
+    # см. recruit.py) — теперь ставится из outbox-worker'а после реальной доставки
+    # (kind=recruit_picker), не отсюда: teacher_tgs всегда один lead, но раньше был
+    # доставкой синхронно.
+    payload = outbox_svc.build_payload(
+        body, reply_markup=markup, parse_mode=ParseMode.HTML.value,
+        kind="recruit_picker", call_id=call_id, has_keyboard=markup is not None,
+    )
+    async with session_scope() as s:
+        for tg in teacher_tgs:
+            await outbox_svc.enqueue(s, f"recruit_picker:{call_id}:{tg}", tg, payload)
 
 
 def _auto_recruit_plan(
@@ -487,7 +464,7 @@ def _auto_recruit_plan(
         lead_text += f"\n{ui.no_gender_warning(unknown)}"
     return dict(
         call_id=call_id,
-        invited=[(p.tg_user_id, p.full_name) for p in to_invite],
+        invited=[(p.id, p.tg_user_id, p.full_name) for p in to_invite],
         lead_tgs=lead_tgs,
         lead_text=lead_text,
     )
@@ -500,7 +477,7 @@ async def _maybe_recruit(
     now: datetime,
     *,
     tz: str | None = None,
-) -> None:
+) -> int:
     """Двухфазный автодобор, привязанный к календарю (не к hours-offset):
 
     Фаза 1 — вечерний разбор накануне в `recruit_evening_time` (школьный TZ):
@@ -511,7 +488,7 @@ async def _maybe_recruit(
     один раз пересчитываем живой баланс с учётом уже согласившихся саппортов;
     если из-за поздних отмен появилась новая дыра — до-зываем."""
     if group.school_id is None:
-        return
+        return 0
     send_kwargs: dict | None = None
     auto_plan: dict | None = None
 
@@ -523,7 +500,7 @@ async def _maybe_recruit(
         # Добор ведёт «куратор» группы (lead) — его настройки, его пул, ему picker.
         lead = await groups_svc.resolve_recruit_lead(s, group)
         if lead is None:
-            return
+            return 0
         lead_id = lead.id
         threshold = lead.support_threshold
         topup_hours = lead.support_cutoff_hours
@@ -533,12 +510,12 @@ async def _maybe_recruit(
 
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
         if survey is None:
-            return
+            return 0
         survey_id = survey.id
         if survey.status != SurveyStatus.open:
             # Осиротел (правка расписания/TZ закрыла его через
             # close_orphaned_survey) — добор для него больше не ведём.
-            return
+            return 0
         existing_call = await supports_svc.get_call_for_survey(s, survey_id)
         call_id = existing_call.id if existing_call is not None else None
         place = await lesson_place(s, group, lesson_at)
@@ -548,14 +525,14 @@ async def _maybe_recruit(
         # может на него ссылаться, лок не нужен) ──
         async with session_scope() as s:
             if now < evening_fix_at(lesson_at, evening_time, tz=tz):
-                return
+                return 0
             male, female = await surveys_svc.gender_yes_counts(s, survey_id)
             deficit = abs(male - female)
             if deficit < threshold:
                 await supports_svc.create_call(
                     s, survey_id, Gender.male, 0, SupportCallStatus.closed
                 )
-                return
+                return 0
             gender_needed = Gender.male if male < female else Gender.female
             if mode == RecruitMode.auto_top.value:
                 # Бот сам зовёт топ-N (N=дефицит) из пула lead'а по уровню.
@@ -616,7 +593,7 @@ async def _maybe_recruit(
             async with session_scope() as s:
                 call = await supports_svc.get_call(s, call_id)
                 if call is None:
-                    return
+                    return 0
                 if (
                     mode == RecruitMode.escalate.value
                     and call.status == SupportCallStatus.pending
@@ -635,7 +612,7 @@ async def _maybe_recruit(
                     else:
                         deadline = lesson_at - ESCALATE_LEAD
                     if now < deadline:
-                        return  # до окна эскалации — как curated (picker уже у lead'а)
+                        return 0  # до окна эскалации — как curated (picker уже у lead'а)
                     # lead не разобрал pending за окно до занятия → авто open-race fallback.
                     # Фильтруем уже согласившихся (по образцу фазы-2) — иначе эскалация
                     # повторно зовёт того, кто уже claim'нул этот call.
@@ -662,9 +639,9 @@ async def _maybe_recruit(
                 else:
                     # ── Фаза 2: добор остатка в день занятия ──
                     if topup_hours <= 0 or call.topup_done:
-                        return
+                        return 0
                     if now < lesson_at - timedelta(hours=topup_hours):
-                        return
+                        return 0
                     call.topup_done = True
                     male, female = await surveys_svc.gender_yes_counts(s, survey_id)
                     claimed = await supports_svc.count_claims(s, call.id)
@@ -679,12 +656,12 @@ async def _maybe_recruit(
                         if call.status != SupportCallStatus.closed:
                             call.status = SupportCallStatus.closed  # баланс сложился
                         await s.flush()
-                        return
+                        return 0
                     if (had_recruit and short != call.gender) or deficit <= remaining:
                         # перекос ушёл в другую сторону (редко, не флипаем) либо уже
                         # добираем достаточно — ничего нового не спрашиваем.
                         await s.flush()
-                        return
+                        return 0
                     # Нужно БОЛЬШЕ `short`, чем уже добираем → расширяем и зовём ещё.
                     call.gender = short
                     call.needed = claimed + deficit
@@ -715,43 +692,36 @@ async def _maybe_recruit(
                         unknown=await surveys_svc.unknown_yes_count(s, survey_id),
                     )
 
+    enqueued = 0
     if send_kwargs is not None:
-        await _send_recruit_picker(
-            bot, group=group, lesson_at=lesson_at, tz=tz, **send_kwargs
-        )
+        await _send_recruit_picker(group=group, lesson_at=lesson_at, tz=tz, **send_kwargs)
+        enqueued += len(send_kwargs["teacher_tgs"])
     if auto_plan is not None:
-        if auto_plan["invited"]:
-            sent = await send_support_invites(
-                bot, call_id=auto_plan["call_id"], invited=auto_plan["invited"],
-                title=format_group_title(group), place=place,
-                teachers_note=group.teachers_note, lesson_time=group.lesson_time,
-                lesson_at=lesson_at, tz=tz,
+        # Обе рассылки теперь только enqueue — доставка асинхронная (sender
+        # worker), поэтому больше нет способа синхронно узнать «все инвайты не
+        # дошли» и подменить lead_text на извиняющийся вариант (было раньше при
+        # sent==0). Осознанное упрощение: lead_text всегда оптимистичный
+        # («Позвал автоматически: …») — редкий случай «все саппорты
+        # недоступны» проявится как «никто не откликнулся» через обычный
+        # stale-пинг, а не отдельным немедленным предупреждением.
+        async with session_scope() as s:
+            if auto_plan["invited"]:
+                await send_support_invites(
+                    s, call_id=auto_plan["call_id"], invited=auto_plan["invited"],
+                    title=format_group_title(group), place=place,
+                    teachers_note=group.teachers_note, lesson_time=group.lesson_time,
+                    lesson_at=lesson_at, tz=tz,
+                )
+            payload = outbox_svc.build_payload(
+                auto_plan["lead_text"], parse_mode=ParseMode.HTML.value,
+                kind="recruit_lead_heads_up", call_id=auto_plan["call_id"],
             )
-            if sent == 0:
-                # Все отправки инвайтов упали (Telegram недоступен/у всех
-                # заблокирован бот) — не врём lead'у бодрым «позвал автоматически».
-                auto_plan["lead_text"] = (
-                    f"⚠️ Не удалось отправить приглашения саппортам «"
-                    f"{escape(format_group_title(group))}» — попробуй сам через "
-                    f"🆘 Саппорты."
+            for tg in auto_plan["lead_tgs"]:
+                await outbox_svc.enqueue(
+                    s, f"recruit_lead_heads_up:{auto_plan['call_id']}:{tg}", tg, payload
                 )
-        lead_ref: tuple[int, int] | None = None
-        for tg in auto_plan["lead_tgs"]:
-            try:
-                msg = await send_with_retry(
-                    bot, tg, auto_plan["lead_text"], parse_mode=ParseMode.HTML
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("Could not send recruit heads-up to lead %s: %s", tg, e)
-                continue
-            mid = getattr(msg, "message_id", None)
-            if lead_ref is None and mid is not None:
-                lead_ref = (tg, mid)
-        if lead_ref is not None:
-            async with session_scope() as s:
-                await supports_svc.set_picker_ref(
-                    s, auto_plan["call_id"], lead_ref[0], lead_ref[1]
-                )
+        enqueued += len(auto_plan["invited"]) + len(auto_plan["lead_tgs"])
+    return enqueued
 
 
 async def _maybe_remind(
@@ -761,7 +731,7 @@ async def _maybe_remind(
     now: datetime,
     *,
     tz: str | None = None,
-) -> None:
+) -> int:
     """Auto-reminder не-ответившим: за 4ч и за 1ч до занятия отдельные пинги.
 
     Окна не перекрываются: 4h-окно — (1ч, 4ч], 1h-окно — (0, 1ч]. Идемпотентность
@@ -772,18 +742,18 @@ async def _maybe_remind(
     elif timedelta(hours=1) < until <= timedelta(hours=4):
         window = "4h"
     else:
-        return
+        return 0
 
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
         if survey is None or survey.status != SurveyStatus.open:
-            return
+            return 0
         to_remind = await surveys_svc.persons_to_remind(s, survey.id, window)
         survey_id = survey.id
         place = await lesson_place(s, group, lesson_at)
 
     if not to_remind:
-        return
+        return 0
 
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
@@ -804,33 +774,23 @@ async def _maybe_remind(
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
 
-    sent = 0
-    for p in to_remind:
-        try:
-            await send_with_retry(
-                bot,
-                p.tg_user_id,
-                text,
-                reply_markup=attendance_keyboard(survey_id),
-                parse_mode=ParseMode.HTML,
+    # mark_reminded теперь ставится из outbox-worker'а после разрешения строки
+    # (kind=reminder, и на sent, и на terminal_failed — см. _on_resolved),
+    # не отсюда синхронно.
+    markup = attendance_keyboard(survey_id)
+    async with session_scope() as s:
+        for p in to_remind:
+            payload = outbox_svc.build_payload(
+                text, reply_markup=markup, parse_mode=ParseMode.HTML.value,
+                kind="reminder", survey_id=survey_id, person_id=p.id, window=window,
             )
-        except (TelegramForbiddenError, TelegramNotFound):
-            # Заблокировал бота / удалил аккаунт — метим как «напомнили»,
-            # чтобы не долбить логи каждым tick'ом.
-            async with session_scope() as s:
-                await surveys_svc.mark_reminded(s, survey_id, p.id, window)
-            continue
-        except Exception as e:  # noqa: BLE001
-            log.warning("remind: send to %s failed, will retry: %s", p.tg_user_id, e)
-            continue
-        async with session_scope() as s:
-            await surveys_svc.mark_reminded(s, survey_id, p.id, window)
-        sent += 1
-    if sent:
-        log.info(
-            "Survey %s: %s-reminder delivered %d/%d to silent members",
-            survey_id, window, sent, len(to_remind),
-        )
+            key = f"reminder:{window}:{survey_id}:{p.id}"
+            await outbox_svc.enqueue(s, key, p.tg_user_id, payload)
+    log.info(
+        "Survey %s: %s-reminder enqueued for %d silent member(s)",
+        survey_id, window, len(to_remind),
+    )
+    return len(to_remind)
 
 
 SUPPORT_NO_REPLY_AFTER = timedelta(hours=1)
@@ -849,12 +809,12 @@ async def _maybe_reactivate(
     now: datetime,
     *,
     tz: str | None = None,
-) -> None:
+) -> int:
     """B5: мягкий персональный пинг тем, кто пропустил последние
     `REACTIVATE_MISSES` занятий. Throttle — не чаще раза в `REACTIVATE_THROTTLE`.
     Не трогает тех, кто уже ответил на ближайший опрос."""
     if group.school_id is None:
-        return
+        return 0
     now_naive = (
         now.replace(tzinfo=None) if now.tzinfo is None
         else now.astimezone(UTC).replace(tzinfo=None)
@@ -863,7 +823,7 @@ async def _maybe_reactivate(
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group.id, lesson_at)
         if survey is None:
-            return
+            return 0
         survey_id = survey.id
         lapsed = await surveys_svc.lapsed_members(s, group.id, k=REACTIVATE_MISSES)
         pending_ids = {p.id for p in await surveys_svc.pending_persons(s, survey_id)}
@@ -876,7 +836,7 @@ async def _maybe_reactivate(
         ]
 
     if not targets:
-        return
+        return 0
     meta = [
         f"{ui.CALENDAR} <b>{format_weekday_long(lesson_at, tz=tz)}, "
         f"{format_lesson_at(lesson_at, '%d.%m', tz=tz)} · в {group.lesson_time}</b>",
@@ -892,23 +852,26 @@ async def _maybe_reactivate(
         ],
         footer=f"{ui.PLACE} {escape(place)}" if place else None,
     )
-    for tg_id, pid in targets:
-        try:
-            await send_with_retry(
-                bot, tg_id, text,
-                reply_markup=attendance_keyboard(survey_id),
-                parse_mode=ParseMode.HTML,
+    # mark_reactivated теперь ставится из outbox-worker'а (kind=reactivation,
+    # на sent И terminal_failed — «недоступен, но не долбить» тот же принцип).
+    # `reactivated_at` — уже вычисленный now_naive (момент ЭТОГО тика), а не
+    # заново запрошенный в хуке: доставка асинхронная, и повторный utc_now()
+    # там прочитал бы реальные настенные часы вместо замоканного тестом
+    # времени (тот же класс бага, что и с reminded_4h/1h в _poll_group).
+    markup = attendance_keyboard(survey_id)
+    async with session_scope() as s:
+        for tg_id, pid in targets:
+            payload = outbox_svc.build_payload(
+                text, reply_markup=markup, parse_mode=ParseMode.HTML.value,
+                kind="reactivation", person_id=pid, reactivated_at=now_naive.isoformat(),
             )
-        except (TelegramForbiddenError, TelegramNotFound):
-            # Заблокировал/недоступен — всё равно помечаем, чтобы не долбить.
-            async with session_scope() as s:
-                await persons_svc.mark_reactivated(s, pid, now_naive)
-            continue
-        except Exception as e:  # noqa: BLE001
-            log.warning("reactivate: send to %s failed, will retry: %s", tg_id, e)
-            continue
-        async with session_scope() as s:
-            await persons_svc.mark_reactivated(s, pid, now_naive)
+            # Дата в ключе (не просто survey_id:person_id) — реактивация ЗА ОДНУ
+            # survey может законно повториться раз в REACTIVATE_THROTTLE недель,
+            # пока человек остаётся лапседом; без даты второй пинг после throttle
+            # молча схлопнулся бы в ON CONFLICT DO NOTHING того же business_key.
+            key = f"reactivation:{survey_id}:{pid}:{now_naive.date().isoformat()}"
+            await outbox_svc.enqueue(s, key, tg_id, payload)
+    return len(targets)
 
 
 async def _stale_call_context(s, call, *, survey=None):
@@ -926,15 +889,15 @@ async def _stale_call_context(s, call, *, survey=None):
     return admin_tgs, format_group_title(group)
 
 
-async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
+async def _notify_stale_support_calls(now: datetime) -> int:
     """Два пинга preподу:
     - open-call без достаточного числа откликов >SUPPORT_NO_REPLY_AFTER —
       «никто не откликнулся, попробуй сам»;
     - pending-call, который owner так и не разобрал, а занятие уже близко —
       «разбери добор»."""
-    # (call_id, tg, text) — флаг notified ставим ПОСЛЕ реальной отправки (см.
-    # ниже), а не до неё: иначе сбой send_message («никто не откликнулся» не
-    # дошло) навсегда съедает этот единственный пинг без ретрая.
+    # (call_id, tg, text) — флаг notified ставится из outbox-worker'а, ТОЛЬКО
+    # на sent (kind=stale_notice) — недоставленный пинг retry'ится естественно
+    # через следующий tick, как и раньше.
     no_reply_msgs: list[tuple[int, int, str]] = []
     pending_msgs: list[tuple[int, int, str]] = []
     async with session_scope() as s:
@@ -981,20 +944,16 @@ async def _notify_stale_support_calls(bot: Bot, now: datetime) -> None:
                     f"а занятие уже скоро. Загляни в сообщение выше или в /school.",
                 ))
 
-    sent_call_ids: set[int] = set()
-    for call_id, tg, text in no_reply_msgs + pending_msgs:
-        try:
-            await send_with_retry(bot, tg, text, parse_mode=ParseMode.HTML)
-            sent_call_ids.add(call_id)
-        except Exception as e:  # noqa: BLE001
-            log.warning("Failed to send support notice to admin %s: %s", tg, e)
-
-    if sent_call_ids:
-        async with session_scope() as s:
-            for call_id in {c for c, _, _ in no_reply_msgs} & sent_call_ids:
-                await supports_svc.mark_no_reply_notified(s, call_id)
-            for call_id in {c for c, _, _ in pending_msgs} & sent_call_ids:
-                await supports_svc.mark_pending_notified(s, call_id)
+    async with session_scope() as s:
+        for notice_type, msgs in (("no_reply", no_reply_msgs), ("pending", pending_msgs)):
+            for call_id, tg, text in msgs:
+                payload = outbox_svc.build_payload(
+                    text, parse_mode=ParseMode.HTML.value,
+                    kind="stale_notice", call_id=call_id, notice_type=notice_type,
+                )
+                key = f"stale_notice:{notice_type}:{call_id}:{tg}"
+                await outbox_svc.enqueue(s, key, tg, payload)
+    return len(no_reply_msgs) + len(pending_msgs)
 
 
 async def _heartbeat_tick() -> None:
@@ -1049,16 +1008,36 @@ async def backfill_missed_surveys(now: datetime) -> int:
     return created
 
 
+# Phase 7 stretch goal (next_poll_at/next_lesson_at на Group + `WHERE next_poll_at
+# <= now()` вместо полного скана active_groups каждый тик) — ОТЛОЖЕН. Причина:
+# next_poll_at пришлось бы держать в актуальном состоянии из множества мест
+# (правка расписания/TZ группы, отмена занятия, смена lead_hours,
+# recruit_evening_time и т.п.) — половинчатая версия, забывшая обновить его в
+# одном из путей, тихо «замораживает» группу навсегда (хуже, чем вообще не
+# делать оптимизацию). При пилотном масштабе (десятки групп, Phase 1
+# data-volume finding) полный скан active_groups и так укладывается в единицы
+# секунд (см. tick_metrics stage_* ниже) — риск несоразмерен пользе.
 async def tick(bot: Bot) -> None:
     """Runs every 15 min: close past surveys, send polls, auto-summaries and recruit."""
+    tick_start = time.monotonic()
+    stage_times: dict[str, float] = {}
+    recipients_enqueued = 0
+    groups_processed = 0
+
     now = utc_now()
-    await backfill_missed_surveys(now)
-    async with session_scope() as s:
-        closed = await surveys_svc.close_past_surveys(s, now)
+    with _stage_timer(stage_times, "backfill"):
+        await backfill_missed_surveys(now)
+    with _stage_timer(stage_times, "close_past"):
+        async with session_scope() as s:
+            closed = await surveys_svc.close_past_surveys(s, now)
     if closed:
         log.info("Closed %d past survey(s)", closed)
 
-    await _notify_stale_support_calls(bot, now)
+    with _stage_timer(stage_times, "stale_notify"):
+        recipients_enqueued += await _notify_stale_support_calls(now)
+
+    with _stage_timer(stage_times, "outbox_health"):
+        await _check_outbox_health(bot)
 
     async with session_scope() as s:
         from app.services import admins as admins_svc
@@ -1113,18 +1092,28 @@ async def tick(bot: Bot) -> None:
                 async with session_scope() as s:
                     if await cancellations_svc.is_cancelled(s, group.id, lesson_at):
                         continue
+                groups_processed += 1
                 # reactivate ДО poll: иначе только что разосланный «придёшь?»
                 # свежего survey тут же считается pending → лапсед-член получает
                 # «давно не видели» секундами позже своего же обычного опроса.
                 # До создания survey этого занятия find_attendance_survey вернёт
                 # None и функция тихо выйдет — нудж просто уедет на следующий тик.
-                await _maybe_reactivate(bot, group, lesson_at, now, tz=tz)
-                await _poll_group(
-                    bot, group, lesson_at, now, tz=tz, evening_time=evening_time
-                )
-                await _maybe_send_summary(bot, group, lesson_at, now, tz=tz)
-                await _maybe_remind(bot, group, lesson_at, now, tz=tz)
-                await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
+                with _stage_timer(stage_times, "reactivate"):
+                    recipients_enqueued += await _maybe_reactivate(
+                        bot, group, lesson_at, now, tz=tz
+                    )
+                with _stage_timer(stage_times, "poll"):
+                    recipients_enqueued += await _poll_group(
+                        bot, group, lesson_at, now, tz=tz, evening_time=evening_time
+                    )
+                with _stage_timer(stage_times, "summary"):
+                    recipients_enqueued += await _maybe_send_summary(
+                        bot, group, lesson_at, now, tz=tz
+                    )
+                with _stage_timer(stage_times, "remind"):
+                    recipients_enqueued += await _maybe_remind(bot, group, lesson_at, now, tz=tz)
+                with _stage_timer(stage_times, "recruit"):
+                    recipients_enqueued += await _maybe_recruit(bot, group, lesson_at, now, tz=tz)
         except Exception:  # noqa: BLE001
             log.exception(
                 "tick: группа «%s» (id=%s) упала — пропускаю до след. tick'а",
@@ -1132,12 +1121,50 @@ async def tick(bot: Bot) -> None:
             )
             continue
 
+    total = time.monotonic() - tick_start
+    was_slow = total > SLOW_TICK_THRESHOLD.total_seconds()
+    # Phase 10 dev-дашборд читает это через devstats.last_tick_stats() — живой
+    # факт «последний тик занял X секунд», не агрегат (тики не персистятся).
+    _last_tick.set({"total_seconds": total, "was_slow": was_slow})
+    # Один структурированный key=value лог на тик — devstats.py (Phase 9) сможет
+    # парсить его без смены формата: total/per-stage длительности в секундах +
+    # счётчики за тик.
+    log.info(
+        "tick_metrics total=%.3fs groups_processed=%d surveys_touched=%d "
+        "recipients_enqueued=%d stage_backfill=%.3fs stage_close_past=%.3fs "
+        "stage_stale_notify=%.3fs stage_outbox_health=%.3fs stage_reactivate=%.3fs "
+        "stage_poll=%.3fs stage_summary=%.3fs stage_remind=%.3fs stage_recruit=%.3fs",
+        total, groups_processed, closed + groups_processed, recipients_enqueued,
+        stage_times.get("backfill", 0.0), stage_times.get("close_past", 0.0),
+        stage_times.get("stale_notify", 0.0), stage_times.get("outbox_health", 0.0),
+        stage_times.get("reactivate", 0.0), stage_times.get("poll", 0.0),
+        stage_times.get("summary", 0.0), stage_times.get("remind", 0.0),
+        stage_times.get("recruit", 0.0),
+    )
+    if was_slow:
+        log.warning(
+            "tick_slow total=%.3fs threshold=%.0fs — см. tick_metrics выше за разбивкой по стадиям",
+            total, SLOW_TICK_THRESHOLD.total_seconds(),
+        )
+        await alert_developer_throttled(
+            bot, "slow_tick",
+            f"⚠️ Медленный тик: {total:.1f}s (порог {SLOW_TICK_THRESHOLD.total_seconds():.0f}s).",
+        )
+
 
 async def _conflict_sentinel_tick(bot: Bot, sentinel: ConflictSentinel) -> None:
     async def _alert(text: str) -> None:
         await alert_developer(bot, text)
 
     await sentinel.check(datetime.now(UTC), _alert)
+
+
+async def _fsm_cleanup_tick() -> None:
+    """Раз в сутки подчищает заброшенные dialog-state старше FSM_TTL_DAYS —
+    независимый job на том же APScheduler-инстансе, не отдельный процесс."""
+    removed = await fsm_storage.cleanup_stale()
+    if removed:
+        log.info("FSM cleanup: удалено %d устаревших состояний", removed)
 
 
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -1176,8 +1203,17 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
+    sched.add_job(
+        _fsm_cleanup_tick,
+        "interval",
+        hours=24,
+        id="fsm_cleanup",
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True,
+    )
     log.info(
         "Scheduler built — attendance tick every 15 min, conflict sentinel every 5 min, "
-        "heartbeat every 1 min"
+        "heartbeat every 1 min, fsm cleanup every 24h"
     )
     return sched

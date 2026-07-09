@@ -5,16 +5,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-import pytest
-from sqlalchemy import text
-
 from app.bot.handlers.recruit import cb_support_pick_nope
 from app.db.models import Answer, Gender, RecruitMode, SupportCallStatus, SurveyKind
-from app.db.session import _apply_lightweight_migrations, engine, session_scope
+from app.db.session import engine, session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import groups, persons, schools, supports, surveys
 from tests._fakes import FakeCallback, fake_user
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 # Занятие через 14 дней, 19:00 МСК (как в test_recruit). -3ч заведомо после
@@ -29,9 +27,19 @@ LESSON = (
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self._mid = 1000
 
-    async def send_message(self, chat_id, text, **kwargs) -> None:
+    async def send_message(self, chat_id, text, **kwargs):
+        self._mid += 1
         self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=self._mid)
+
+
+async def _recruit(bot, group, lesson_at, now) -> None:
+    """_maybe_recruit now only enqueues — drain through the real sender
+    worker so bot.sent reflects delivery."""
+    await sched._maybe_recruit(bot, group, lesson_at, now)
+    await drain_outbox(bot)
 
 
 def test_recruit_mode_enum_has_four_values() -> None:
@@ -67,33 +75,6 @@ async def test_set_recruit_mode_rejects_invalid(db) -> None:
     async with session_scope() as s:
         admin = await admins_svc.get_by_tg_id(s, 102)
         assert admin.recruit_mode == RecruitMode.curated.value
-
-
-@pytest.mark.schema_mutating  # DROP COLUMN мимо metadata — схему после теста пересоздать
-async def test_migration_adds_recruit_mode_to_old_db(db) -> None:
-    """Старая БД без колонки → миграция добавляет её с дефолтом curated;
-    существующие строки получают curated."""
-    async with session_scope() as s:
-        admin = await admins_svc.get_or_create(s, 103, "u", "Препод")
-        admin_id = admin.id
-
-    async with engine.begin() as conn:
-        # Симулируем старую БД: убираем колонку.
-        await conn.execute(text("ALTER TABLE admins DROP COLUMN recruit_mode"))
-        cols = {
-            row[1]
-            for row in (await conn.execute(text("PRAGMA table_info(admins)"))).fetchall()
-        }
-        assert "recruit_mode" not in cols
-        # Миграция должна вернуть колонку и проставить дефолт существующей строке.
-        added = await _apply_lightweight_migrations(conn)
-        assert ("admins", "recruit_mode") in added
-        value = (
-            await conn.execute(
-                text("SELECT recruit_mode FROM admins WHERE id = :i"), {"i": admin_id}
-            )
-        ).scalar_one()
-    assert value == "curated"
 
 
 # ── Phase 2: режимы scheduler ────────────────────────────────────────
@@ -159,7 +140,7 @@ async def test_curated_mode_keeps_pending_picker(db) -> None:
     """Регресс: curated (дефолт) — pending-call + picker lead'у, без авто-рассылки."""
     ctx = await _lesson_needing_two_males("curated")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _AFTER_FIX)
+    await _recruit(bot, ctx.group, LESSON, _AFTER_FIX)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.pending
@@ -171,7 +152,7 @@ async def test_curated_mode_keeps_pending_picker(db) -> None:
 async def test_open_race_invites_pool_and_colleagues_no_picker(db) -> None:
     ctx = await _lesson_needing_two_males("open_race")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _AFTER_FIX)
+    await _recruit(bot, ctx.group, LESSON, _AFTER_FIX)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.open
@@ -186,7 +167,7 @@ async def test_open_race_invites_pool_and_colleagues_no_picker(db) -> None:
 async def test_auto_top_invites_top_n_by_level(db) -> None:
     ctx = await _lesson_needing_two_males("auto_top")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _AFTER_FIX)
+    await _recruit(bot, ctx.group, LESSON, _AFTER_FIX)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.open
@@ -202,7 +183,7 @@ async def test_auto_top_invites_top_n_by_level(db) -> None:
 async def test_open_race_empty_pool_graceful(db) -> None:
     g, survey_id = await _imbalanced_no_pool("open_race")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, _AFTER_FIX)  # не падает
+    await _recruit(bot, g, LESSON, _AFTER_FIX)  # не падает
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.open
@@ -212,7 +193,7 @@ async def test_open_race_empty_pool_graceful(db) -> None:
 async def test_auto_top_empty_pool_graceful(db) -> None:
     g, survey_id = await _imbalanced_no_pool("auto_top")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, _AFTER_FIX)  # не падает
+    await _recruit(bot, g, LESSON, _AFTER_FIX)  # не падает
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.open
@@ -244,13 +225,13 @@ _IN_ESC = LESSON - timedelta(hours=4)
 
 async def _escalate_pending(ctx) -> None:
     """Создаёт pending-picker (escalate до окна эскалации = curated)."""
-    await sched._maybe_recruit(FakeBot(), ctx.group, LESSON, _BEFORE_ESC)
+    await _recruit(FakeBot(), ctx.group, LESSON, _BEFORE_ESC)
 
 
 async def test_escalate_before_window_behaves_as_curated(db) -> None:
     ctx = await _lesson_needing_two_males("escalate")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _BEFORE_ESC)
+    await _recruit(bot, ctx.group, LESSON, _BEFORE_ESC)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.pending
@@ -258,7 +239,7 @@ async def test_escalate_before_window_behaves_as_curated(db) -> None:
     assert not any("Нужна помощь" in t for _, t in bot.sent)  # без авто-рассылки
     # повторный tick всё ещё до окна (lesson-7h) — ничего нового
     bot2 = FakeBot()
-    await sched._maybe_recruit(bot2, ctx.group, LESSON, LESSON - timedelta(hours=7))
+    await _recruit(bot2, ctx.group, LESSON, LESSON - timedelta(hours=7))
     assert bot2.sent == []
 
 
@@ -266,7 +247,7 @@ async def test_escalate_pending_auto_dispatches_in_window(db) -> None:
     ctx = await _lesson_needing_two_males("escalate")
     await _escalate_pending(ctx)  # pending picker
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # окно эскалации
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # окно эскалации
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.open  # pending→open
@@ -279,11 +260,11 @@ async def test_escalate_does_not_fire_twice(db) -> None:
     ctx = await _lesson_needing_two_males("escalate")
     await _escalate_pending(ctx)
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалирует
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалирует
     assert sum(1 for _, t in bot.sent if "Нужна помощь" in t) == 4
     # повторный tick: call уже open (гард статус-перехода) → новой рассылки нет
     bot2 = FakeBot()
-    await sched._maybe_recruit(bot2, ctx.group, LESSON, _IN_ESC)
+    await _recruit(bot2, ctx.group, LESSON, _IN_ESC)
     assert not any("Нужна помощь" in t for _, t in bot2.sent)
 
 
@@ -304,7 +285,7 @@ async def test_escalate_and_picknope_concurrent_consistent(db) -> None:
     bot = FakeBot()
     nope = FakeCallback(f"picknope:{call_id}", fake_user(ctx.lead_tg))
     await asyncio.gather(
-        sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC),
+        _recruit(bot, ctx.group, LESSON, _IN_ESC),
         cb_support_pick_nope(nope),
     )
     async with session_scope() as s:
@@ -314,14 +295,14 @@ async def test_escalate_and_picknope_concurrent_consistent(db) -> None:
         assert not invited  # dismiss выиграл — эскалация не проскочила следом
     else:
         assert call.status == SupportCallStatus.open and invited  # эскалация выиграла
-    await engine.dispose()  # общая файловая тест-БД: закрыть пул после конкуренции
+    await engine.dispose()  # гигиена пула соединений после реальной конкуренции
 
 
 async def test_curated_does_not_escalate(db) -> None:
     ctx = await _lesson_needing_two_males("curated")
     await _escalate_pending(ctx)  # pending picker
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # окно эскалации
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # окно эскалации
     assert not any("Нужна помощь" in t for _, t in bot.sent)  # эскалации нет
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
@@ -331,12 +312,12 @@ async def test_curated_does_not_escalate(db) -> None:
 async def test_open_race_open_call_does_not_escalate(db) -> None:
     """open_race/auto_top создают open-call (не pending) → эскалация не применима."""
     ctx = await _lesson_needing_two_males("open_race")
-    await sched._maybe_recruit(FakeBot(), ctx.group, LESSON, _IN_ESC)  # phase1 open+invites
+    await _recruit(FakeBot(), ctx.group, LESSON, _IN_ESC)  # phase1 open+invites
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call.status == SupportCallStatus.open
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # повтор в окне эскалации
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # повтор в окне эскалации
     assert not any("Нужна помощь" in t for _, t in bot.sent)  # без повторной рассылки
 
 
@@ -351,7 +332,7 @@ async def test_escalate_excludes_already_claimed_candidate(db) -> None:
         accepted, _, _ = await supports.claim(s, call.id, claimed_person.id)
         assert accepted is True  # pending — claim() это разрешает
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалация
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалация
     invited = {chat for chat, t in bot.sent if "Нужна помощь" in t}
     assert ctx.pool[3] not in invited  # уже согласившийся — не зван повторно
     assert invited == {ctx.pool[2], ctx.pool[1], ctx.colleague_tg}
@@ -361,11 +342,11 @@ async def test_escalate_coexists_with_topup(db) -> None:
     ctx = await _lesson_needing_two_males("escalate")  # topup 3ч включён (дефолт)
     await _escalate_pending(ctx)
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалация
+    await _recruit(bot, ctx.group, LESSON, _IN_ESC)  # эскалация
     assert sum(1 for _, t in bot.sent if "Нужна помощь" in t) == 4
     # top-up окно (lesson-2h): обрабатывается без падений и без повторной рассылки
     bot2 = FakeBot()
-    await sched._maybe_recruit(bot2, ctx.group, LESSON, LESSON - timedelta(hours=2))
+    await _recruit(bot2, ctx.group, LESSON, LESSON - timedelta(hours=2))
     assert not any("Нужна помощь" in t for _, t in bot2.sent)
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
@@ -404,7 +385,7 @@ async def test_escalate_topup_picker_gets_grace_before_escalating(db) -> None:
     следующем тике — lead получает ESCALATE_MIN_GRACE, чтобы среагировать."""
     ctx = await _balanced_lesson_with_female_pool("escalate")
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=20))
+    await _recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=20))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call.status == SupportCallStatus.closed  # вечером баланс ок
@@ -416,7 +397,7 @@ async def test_escalate_topup_picker_gets_grace_before_escalating(db) -> None:
             await surveys.record_answer(s, ctx.survey_id, p.id, Answer.no)
 
     # фаза 2 переоткрывает call под свежую дыру (topup_hours=3ч по умолчанию)
-    await sched._maybe_recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, ctx.group, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call.status == SupportCallStatus.pending
@@ -424,7 +405,7 @@ async def test_escalate_topup_picker_gets_grace_before_escalating(db) -> None:
 
     # следующий тик (~15 мин) — до бага эскалировало бы немедленно
     bot2 = FakeBot()
-    await sched._maybe_recruit(
+    await _recruit(
         bot2, ctx.group, LESSON, LESSON - timedelta(hours=2, minutes=45)
     )
     assert not any("Нужна помощь" in t for _, t in bot2.sent)
@@ -434,7 +415,7 @@ async def test_escalate_topup_picker_gets_grace_before_escalating(db) -> None:
 
     # grace (1ч) прошёл — теперь эскалирует как обычно
     bot3 = FakeBot()
-    await sched._maybe_recruit(
+    await _recruit(
         bot3, ctx.group, LESSON, LESSON - timedelta(hours=1, minutes=45)
     )
     assert any("Нужна помощь" in t for _, t in bot3.sent)

@@ -14,6 +14,7 @@ from app.services import schools as schools_svc
 from app.services import surveys as surveys_svc
 from tests._dialog_harness import click, click_plain, make_client
 from tests._e2e_helpers import TEACHER_TG, make_group
+from tests._outbox_helpers import drain_outbox
 
 TG = TEACHER_TG
 
@@ -369,8 +370,9 @@ async def test_broadcast_dialog(db) -> None:
     await click_plain(client, bot, "Сообщение")  # → broadcast wizard
     assert "отправлю всем" in mock.last_message().text
     await client.send("Завтра отмена, всем привет")
-    # confirm preview → send
+    # confirm preview → send (now only enqueues — drain to actually deliver)
     await click(client, mock, "Отправить")
+    await drain_outbox(bot)
     # both students got the broadcast text
     bodies = bot.texts()
     assert sum(1 for t in bodies if "Завтра отмена" in t) >= 2

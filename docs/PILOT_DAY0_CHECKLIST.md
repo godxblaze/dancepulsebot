@@ -24,7 +24,7 @@ Get-ScheduledTaskInfo -TaskName "DancePulseWatchdog"
 
 `DancePulseWatchdog` — рестартует `DancePulseBot`, если event loop завис
 (процесс жив, но heartbeat в `logs/heartbeat` не обновлялся >10 мин) или
-задача не в состоянии `Running`; шлёт алерт `DEVELOPER_ID` напрямую через
+задача не в состоянии `Running`; шлёт алерт первому id из `DEVELOPER_TG_IDS` напрямую через
 Telegram Bot API (работает, даже если сам бот не поднимается). Проверка после
 установки: `Get-ScheduledTaskInfo -TaskName "DancePulseWatchdog"` — `LastRunTime`
 должен обновляться каждые 5 минут.
@@ -38,7 +38,7 @@ Telegram Bot API (работает, даже если сам бот не под�
 
 ```
 BOT_TOKEN=<токен от @BotFather>
-DEVELOPER_ID=<твой Telegram user_id>
+DEVELOPER_TG_IDS=<твой Telegram user_id, через запятую если несколько>
 OWNER_CLAIM_SECRET=<случайная строка — секрет для /claim>
 DEVELOPER_CONTACT=<@username или ссылка — куда слать нераспознанных>
 ```
@@ -57,7 +57,8 @@ python -m scripts.check_pilot
 
 ## 4. Offsite-копия backups/
 
-`backups/` содержит снапшоты БД + копии `.env` (с токеном бота!) + `*.fsm.json`.
+`backups/` содержит снапшоты БД (pg_dump, включает FSM-состояние — таблица
+`fsm_state`) + копии `.env` (с токеном бота!).
 Offsite — **только в приватное хранилище** (личный облачный клиент/robocopy-задача
 в приватную папку), не в публичный/шаренный репозиторий.
 

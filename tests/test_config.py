@@ -4,7 +4,7 @@ from app.core.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(bot_token="123456:" + "a" * 20, developer_id=1, default_lead_hours=18)
+    base = dict(bot_token="123456:" + "a" * 20, developer_ids=[1], default_lead_hours=18)
     base.update(overrides)
     return Settings(**base)
 

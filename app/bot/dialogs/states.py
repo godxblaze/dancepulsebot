@@ -68,11 +68,27 @@ class EditNameSG(StatesGroup):
 
 
 class BroadcastSG(StatesGroup):
-    """Препод шлёт сообщение группе: ввод текста → preview-подтверждение.
-    group_id в start_data, text копится в dialog_data."""
+    """Препод шлёт сообщение группе: ввод текста → preview-подтверждение →
+    прогресс доставки (outbox асинхронный, Phase 5). group_id в start_data,
+    text/broadcast_id копятся в dialog_data."""
 
     text = State()
     confirm = State()
+    progress = State()
+
+
+class DevBroadcastSG(StatesGroup):
+    """Phase 11: dev-only глобальная рассылка через все/часть школ. Тот же
+    Broadcast+outbox механизм, что и BroadcastSG (Phase 5) — просто другой
+    источник получателей. Открывается ТОЛЬКО из dev-меню, гейт по
+    settings.developer_ids (см. cb_dev_broadcast_start в admin.py)."""
+
+    scope = State()
+    scope_pick = State()
+    audience = State()
+    text = State()
+    confirm = State()
+    progress = State()
 
 
 class EditGroupSG(StatesGroup):

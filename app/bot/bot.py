@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.base import BaseStorage
@@ -13,6 +12,7 @@ from app.bot.dialogs import (
     add_venue_dialog,
     broadcast_dialog,
     create_school_dialog,
+    dev_broadcast_dialog,
     edit_group_dialog,
     edit_name_dialog,
     new_group_dialog,
@@ -30,7 +30,7 @@ from app.bot.handlers import (
     student,
     survey,
 )
-from app.bot.middlewares import ClearStaleCancelState
+from app.bot.middlewares import CallbackLatencyMiddleware, ClearStaleCancelState
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
@@ -69,11 +69,10 @@ def build_bot() -> Bot:
 
 def _build_storage() -> BaseStorage:
     """Persist FSM state across restarts — мастер группы и онбординг ученика
-    переживают рестарт. Файл лежит рядом с основной БД."""
-    from app.bot.fsm_storage import JsonFileStorage
+    переживают рестарт. Postgres-backed (Phase 6) — см. app/bot/fsm_storage.py."""
+    from app.bot.fsm_storage import PostgresStorage
 
-    state_path = Path(settings.db_path).with_suffix(".fsm.json")
-    return JsonFileStorage(state_path)
+    return PostgresStorage()
 
 
 def build_dispatcher() -> Dispatcher:
@@ -82,6 +81,8 @@ def build_dispatcher() -> Dispatcher:
     # до того, как апдейт дойдёт до любого хендлера (outer — гарантированно
     # выполняется, даже если конкретный хендлер ниже не совпадёт по фильтру).
     dp.message.outer_middleware(ClearStaleCancelState())
+    # Phase 9 observability — тайминг для devstats (app/core/metrics.py).
+    dp.callback_query.outer_middleware(CallbackLatencyMiddleware())
     # student first: it claims /start with a deep-link payload
     dp.include_router(student.router)
     dp.include_router(survey.router)
@@ -102,6 +103,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(broadcast_dialog)
     dp.include_router(add_venue_dialog)
     dp.include_router(add_teacher_preset_dialog)
+    dp.include_router(dev_broadcast_dialog)
     setup_dialogs(dp)
     dp.errors.register(_on_error)
     return dp

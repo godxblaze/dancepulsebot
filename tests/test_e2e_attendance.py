@@ -43,6 +43,7 @@ from app.services import surveys as surveys_svc
 from app.services.schedule import upcoming_lessons
 from tests._e2e_helpers import LESSON, TEACHER_TG, cb, join_via_link, make_group
 from tests._fakes import FakeBot, FakeFSM, FakeMessage, SentMessage, fake_user
+from tests._outbox_helpers import drain_outbox
 
 PAST = datetime(2026, 5, 4, 19, 0)  # an earlier Monday, naive UTC like the rest
 
@@ -276,8 +277,9 @@ async def test_cancel_lesson_with_reason_and_notices(db, monkeypatch) -> None:
 
     confirm_msg = SentMessage(bot, TEACHER_TG, "")
     await lesson_cancel_reason_confirm(
-        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state, bot
+        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state
     )
+    await drain_outbox(bot)
     assert "отменено" in confirm_msg.text
 
     async with session_scope() as s:
@@ -349,8 +351,9 @@ async def test_cancel_lesson_notifies_claimants_of_filled_call(db, monkeypatch) 
     pick = SentMessage(bot, TEACHER_TG, "")
     await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
     await cb_lesson_cancel_execute(
-        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick), bot
+        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick)
     )
+    await drain_outbox(bot)
     assert any("больше не нужна" in m.text for m in bot.sent_to(840))
 
 
@@ -366,8 +369,9 @@ async def test_cancel_lesson_no_reason_preset(db, monkeypatch) -> None:
     pick = SentMessage(bot, TEACHER_TG, "")
     await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
     await cb_lesson_cancel_execute(
-        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick), bot
+        cb(f"grpcancelreason:{gid}:{ts}:none", TEACHER_TG, message=pick)
     )
+    await drain_outbox(bot)
     assert "отменено" in pick.text
     async with session_scope() as s:
         assert await cancellations_svc.is_cancelled(s, gid, dt)
@@ -404,8 +408,9 @@ async def test_cancel_lesson_preset_reason_in_notice(db, monkeypatch) -> None:
     pick = SentMessage(bot, TEACHER_TG, "")
     await cb_lesson_cancel_confirm(cb(f"grpcanceldt:{gid}:{ts}", TEACHER_TG, message=pick))
     await cb_lesson_cancel_execute(
-        cb(f"grpcancelreason:{gid}:{ts}:sick", TEACHER_TG, message=pick), bot
+        cb(f"grpcancelreason:{gid}:{ts}:sick", TEACHER_TG, message=pick)
     )
+    await drain_outbox(bot)
     assert "отменено" in pick.text
     async with session_scope() as s:
         assert await cancellations_svc.is_cancelled(s, gid, dt)
@@ -457,8 +462,9 @@ async def test_cancel_typed_reason_requires_explicit_confirm(db, monkeypatch) ->
     # явное подтверждение — вот теперь отменяет
     confirm_msg = SentMessage(bot, TEACHER_TG, "")
     await lesson_cancel_reason_confirm(
-        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state, bot
+        cb(f"grpcancelreasonok:{gid}:{ts}", TEACHER_TG, message=confirm_msg), state
     )
+    await drain_outbox(bot)
     async with session_scope() as s:
         assert await cancellations_svc.is_cancelled(s, gid, dt)
 

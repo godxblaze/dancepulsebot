@@ -22,6 +22,7 @@ from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
 from tests._e2e_helpers import LESSON, TEACHER_TG, cb, join_via_link, make_group
 from tests._fakes import FakeBot
+from tests._outbox_helpers import drain_outbox
 
 
 async def _deficit_call(bot: FakeBot, monkeypatch, *, needed_pool: bool = True):
@@ -43,6 +44,7 @@ async def _deficit_call(bot: FakeBot, monkeypatch, *, needed_pool: bool = True):
     async with session_scope() as s:
         group = await groups_svc.get_group(s, gid)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, gid, LESSON)
         survey_id = survey.id
@@ -61,6 +63,7 @@ async def _deficit_call(bot: FakeBot, monkeypatch, *, needed_pool: bool = True):
     async with session_scope() as s:
         group = await groups_svc.get_group(s, gid)
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=2))
+    await drain_outbox(bot)
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
         return gid, sid, survey_id, call.id
@@ -79,6 +82,7 @@ async def test_support_changes_mind(db, monkeypatch) -> None:
         await supports_svc.set_picker_ref(s, call_id, TEACHER_TG, 4242)
     await cb_support_pick(cb(f"pick:{call_id}:{sup_pid}", TEACHER_TG, message=picker))
     await cb_support_pick_send(cb(f"picksend:{call_id}", TEACHER_TG, message=picker), bot)
+    await drain_outbox(bot)
 
     # the support says yes…
     invite = bot.last_to(1101)
@@ -119,6 +123,7 @@ async def test_late_join_guard(db, monkeypatch) -> None:
         sup_pid = sup.id
     await cb_support_pick(cb(f"pick:{call_id}:{sup_pid}", TEACHER_TG, message=picker))
     await cb_support_pick_send(cb(f"picksend:{call_id}", TEACHER_TG, message=picker), bot)
+    await drain_outbox(bot)
 
     # now the lesson is in the past → late join is refused
     monkeypatch.setattr(

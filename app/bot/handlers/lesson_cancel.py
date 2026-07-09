@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -30,10 +30,11 @@ from app.bot.keyboards import (
     pick_lesson_to_cancel_keyboard,
 )
 from app.bot.states import CancelLesson
-from app.bot.utils import format_group_title, send_with_retry
+from app.bot.utils import format_group_title
 from app.db.models import Answer, Person, SupportCallStatus, SurveyStatus
 from app.db.session import session_scope
 from app.services import cancellations as cancellations_svc
+from app.services import outbox as outbox_svc
 from app.services import schools as schools_svc
 from app.services import supports as supports_svc
 from app.services import surveys as surveys_svc
@@ -118,12 +119,12 @@ async def cb_lesson_cancel_confirm(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("grpcancelreason:"))
-async def cb_lesson_cancel_execute(call: CallbackQuery, bot: Bot) -> None:
+async def cb_lesson_cancel_execute(call: CallbackQuery) -> None:
     """Тап пресета причины — отмена исполняется немедленно, без FSM."""
     parts = (call.data or "").split(":")
     group_id, ts, preset = int(parts[1]), int(parts[2]), parts[3]
     reason = _REASON_PRESETS.get(preset)
-    result = await _do_cancel_lesson(call.from_user.id, group_id, ts, reason, bot)
+    result = await _do_cancel_lesson(call.from_user.id, group_id, ts, reason)
     if call.message:
         await call.message.edit_text(result)
     await call.answer()
@@ -191,7 +192,7 @@ async def lesson_cancel_reason_typed(
 
 
 @router.callback_query(CancelLesson.confirm_reason, F.data.startswith("grpcancelreasonok:"))
-async def lesson_cancel_reason_confirm(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def lesson_cancel_reason_confirm(call: CallbackQuery, state: FSMContext) -> None:
     """Подтверждение введённой текстом причины — реальное исполнение отмены."""
     data = await state.get_data()
     await state.clear()
@@ -203,7 +204,7 @@ async def lesson_cancel_reason_confirm(call: CallbackQuery, state: FSMContext, b
         await call.answer("Флоу отмены устарел — начни заново.", show_alert=True)
         return
     result = await _do_cancel_lesson(
-        call.from_user.id, group_id, ts, data.get("reason"), bot
+        call.from_user.id, group_id, ts, data.get("reason")
     )
     if call.message:
         await call.message.edit_text(result)
@@ -215,7 +216,6 @@ async def _do_cancel_lesson(
     group_id: int,
     ts: int,
     reason: str | None,
-    bot: Bot,
 ) -> str:
     """Пишет cancellation, закрывает survey/support, шлёт уведомления.
     Возвращает текст итоговой сводки для отправителя."""
@@ -267,33 +267,32 @@ async def _do_cancel_lesson(
                 sc.status = SupportCallStatus.closed
                 await s.flush()
 
-    reason_suffix = f"\nПричина: {reason}" if reason else ""
-    when_str = format_lesson_at(lesson_at, tz=tz_name)
-    notice = f"⚠️ Занятие «{title}» {when_str} отменено.{reason_suffix}"
-    for tg in yes_tg_ids:
-        try:
-            await send_with_retry(bot, tg, notice)
-        except Exception as e:  # noqa: BLE001
-            log.info("cancel-notice to %s failed: %s", tg, e)
-    sup_notice = (
-        f"⚠️ Помощь на занятии «{title}» {when_str} "
-        f"больше не нужна — занятие отменено.{reason_suffix}"
-    )
-    for tg in support_tg_ids:
-        try:
-            await send_with_retry(bot, tg, sup_notice)
-        except Exception as e:  # noqa: BLE001
-            log.info("cancel-notice (support) to %s failed: %s", tg, e)
+        # Уведомления теперь через outbox — durable, доставка асинхронная
+        # (sender worker), а не синхронным send_with_retry в цикле.
+        reason_suffix = f"\nПричина: {reason}" if reason else ""
+        when_str = format_lesson_at(lesson_at, tz=tz_name)
+        notice = f"⚠️ Занятие «{title}» {when_str} отменено.{reason_suffix}"
+        for tg in yes_tg_ids:
+            payload = outbox_svc.build_payload(notice, kind="lesson_cancel")
+            key = f"lesson_cancel:{group_id}:{ts}:student:{tg}"
+            await outbox_svc.enqueue(s, key, tg, payload)
+        sup_notice = (
+            f"⚠️ Помощь на занятии «{title}» {when_str} "
+            f"больше не нужна — занятие отменено.{reason_suffix}"
+        )
+        for tg in support_tg_ids:
+            payload = outbox_svc.build_payload(sup_notice, kind="lesson_cancel")
+            key = f"lesson_cancel:{group_id}:{ts}:support:{tg}"
+            await outbox_svc.enqueue(s, key, tg, payload)
 
-    coadmin_notice = (
-        f"ℹ️ Занятие «{title}» {when_str} отменено "
-        f"(отменил другой админ школы).{reason_suffix}"
-    )
-    for tg in coadmin_tg_ids:
-        try:
-            await send_with_retry(bot, tg, coadmin_notice)
-        except Exception as e:  # noqa: BLE001
-            log.info("cancel-notice (coadmin) to %s failed: %s", tg, e)
+        coadmin_notice = (
+            f"ℹ️ Занятие «{title}» {when_str} отменено "
+            f"(отменил другой админ школы).{reason_suffix}"
+        )
+        for tg in coadmin_tg_ids:
+            payload = outbox_svc.build_payload(coadmin_notice, kind="lesson_cancel")
+            key = f"lesson_cancel:{group_id}:{ts}:coadmin:{tg}"
+            await outbox_svc.enqueue(s, key, tg, payload)
 
     return (
         f"🚫 Занятие «{title}» {when_str} отменено. "

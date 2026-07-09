@@ -5,13 +5,11 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from html import escape
 from typing import Any
 
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -37,7 +35,9 @@ from app.bot.keyboards import admin_menu_keyboard
 from app.bot.utils import format_group_title
 from app.db.session import session_scope
 from app.services import admins as admins_svc
+from app.services import broadcasts as broadcasts_svc
 from app.services import groups as groups_svc
+from app.services import outbox as outbox_svc
 from app.services import persons as persons_svc
 from app.services import schools as schools_svc
 from app.services import teacher_presets as presets_svc
@@ -279,6 +279,12 @@ edit_name_dialog = Dialog(
 
 # ── Broadcast ────────────────────────────────────────────────────────
 
+# Telegram's sendMessage text limit is 4096 символов. Берём с запасом ниже —
+# на префикс («📢 «Title» — сообщение от X:\n\n») и на расширение при
+# HTML-экранировании (`<`→`&lt;` и т.п.) остаётся честный запас, а не
+# «упало прямо на границе».
+MAX_BROADCAST_TEXT = 3500
+
 
 def _group_id_from_start(manager: DialogManager) -> int | None:
     data = manager.start_data
@@ -303,11 +309,17 @@ async def _broadcast_preview_getter(dialog_manager: DialogManager, **_: Any) -> 
 
 
 async def _on_broadcast_text_typed(
-    _msg: Message, _widget: TextInput, manager: DialogManager, value: str
+    msg: Message, _widget: TextInput, manager: DialogManager, value: str
 ) -> None:
     text = value.strip()
     if not text:
         # MessageInput автоматически дождётся повторного ввода.
+        return
+    if len(text) > MAX_BROADCAST_TEXT:
+        await msg.answer(
+            f"Слишком длинно ({len(text)} символов, максимум {MAX_BROADCAST_TEXT}) — "
+            "сократи и пришли снова."
+        )
         return
     manager.dialog_data["text"] = text
     # Сохраним group_id в dialog_data чтобы getter не лазил в start_data повторно.
@@ -320,10 +332,14 @@ async def _on_broadcast_text_typed(
 async def _on_broadcast_send(
     call: CallbackQuery, _btn: Button, manager: DialogManager
 ) -> None:
-    # Кнопка «Отправить» живёт до manager.done() после всего цикла send'ов —
-    # даблтап до этого момента запустил бы рассылку дважды. Флаг ставится
-    # синхронно (без await до него) — второй тап в том же loop'е видит его
-    # гарантированно, module-level Lock не нужен (обе таски в одном loop'е).
+    # dialog_data["sending"]'s role changed with the outbox migration: it no
+    # longer needs to prevent duplicate SENDS — enqueue() is idempotent per
+    # business_key (broadcast:{broadcast_id}:{person_id}), so re-running this
+    # handler after the Broadcast row already exists would just re-enqueue
+    # no-ops. What it still prevents is creating two separate Broadcast rows
+    # (and thus double-counting/double-billing the "N recipients" number) from
+    # a double-tap before manager navigates off this window. Kept as a
+    # lightweight UI-level debounce for exactly that, not for send-safety.
     if manager.dialog_data.get("sending"):
         await call.answer("Уже отправляю…")
         return
@@ -343,37 +359,67 @@ async def _on_broadcast_send(
             return
         members = await persons_svc.group_members(s, int(group_id))
         title = format_group_title(group)
-    sender_name = user.full_name or user.username or "препод"
-    body = f"📢 «{escape(title)}» — сообщение от {escape(sender_name)}:\n\n{escape(text)}"
-    bot = manager.middleware_data.get("bot")
-    sent = blocked = failed = 0
-    for p in members:
-        try:
-            await bot.send_message(p.tg_user_id, body, parse_mode=ParseMode.HTML)
-            sent += 1
-        except (TelegramForbiddenError, TelegramNotFound):
-            blocked += 1
-        except TelegramRetryAfter as e:
-            # Telegram flood-control — ждём и пробуем один раз ещё, а не
-            # молча считаем это «не доехало» (школа маленькая, но рассылка
-            # разом на всю группу вполне может упереться в лимит).
-            await asyncio.sleep(e.retry_after)
-            try:
-                await bot.send_message(p.tg_user_id, body, parse_mode=ParseMode.HTML)
-                sent += 1
-            except Exception as e2:  # noqa: BLE001
-                log.warning("broadcast retry to %s failed: %s", p.tg_user_id, e2)
-                failed += 1
-        except Exception as e:  # noqa: BLE001
-            log.warning("broadcast to %s failed: %s", p.tg_user_id, e)
-            failed += 1
-    parts = [f"📢 Отправлено: {sent}/{len(members)}"]
-    if blocked:
-        parts.append(f"заблокировали бота: {blocked}")
-    if failed:
-        parts.append(f"не доехало: {failed}")
+        admin = await admins_svc.get_by_tg_id(s, user.id)
+        sender_name = user.full_name or user.username or "препод"
+        body = f"📢 «{escape(title)}» — сообщение от {escape(sender_name)}:\n\n{escape(text)}"
+
+        # Broadcast row + every recipient's outbox row commit in the SAME
+        # transaction — a crash right after this commits leaves durable rows
+        # the sender worker still delivers on restart (Phase 3), instead of
+        # the old direct send-loop losing everything not yet sent.
+        broadcast = await broadcasts_svc.create_broadcast(
+            s, scope_type="group", scope_payload={"group_id": int(group_id)},
+            audience_type="members", text=text,
+            created_by_admin_id=admin.id if admin else None,
+        )
+        payload = outbox_svc.build_payload(body, parse_mode=ParseMode.HTML.value, kind="broadcast")
+        for p in members:
+            key = f"broadcast:{broadcast.id}:{p.id}"
+            await outbox_svc.enqueue(s, key, p.tg_user_id, payload, broadcast_id=broadcast.id)
+        recipient_count = len(members)
+        broadcast_id = broadcast.id
+
+    manager.dialog_data["broadcast_id"] = broadcast_id
+    manager.dialog_data["title"] = title
     if call.message:
-        await call.message.answer(" · ".join(parts))
+        count_phrase = ui.plural_with_count(recipient_count, "ученику", "ученикам", "ученикам")
+        await call.message.answer(f"📢 Рассылка поставлена в очередь: {count_phrase}.")
+    await manager.switch_to(BroadcastSG.progress)
+
+
+async def _broadcast_progress_getter(dialog_manager: DialogManager, **_: Any) -> dict:
+    broadcast_id = dialog_manager.dialog_data.get("broadcast_id")
+    title = dialog_manager.dialog_data.get("title", "—")
+    if broadcast_id is None:
+        return {"text": "Рассылка не найдена."}
+    async with session_scope() as s:
+        counts = await broadcasts_svc.progress(s, int(broadcast_id))
+    text = ui.card(
+        ui.title(ui.BROADCAST, "Рассылка"),
+        meta=f"«{escape(title)}»",
+        body=[
+            f"{ui.YES} доставлено: {counts['sent']}",
+            f"{ui.PENDING} в очереди: {counts['pending']}",
+            f"{ui.UNDELIVERED} не доставлено: {counts['terminal_failed']}",
+            f"всего: {counts['total']}",
+        ],
+    )
+    return {"text": text}
+
+
+async def _on_broadcast_progress_refresh(
+    call: CallbackQuery, _btn: Button, _manager: DialogManager
+) -> None:
+    # Тап ничего не меняет — aiogram-dialog перерисовывает текущее окно
+    # (заново вызывает getter) после любого widget-взаимодействия, если
+    # хэндлер не ушёл в manager.done()/switch_to() — этого достаточно, чтобы
+    # получить свежие counts.
+    await call.answer("Обновлено")
+
+
+async def _on_broadcast_progress_done(
+    call: CallbackQuery, _btn: Button, manager: DialogManager
+) -> None:
     await manager.done()
 
 
@@ -413,6 +459,14 @@ broadcast_dialog = Dialog(
         getter=_broadcast_preview_getter,
         parse_mode=ParseMode.HTML,
         state=BroadcastSG.confirm,
+    ),
+    Window(
+        Format("{text}"),
+        Button(Const("🔄 Обновить"), id="bc_refresh", on_click=_on_broadcast_progress_refresh),
+        Button(Const("✅ Готово"), id="bc_done", on_click=_on_broadcast_progress_done),
+        getter=_broadcast_progress_getter,
+        parse_mode=ParseMode.HTML,
+        state=BroadcastSG.progress,
     ),
 )
 

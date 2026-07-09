@@ -3,6 +3,17 @@
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
+# Postgres-миграция (2026-07-09): backup/restore/backpressure-тесты шеллятся
+# в pg_dump/pg_restore/psql/createdb/dropdb напрямую. Этот скрипт запускается
+# Stop-hook'ом в СВОЁМ процессе — не наследует PATH, который агент экспортил
+# в своей bash-сессии, поэтому без этого блока они падали с обманчивым
+# WinError 2 (см. память postgres-local-dev-no-admin). Portable-инстанс —
+# единственный доступный без прав администратора на этой машине.
+$pgBin = Join-Path (Split-Path -Parent $PSScriptRoot) ".pgportable\pgsql\bin"
+if (Test-Path $pgBin) {
+    $env:PATH = "$pgBin;$env:PATH"
+}
+
 $ruffOut = & python -m ruff check app scripts tests 2>&1
 $ruffCode = $LASTEXITCODE
 # Полный суит — параллельно через pytest-xdist (в dev-deps). Фиксированные 8

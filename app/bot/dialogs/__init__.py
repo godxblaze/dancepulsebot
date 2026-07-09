@@ -3,6 +3,7 @@
 Каждый dialog экспортирует `Dialog`-объект из своего модуля; общий dispatcher
 подключает их через `setup_dialogs(dp)` в [app/bot/bot.py](../bot.py).
 """
+from app.bot.dialogs.dev_broadcast import dev_broadcast_dialog
 from app.bot.dialogs.edit_group import edit_group_dialog
 from app.bot.dialogs.misc_dialogs import (
     add_teacher_preset_dialog,
@@ -18,6 +19,7 @@ from app.bot.dialogs.states import (
     AddVenueSG,
     BroadcastSG,
     CreateSchoolSG,
+    DevBroadcastSG,
     EditGroupSG,
     EditNameSG,
     NewGroupSG,
@@ -29,6 +31,7 @@ __all__ = [
     "AddVenueSG",
     "BroadcastSG",
     "CreateSchoolSG",
+    "DevBroadcastSG",
     "EditGroupSG",
     "EditNameSG",
     "NewGroupSG",
@@ -37,6 +40,7 @@ __all__ = [
     "add_venue_dialog",
     "broadcast_dialog",
     "create_school_dialog",
+    "dev_broadcast_dialog",
     "edit_group_dialog",
     "edit_name_dialog",
     "new_group_dialog",

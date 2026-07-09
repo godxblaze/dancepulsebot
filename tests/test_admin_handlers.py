@@ -161,7 +161,7 @@ async def test_status_dev_only(db, monkeypatch) -> None:
     from app.bot.handlers.admin import cmd_status
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "developer_id", 777)
+    monkeypatch.setattr(settings, "developer_ids", [777])
     async with session_scope() as s:
         await admins.get_or_create(s, 100, "t", "T")  # школа — от autouse-фикстуры
     # не-разработчик — молчим
@@ -182,7 +182,7 @@ async def test_devstats_dev_only(db, monkeypatch) -> None:
     from app.bot.handlers.admin import cmd_devstats
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "developer_id", 777)
+    monkeypatch.setattr(settings, "developer_ids", [777])
     async with session_scope() as s:
         await admins.get_or_create(s, 101, "t2", "T2")  # школа — от autouse-фикстуры
     # не-разработчик — молчим

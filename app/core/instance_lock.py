@@ -7,7 +7,13 @@ from pathlib import Path
 class InstanceLock:
     """Эксклюзивный file-lock — второй процесс с тем же путём получает отказ.
     Windows: msvcrt.locking; POSIX: fcntl.flock. fd держим открытым весь runtime,
-    иначе ОС снимает лок при закрытии хендла."""
+    иначе ОС снимает лок при закрытии хендла.
+
+    Осознанно остаётся file-based после перехода на Postgres (не pg_advisory_lock):
+    деплой — один self-hosted VPS-процесс, файловый лок этого не хуже и не требует
+    держать открытым отдельное соединение с БД только ради лока. Postgres advisory
+    lock стал бы уместен, только если топология деплоя перестанет быть single-VPS
+    (несколько инстансов бота)."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)

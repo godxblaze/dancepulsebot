@@ -1,24 +1,36 @@
-"""Простое JSON-файловое хранилище FSM для aiogram 3.
+"""Postgres-backed FSM storage for aiogram 3 (Phase 6).
 
-Зачем: дефолтное MemoryStorage теряет состояние при рестарте — пользователь,
-застрявший на середине мастера группы или онбординга, потеряет шаг. Redis/Mongo
-для пилота избыточны; SQLite-storage из коробки в aiogram 3.27 нет.
+Replaces the old whole-file-rewrite `JsonFileStorage` — under concurrent
+onboarding (10-20 QR joins at once) that serialized the entire event loop
+through one `asyncio.Lock` + full-file `tmp+rename`, not just dialogs.
+Per-key row locking here (`SELECT ... FOR UPDATE`) means unrelated users'
+concurrent dialog transitions no longer contend with each other.
 
-Записи мало (один-два юзера одновременно проходят мастер), потому держим
-всё в памяти и переписываем файл целиком на каждое изменение через tmp+rename.
+`dance.fsm.json` decommission decision: start fresh, no one-time import. Per
+Phase 1's own data-volume finding this pilot has trivially few active users;
+any dialog genuinely mid-flight at cutover just needs the user to restart it
+(a `/start`, tap "◀ Назад", or re-open the wizard) — a one-time, one-tap cost,
+not worth writing a JSON→Postgres import script for. The old `.fsm.json` file
+is simply no longer read or written anywhere in this module.
 """
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
-from pathlib import Path
+from datetime import timedelta
 from typing import Any
 
 from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-log = logging.getLogger(__name__)
+from app.db.models import FSMState
+from app.db.session import session_scope
+from app.services.schedule import utc_now
+
+# Дальше этого срока заброшенный dialog-state удаляется TTL-уборкой
+# (build_scheduler). 30 дней: с запасом дольше любого реального онбординга —
+# при этом не даёт таблице расти вечно за счёт брошенных на середине flow'ов.
+FSM_TTL_DAYS = 30
 
 
 def _key_to_str(key: StorageKey) -> str:
@@ -30,62 +42,80 @@ def _key_to_str(key: StorageKey) -> str:
     return f"{key.bot_id}:{key.chat_id}:{key.user_id}:{key.thread_id or 0}:{bc}:{destiny}"
 
 
-class JsonFileStorage(BaseStorage):
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
-        self._lock = asyncio.Lock()
-        self._data: dict[str, dict[str, Any]] = self._load()
-
-    def _load(self) -> dict[str, dict[str, Any]]:
-        if not self._path.exists():
-            return {}
-        try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            log.warning(
-                "FSM-хранилище %s повреждено/недоступно, начинаю с чистого: %s", self._path, e
-            )
-            return {}
-
-    def _flush(self) -> None:
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(self._data, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
+async def _read_modify_write(k: str, mutate) -> None:
+    """Read-modify-write one key's slot atomically. `SELECT ... FOR UPDATE`
+    locks the row for existing keys, so concurrent writers to the SAME key
+    serialize; writers to DIFFERENT keys never contend (the whole point of
+    moving off one file-wide lock)."""
+    async with session_scope() as s:
+        row = (
+            await s.execute(select(FSMState).where(FSMState.key == k).with_for_update())
+        ).scalar_one_or_none()
+        slot = dict(row.data) if row is not None else {}
+        mutate(slot)
+        if not slot:
+            if row is not None:
+                await s.delete(row)
+            return
+        if row is not None:
+            row.data = slot
+            return
+        # Brand-new key: no row existed to lock above, so a genuine concurrent
+        # first-write race is (in principle) possible — upsert reconciles it
+        # last-writer-wins instead of raising a duplicate-key error. At this
+        # project's scale (one dialog session per user, Telegram itself
+        # serializes a single chat's updates) this is a theoretical edge, not
+        # an observed one.
+        await s.execute(
+            pg_insert(FSMState)
+            .values(key=k, data=slot)
+            .on_conflict_do_update(index_elements=["key"], set_={"data": slot})
         )
-        tmp.replace(self._path)
 
+
+class PostgresStorage(BaseStorage):
     async def set_state(self, key: StorageKey, state: StateType = None) -> None:
-        async with self._lock:
-            k = _key_to_str(key)
-            value = state.state if isinstance(state, State) else state
-            slot = self._data.setdefault(k, {})
+        value = state.state if isinstance(state, State) else state
+
+        def _mutate(slot: dict[str, Any]) -> None:
             if value is None:
                 slot.pop("state", None)
             else:
                 slot["state"] = value
-            if not slot:
-                self._data.pop(k, None)
-            self._flush()
+
+        await _read_modify_write(_key_to_str(key), _mutate)
 
     async def get_state(self, key: StorageKey) -> str | None:
-        return self._data.get(_key_to_str(key), {}).get("state")
+        async with session_scope() as s:
+            row = await s.get(FSMState, _key_to_str(key))
+        return (row.data or {}).get("state") if row is not None else None
 
     async def set_data(self, key: StorageKey, data: dict[str, Any]) -> None:
-        async with self._lock:
-            k = _key_to_str(key)
-            slot = self._data.setdefault(k, {})
+        data = dict(data)
+
+        def _mutate(slot: dict[str, Any]) -> None:
             if data:
                 slot["data"] = data
             else:
                 slot.pop("data", None)
-            if not slot:
-                self._data.pop(k, None)
-            self._flush()
+
+        await _read_modify_write(_key_to_str(key), _mutate)
 
     async def get_data(self, key: StorageKey) -> dict[str, Any]:
-        return dict(self._data.get(_key_to_str(key), {}).get("data") or {})
+        async with session_scope() as s:
+            row = await s.get(FSMState, _key_to_str(key))
+        return dict((row.data or {}).get("data") or {}) if row is not None else {}
 
     async def close(self) -> None:
-        async with self._lock:
-            self._flush()
+        """No persistent connection/lock of our own to release — session_scope
+        uses the app's shared connection pool, which app/main.py disposes."""
+
+
+async def cleanup_stale(ttl_days: int = FSM_TTL_DAYS) -> int:
+    """Deletes `fsm_state` rows untouched for longer than `ttl_days` — an
+    abandoned dialog (user closed Telegram mid-wizard) otherwise lives
+    forever. Returns the number of rows removed."""
+    cutoff = utc_now() - timedelta(days=ttl_days)
+    async with session_scope() as s:
+        result = await s.execute(delete(FSMState).where(FSMState.updated_at < cutoff))
+    return result.rowcount or 0

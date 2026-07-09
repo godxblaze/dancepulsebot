@@ -33,13 +33,15 @@
   осиротевшего survey; `close_orphaned_survey` при правке расписания/TZ гасит и
   привязанный SupportCall, а не только сам Survey. **Известный узкий остаточный
   риск**: закрытие call'а в `close_orphaned_survey` не сериализовано
-  `call_lock` (см. докстринг функции) — обернуть в отдельную залоченную
-  транзакцию нельзя, упирается в SQLite single-writer lock уже открытой
-  вызывающей транзакции (`database is locked`). Правильный фикс требует
-  разносить commit закрытия Survey и commit закрытия SupportCall по разным
-  транзакциям на уровне хендлеров (edit_group.py/school.py) — рефакторинг
-  большего масштаба, отложен осознанно (окно — миллисекунды, триггер — админ
-  меняет расписание в тот же миг, что саппорт тапает join/dismiss).
+  `call_lock` (см. докстринг функции) — код всё ещё не обёрнут в отдельную
+  залоченную транзакцию (не переделывали при переходе на Postgres). На SQLite
+  это упиралось в single-writer lock уже открытой вызывающей транзакции
+  (`database is locked`) — на Postgres (MVCC, без этого лока) сам блокер
+  снят, но фикс по-прежнему требует разносить commit закрытия Survey и commit
+  закрытия SupportCall по разным транзакциям на уровне хендлеров
+  (edit_group.py/school.py) — рефакторинг большего масштаба, остаётся
+  отложенным осознанно (окно — миллисекунды, триггер — админ меняет
+  расписание в тот же миг, что саппорт тапает join/dismiss).
 - ~~429/TelegramRetryAfter-троттлинг рассылок.~~ **Закрыто 2026-07-06.**
   `send_with_retry` (app/bot/utils.py) ловит 429, спит `retry_after`, повторяет
   один раз — применено во всех циклах рассылки scheduler.py и lesson_cancel.py.
@@ -52,8 +54,11 @@
 **Перед стартом** (один раз):
 
 ```powershell
-# .env: BOT_TOKEN, DEVELOPER_ID (твой Telegram user_id). Без них стартовать запретит.
-# Для самостоятельного онбординга препода — OWNER_CLAIM_SECRET (см. ниже).
+# Postgres — локально через docker-compose (см. "Postgres" ниже) или уже поднят.
+# .env: BOT_TOKEN, DATABASE_URL, DEVELOPER_TG_IDS (твой Telegram user_id, CSV). Без них
+# стартовать запретит. Для самостоятельного онбординга препода — OWNER_CLAIM_SECRET.
+alembic upgrade head                      # схема + индексы на пустой БД
+
 # Опционально снести dev-фейков, если уже наполняли базу демо-данными:
 python -m scripts.purge_fakes --dry-run   # посмотреть кого тронем
 python -m scripts.purge_fakes             # реально удалить
@@ -63,6 +68,23 @@ python -m scripts.purge_fakes             # реально удалить
 python -m scripts.check_pilot
 ```
 
+### Postgres
+
+Прод/деплой — `docker-compose up -d` ([docker-compose.yml](docker-compose.yml)):
+хранит пароль в `.env` (`POSTGRES_PASSWORD`), данные — в именованном volume
+`pgdata`. Тестовая БД — `docker-compose.test.yml` (tmpfs, без persistence).
+
+Локальная разработка на машине без Docker: подойдёт любой нативный Postgres 16+
+(системный пакет, `choco install postgresql`, или — без прав администратора —
+portable zip-сборка EDB: распаковать, `initdb`, `pg_ctl start` на нужном
+порту). Главное — `DATABASE_URL` в `.env` указывает на рабочий инстанс и
+`alembic upgrade head` проходит.
+
+Пул соединений (`app/db/session.py`) настроен под «несколько тысяч
+пользователей в месяц»: `pool_size=10`, `max_overflow=20` — см. комментарий в
+коде. Если пул станет узким местом при росте — следующий шаг PgBouncer
+(transaction mode) перед Postgres, а не увеличение пула бесконечно.
+
 **Онбординг первого преподавателя.** Чтобы владелец школы получил доступ без
 ручного `/grant`, задай в `.env` `OWNER_CLAIM_SECRET=<секрет>` и передай ему:
 «напиши боту `/claim <секрет>`». После этого он жмёт `/start` и называет школу.
@@ -70,10 +92,23 @@ python -m scripts.check_pilot
 `DEVELOPER_CONTACT=@твой_ник`. Альтернатива на одного-двух — старый путь:
 препод присылает свой `/myid`, ты делаешь `/grant <id>`.
 
+**Мониторинг и dev-режим.** Разработчику (`DEVELOPER_TG_IDS` в `.env`, CSV — можно
+несколько) `/start` показывает dev-меню вместо обычного admin-меню: 📊
+Статистика — тот же per-school разрез, что `/devstats`, плюс live-метрики
+(outbox pending/oldest-age, длительность последнего тика, DB-сессии/callback
+latency с рестарта процесса); 📣 Глобальная рассылка — сообщение всем/подмножеству
+школ (обязательный confirm-экран с реальным live-count получателей перед
+отправкой — не оценка). 🧑‍🏫 Режим препода (или `/devmode`) переключает `/start`
+на путь настоящего препода — полезно, чтобы дожфудить обычный UX тем же
+аккаунтом. Если outbox застревает (воркер упал/перегружен), `alert_developer`
+(app/core/alerts.py) шлёт всем `DEVELOPER_TG_IDS` предупреждение — не чаще
+раза в час на вид проблемы (файл-стейт в `logs/`, тот же паттерн, что у
+watchdog'а ниже).
+
 **Каждый день делай бэкап:**
 
 ```powershell
-python -m scripts.backup_db   # кладёт в backups/dance-YYYYMMDD-HHMMSS.sqlite3
+python -m scripts.backup_db   # pg_dump -Fc → backups/dance-YYYYMMDD-HHMMSS.dump
 ```
 
 Подключи к Task Scheduler / cron, чтобы крутилось автоматически. Хранит 14 дней,
@@ -87,10 +122,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
 ```
 
 **Что вообще «является базой»** (что нужно копировать при переносе):
-- `dance.sqlite3` — собственно данные.
-- `dance.sqlite3-wal`, `dance.sqlite3-shm` — журнал WAL. Существуют если бот запущен. **Перед переносом останови бота**, чтобы WAL слился в основной файл.
-- `dance.fsm.json` — состояние мастеров создания группы и онбординга ученика. Если не успели завершить — без него потеряются. На несколько пользователей это не критично.
-- `.env` — токен и DEVELOPER_ID. **Не клади в git и не таскай как файл — перенеси значения вручную.**
+- Сам Postgres (`docker-compose.yml` volume `pgdata`, или системный кластер) — данные, включая состояние мастеров создания группы и онбординга ученика (таблица `fsm_state`, Phase 6) — уезжает вместе с pg_dump, отдельно копировать не нужно.
+- `.env` — токен, `DATABASE_URL`, `DEVELOPER_TG_IDS`. **Не клади в git и не таскай как файл — перенеси значения вручную.**
 
 **Перенос на VPS Linux:**
 
@@ -98,18 +131,18 @@ powershell -ExecutionPolicy Bypass -File scripts/install_backup_task.ps1
 # 1. на старом хосте: остановить бота (Ctrl+C / завершить процесс) и сделать снапшот
 python -m scripts.backup_db
 
-# 2. перенести два файла на сервер (dance.fsm.json — по желанию):
-scp backups/dance-YYYYMMDD-HHMMSS.sqlite3 user@server:/srv/dancepulse/
-scp dance.fsm.json user@server:/srv/dancepulse/    # опционально
+# 2. перенести архив на сервер:
+scp backups/dance-YYYYMMDD-HHMMSS.dump user@server:/srv/dancepulse/
 
-# 3. на сервере: восстановить под именем dance.sqlite3
+# 3. на сервере: поднять Postgres и восстановить
 ssh user@server
 cd /srv/dancepulse
-python -m scripts.restore_db dance-YYYYMMDD-HHMMSS.sqlite3
-# скрипт сделает страховочный snapshot текущей базы (если была), уберёт WAL/shm,
-# скопирует backup в dance.sqlite3 и прогонит PRAGMA integrity_check.
+docker compose up -d                                    # поднять Postgres-сервис
+python -m scripts.restore_db dance-YYYYMMDD-HHMMSS.dump
+# скрипт делает страховочный pg_dump текущего состояния target-БД, затем
+# pg_restore --clean --if-exists, затем sanity-check запросом по core-таблице.
 
-# 4. .env заполнить вручную, запустить
+# 4. .env заполнить вручную (включая DATABASE_URL), запустить
 python -m app.main
 ```
 
@@ -169,11 +202,11 @@ Start-ScheduledTask -TaskName DancePulseBot   # поднять сейчас
 ## Тесты (детали)
 
 ```powershell
-pytest tests/          # серийно, ~28с
-pytest tests/ -n 8     # pytest-xdist, ~12с (так же гоняет scripts/check.ps1); -n auto не ставить
+pytest tests/ -n 8     # pytest-xdist, ~40с (так же гоняет scripts/check.ps1); -n auto не ставить
 ```
 
-386 тестов. Файлы (основные):
+452 теста. Требует Postgres на `TEST_DATABASE_URL`/дефолт `127.0.0.1:5432/dancepulse_test`
+(см. [conftest.py](tests/conftest.py)). Файлы (основные):
 - `test_schedule.py` — расчёт следующего занятия (граничные случаи).
 - `test_smoke.py` — без БД (генерация join-кодов).
 - `test_surveys.py` — ядро опросов: создание, ответы, сводка, закрытие.
@@ -191,11 +224,12 @@ pytest tests/ -n 8     # pytest-xdist, ~12с (так же гоняет scripts/c
 - `test_balance_bar.py` — живой баланс-бар при claim/skip.
 - `test_e2e_*.py` — сквозные сценарии поверх FakeBot.
 
-Тесты с БД используют временную базу через [conftest.py](tests/conftest.py): файл
-per-PID (конкурентные pytest-процессы и xdist-воркеры не мешают друг другу), схема
-строится один раз на процесс, между тестами данные сносятся одним `executescript`.
-Тест, который меняет DDL (регрессии миграций), помечай `@pytest.mark.schema_mutating` —
-conftest пересоздаст схему до и после него.
+Тесты с БД используют Postgres schema-per-worker через [conftest.py](tests/conftest.py):
+каждый xdist-воркер получает свою схему `pytest_gw<N>` (конкурентные pytest-процессы
+и воркеры не мешают друг другу), схема строится один раз на процесс, между тестами
+данные сносятся `TRUNCATE ... RESTART IDENTITY CASCADE`. Тест, который меняет DDL
+(регрессии миграций), помечай `@pytest.mark.schema_mutating` — conftest пересоздаст
+схему до и после него.
 
 ### E2E — настоящее прокликивание живого бота
 

@@ -56,10 +56,11 @@ def _param_count(fn) -> int:
 
 
 def test_all_dialogs_import() -> None:
-    """Все 6 dialog'ов должны импортироваться без исключений."""
+    """Все 7 dialog'ов должны импортироваться без исключений."""
     from app.bot.dialogs import (
         broadcast_dialog,
         create_school_dialog,
+        dev_broadcast_dialog,
         edit_group_dialog,
         edit_name_dialog,
         new_group_dialog,
@@ -67,7 +68,7 @@ def test_all_dialogs_import() -> None:
     )
     for d in (
         new_group_dialog, edit_group_dialog, create_school_dialog,
-        rename_school_dialog, edit_name_dialog, broadcast_dialog,
+        rename_school_dialog, edit_name_dialog, broadcast_dialog, dev_broadcast_dialog,
     ):
         assert isinstance(d, Dialog)
 
@@ -77,6 +78,7 @@ def test_button_on_click_signatures() -> None:
     from app.bot.dialogs import (
         broadcast_dialog,
         create_school_dialog,
+        dev_broadcast_dialog,
         edit_group_dialog,
         edit_name_dialog,
         new_group_dialog,
@@ -85,7 +87,7 @@ def test_button_on_click_signatures() -> None:
     bad: list[str] = []
     for d in (
         new_group_dialog, edit_group_dialog, create_school_dialog,
-        rename_school_dialog, edit_name_dialog, broadcast_dialog,
+        rename_school_dialog, edit_name_dialog, broadcast_dialog, dev_broadcast_dialog,
     ):
         for w in _collect(d):
             if not isinstance(w, Button) or isinstance(w, Select | Multiselect):
@@ -126,6 +128,7 @@ def test_text_input_on_success_signatures() -> None:
     from app.bot.dialogs import (
         broadcast_dialog,
         create_school_dialog,
+        dev_broadcast_dialog,
         edit_group_dialog,
         edit_name_dialog,
         new_group_dialog,
@@ -134,7 +137,7 @@ def test_text_input_on_success_signatures() -> None:
     bad: list[str] = []
     for d in (
         new_group_dialog, edit_group_dialog, create_school_dialog,
-        rename_school_dialog, edit_name_dialog, broadcast_dialog,
+        rename_school_dialog, edit_name_dialog, broadcast_dialog, dev_broadcast_dialog,
     ):
         for w in _collect(d):
             if not isinstance(w, TextInput):

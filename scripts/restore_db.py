@@ -1,67 +1,81 @@
-"""Восстановить SQLite-базу из бэкапа.
+"""Восстановить Postgres-базу из pg_dump-архива (custom format, `-Fc`).
 
 Использование:
-    python -m scripts.restore_db <path-to-backup.sqlite3>
+    python -m scripts.restore_db <path-to-backup.dump> [--target-url <DSN>]
 
-Перед запуском бот должен быть остановлен (иначе WAL-файл может прийти
-в несогласованное состояние). Скрипт:
-1. Делает страховочный snapshot текущей базы (если она есть) в backups/.
-2. Удаляет dance.sqlite3 + WAL/shm.
-3. Копирует указанный backup-файл в dance.sqlite3.
-4. PRAGMA integrity_check на новой базе — упасть здесь лучше, чем потом
-   получать странные ошибки при работе.
+Без --target-url восстанавливает поверх settings.database_url — той же БД, что
+использует бот. **Останови бота перед восстановлением поверх боевой БД.**
+
+Скрипт:
+1. Делает страховочный pg_dump текущего состояния target-БД в backups/.
+2. `pg_restore --clean --if-exists` в target-БД (--clean дропает существующие
+   объекты перед восстановлением, --if-exists молчит если их и не было).
+3. Sanity-check: запрос по core-таблице вместо SQLite-специфичного
+   `PRAGMA integrity_check` — у Postgres прямого аналога нет; успешный
+   exit-код pg_restore плюс базовый запрос достаточно ловят битый архив или
+   несовместимую схему.
 """
 from __future__ import annotations
 
-import shutil
-import sqlite3
+import argparse
+import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from app.core.config import settings
+from scripts.backup_db import dsn_and_pg_env
+
+BACKUP_DIR = Path("backups")
 
 
-def main(backup_path: str) -> None:
+def _row_count(url: str, table: str, env: dict[str, str] | None = None) -> int:
+    # Flags must precede the positional DSN — psql stops option parsing after
+    # the first positional argument, silently ignoring anything after it.
+    result = subprocess.run(
+        ["psql", "-tAc", f"SELECT COUNT(*) FROM {table}", url],
+        check=True, capture_output=True, text=True, env={**os.environ, **(env or {})},
+    )
+    return int(result.stdout.strip())
+
+
+def main(backup_path: str, target_url: str | None = None, sanity_table: str = "admins") -> None:
     backup = Path(backup_path)
     if not backup.exists():
         print(f"backup не найден: {backup}", file=sys.stderr)
         sys.exit(1)
 
-    target = Path(settings.db_path)
-    backups_dir = Path("backups")
-    backups_dir.mkdir(exist_ok=True)
+    url, pg_env = dsn_and_pg_env(target_url or settings.database_url)
+    env = {**os.environ, **pg_env}
+    BACKUP_DIR.mkdir(exist_ok=True)
 
-    # 1. safety snapshot
-    if target.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        safety = backups_dir / f"{target.stem}-pre-restore-{stamp}.sqlite3"
-        with sqlite3.connect(target) as src_conn, sqlite3.connect(safety) as dst_conn:
-            src_conn.backup(dst_conn)
-        print(f"safety snapshot: {safety}")
+    # 1. safety snapshot текущего состояния target'а (пустая БД — тоже валидный
+    #    крошечный архив, pg_dump тут не падает).
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safety = BACKUP_DIR / f"dance-pre-restore-{stamp}.dump"
+    subprocess.run(["pg_dump", "-Fc", "-f", str(safety), url], check=True, env=env)
+    print(f"safety snapshot: {safety}")
 
-    # 2. wipe current db + WAL/shm
-    for ext in ("", "-wal", "-shm", "-journal"):
-        p = Path(str(target) + ext)
-        if p.exists():
-            p.unlink()
-            print(f"removed: {p}")
+    # 2. restore
+    subprocess.run(
+        ["pg_restore", "--clean", "--if-exists", "-d", url, str(backup)],
+        check=True, env=env,
+    )
+    print(f"restored: {backup} → {url}")
 
-    # 3. copy backup
-    shutil.copy2(backup, target)
-    print(f"restored: {backup} → {target}")
-
-    # 4. integrity check
-    with sqlite3.connect(target) as conn:
-        result = conn.execute("PRAGMA integrity_check").fetchone()
-    if not result or result[0] != "ok":
-        print(f"⚠ integrity_check вернул: {result}", file=sys.stderr)
-        sys.exit(2)
-    print("integrity ok — можно стартовать бота.")
+    # 3. sanity check
+    count = _row_count(url, sanity_table, pg_env)
+    print(f"sanity check: {count} row(s) в {sanity_table} — restore ok, можно стартовать бота.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-    main(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("backup_path")
+    parser.add_argument("--target-url", default=None)
+    parser.add_argument(
+        "--sanity-table", default="admins",
+        help="Таблица для пост-restore sanity-check (по умолчанию admins)",
+    )
+    args = parser.parse_args()
+    main(args.backup_path, args.target_url, args.sanity_table)

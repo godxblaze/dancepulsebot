@@ -27,3 +27,4 @@ e2e/web/.profile/
 *.session
 *.session-journal
 stats_dashboard.html
+.pgportable/

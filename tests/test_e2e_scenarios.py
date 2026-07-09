@@ -49,6 +49,7 @@ from tests._fakes import (
     SentMessage,
     fake_user,
 )
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 # Занятие через 14+ дней, 19:00 МСК, на ближайший понедельник — фиксированная
@@ -262,6 +263,7 @@ async def test_poll_mixed_answers(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -325,6 +327,7 @@ async def test_auto_summary_idempotent(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
 
     # halfway through lead window
     now = LESSON - timedelta(hours=group.lead_hours / 2)
@@ -335,11 +338,13 @@ async def test_auto_summary_idempotent(db, monkeypatch) -> None:
     assert teacher_msgs_before == []
 
     await _maybe_send_summary(bot, group, LESSON, now)
+    await drain_outbox(bot)
     after_first = [m for m in bot.sent_to(TEACHER_TG) if "итоги опроса" in m.text]
     assert len(after_first) == 1
 
     # second call — must NOT send a duplicate
     await _maybe_send_summary(bot, group, LESSON, now)
+    await drain_outbox(bot)
     after_second = [m for m in bot.sent_to(TEACHER_TG) if "итоги опроса" in m.text]
     assert len(after_second) == 1
 
@@ -368,6 +373,7 @@ async def test_recruit_below_threshold(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -382,6 +388,7 @@ async def test_recruit_below_threshold(db, monkeypatch) -> None:
 
     sent_before = len(bot.sent_to(TEACHER_TG))
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
+    await drain_outbox(bot)
 
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
@@ -418,6 +425,7 @@ async def test_recruit_empty_pool(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -430,6 +438,7 @@ async def test_recruit_empty_pool(db, monkeypatch) -> None:
         )
 
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
+    await drain_outbox(bot)
 
     picker_candidates = [
         m for m in bot.sent_to(TEACHER_TG) if "не хватает" in m.text
@@ -474,6 +483,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -496,6 +506,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
         sup_id = sup.id
 
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
+    await drain_outbox(bot)
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
         call_id = call.id
@@ -517,6 +528,7 @@ async def test_recruit_foreign_teacher_blocked(db, monkeypatch) -> None:
     await cb_support_pick_send(
         FakeCallback(f"picksend:{call_id}", foreign, message=picker), bot
     )
+    await drain_outbox(bot)
 
     async with session_scope() as s:
         call = await supports_svc.get_call(s, call_id)
@@ -554,6 +566,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         survey_id = survey.id
@@ -578,6 +591,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
             pool_ids.append((sup.id, tg))
 
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=3))
+    await drain_outbox(bot)
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
         call_id = call.id
@@ -593,6 +607,7 @@ async def test_support_oversubscription(db, monkeypatch) -> None:
     await cb_support_pick_send(
         FakeCallback(f"picksend:{call_id}", teacher, message=picker), bot
     )
+    await drain_outbox(bot)
 
     # first two join → fill 2/2, call closed
     sup1_pid, sup1_tg = pool_ids[0]
@@ -710,7 +725,7 @@ async def test_stats_shows_recent(db, monkeypatch) -> None:
 
 async def test_grant_makes_teacher(db, monkeypatch) -> None:
     bot = FakeBot()
-    monkeypatch.setattr(settings, "developer_id", 7777)
+    monkeypatch.setattr(settings, "developer_ids", [7777])
 
     # 13a — developer grants someone
     dev = fake_user(7777, full_name="Dev")
@@ -787,6 +802,7 @@ async def test_full_tick(db, monkeypatch) -> None:
 
     teacher_before = len(bot.sent_to(TEACHER_TG))
     await sched_module.tick(bot)
+    await drain_outbox(bot)
 
     # poll wasn't re-created (we pre-made the survey), so no new student polls;
     # but the auto-summary AND recruit picker both went to the teacher

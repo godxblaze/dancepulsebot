@@ -1,0 +1,19 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: dancepulse_test
+      POSTGRES_PASSWORD: dancepulse_test
+      POSTGRES_DB: dancepulse_test
+    ports:
+      - "127.0.0.1:5433:5432"
+    # tmpfs: тестовые данные одноразовые, durability не нужна — держим весю
+    # data-директорию в памяти ради скорости DDL (schema-per-worker create/drop).
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dancepulse_test -d dancepulse_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10

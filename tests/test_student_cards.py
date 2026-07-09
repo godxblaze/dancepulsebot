@@ -9,6 +9,7 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons
 from app.services.surveys import ComingRoster, SurveySummary
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 
@@ -47,6 +48,7 @@ async def test_survey_card_structure(db, monkeypatch) -> None:
     monkeypatch.setattr(sched, "utc_now", lambda: _msk(2026, 5, 25, 9, 0))
     bot = _Bot()
     await sched.tick(bot)
+    await drain_outbox(bot)
 
     card = next(m.text for m in bot.sent if "Придёшь?" in m.text)
     assert card.startswith("💓 <b>")             # бренд + жирный тайтл

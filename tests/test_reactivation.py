@@ -8,6 +8,7 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import groups, persons, surveys
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 LESSON = (
@@ -23,9 +24,19 @@ _NOW = LESSON - timedelta(hours=10)
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self._mid = 1000
 
-    async def send_message(self, chat_id, text, **kwargs) -> None:
+    async def send_message(self, chat_id, text, **kwargs):
+        self._mid += 1
         self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=self._mid)
+
+
+async def _reactivate(bot, group, lesson_at, now) -> None:
+    """_maybe_reactivate now only enqueues — drain through the real sender
+    worker so bot.sent reflects delivery, same as before Phase 4."""
+    await sched._maybe_reactivate(bot, group, lesson_at, now)
+    await drain_outbox(bot)
 
 
 async def _setup_group():
@@ -126,7 +137,7 @@ async def test_lapsed_member_gets_one_reactivation(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)
     bot = FakeBot()
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     pinged = [c for c, _ in bot.sent]
     assert pinged == [ids.lapsed_tg]  # ровно один пинг, только lapsed
     assert any("соскучились" in t.lower() for _, t in bot.sent)
@@ -136,10 +147,10 @@ async def test_reactivation_throttled_on_repeat(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)
     bot = FakeBot()
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     assert len(bot.sent) == 1
     # повторный запуск в окне throttle — второй раз не шлём
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     assert len(bot.sent) == 1
 
 
@@ -147,11 +158,11 @@ async def test_reactivation_fires_again_after_throttle_window(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)
     bot = FakeBot()
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     assert len(bot.sent) == 1
     # запуск через >14 дней (по «часам» планировщика) — снова можно
     later = _NOW + timedelta(days=15)
-    await sched._maybe_reactivate(bot, group, LESSON, later)
+    await _reactivate(bot, group, LESSON, later)
     assert len(bot.sent) == 2
 
 
@@ -159,7 +170,7 @@ async def test_active_member_not_reactivated(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)
     bot = FakeBot()
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     assert ids.active_tg not in {c for c, _ in bot.sent}
 
 
@@ -167,5 +178,5 @@ async def test_new_member_without_history_not_reactivated(db) -> None:
     ids = await _setup_group()
     group = await _get_group(ids.group_id)
     bot = FakeBot()
-    await sched._maybe_reactivate(bot, group, LESSON, _NOW)
+    await _reactivate(bot, group, LESSON, _NOW)
     assert ids.newbie_tg not in {c for c, _ in bot.sent}

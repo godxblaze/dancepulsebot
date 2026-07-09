@@ -1,6 +1,12 @@
 """Per-school агрегация вовлечённости за окно WINDOW — единый снапшот для
 /devstats, scripts/dev_stats.py и scripts/stats_dashboard.py: формат вывода у
-каждого свой, цифры считаются здесь и потому совпадают."""
+каждого свой, цифры считаются здесь и потому совпадают.
+
+Phase 9 добавляет сюда же (единая точка входа, не отдельный модуль) outbox-
+здоровье/счётчики отправки и тонкие passthrough'и к in-process live-gauge'ам
+(db session duration, callback latency, support-claim-конфликты) — те живут
+рядом с самой инструментацией (app/db/session.py, app/bot/middlewares.py,
+app/services/supports.py), но собираются здесь, как и всё остальное."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -8,9 +14,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.middlewares import callback_latency_stats as _callback_latency_stats
+from app.core.metrics import last_tick as _last_tick
 from app.db.models import (
     Answer,
     Group,
+    MessageOutbox,
     Response,
     School,
     SchoolMember,
@@ -18,6 +27,8 @@ from app.db.models import (
     SupportCallStatus,
     Survey,
 )
+from app.db.session import session_duration_stats as _session_duration_stats
+from app.services.supports import claim_conflict_count as _claim_conflict_count
 
 WINDOW = timedelta(weeks=4)
 
@@ -116,3 +127,77 @@ async def active_persons(session: AsyncSession, school_id: int, since: datetime)
             Response.answered_at.is_not(None),
         )
     )).scalar_one()
+
+
+async def outbox_health(session: AsyncSession) -> dict:
+    """Живой снапшот очереди (не windowed — текущее состояние, не агрегат за
+    период): сколько строк ждёт отправки и возраст самой старой из них —
+    основной сигнал «завис ли sender worker» для Phase 9 алертов."""
+    pending, oldest = (await session.execute(
+        select(func.count(), func.min(MessageOutbox.scheduled_at))
+        .select_from(MessageOutbox)
+        .where(MessageOutbox.status == "pending")
+    )).one()
+    oldest_age_seconds = None
+    if oldest is not None:
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=UTC)
+        oldest_age_seconds = (datetime.now(UTC) - oldest).total_seconds()
+    return {"pending": pending or 0, "oldest_pending_age_seconds": oldest_age_seconds}
+
+
+async def outbox_send_counts(session: AsyncSession, since: datetime) -> dict:
+    """Windowed (тот же WINDOW-конвенция, что у school_row) счётчики отправки.
+    3-статусная модель outbox (Phase 3) не хранит retry_after/blocked
+    отдельными статусами — `retrying` выведен из текущих pending со
+    attempts>0 (живой gauge, не windowed — прошедшие retry не оставляют следа
+    после разрешения строки), `blocked` — эвристика по last_error среди
+    terminal_failed (Telegram всегда отдаёт текст с «Forbidden» на
+    заблокировавшего бота пользователя, см. TelegramForbiddenError)."""
+    sent = (await session.execute(
+        select(func.count()).select_from(MessageOutbox)
+        .where(MessageOutbox.status == "sent", MessageOutbox.sent_at >= since)
+    )).scalar_one()
+    failed = (await session.execute(
+        select(func.count()).select_from(MessageOutbox)
+        .where(MessageOutbox.status == "terminal_failed", MessageOutbox.created_at >= since)
+    )).scalar_one()
+    blocked = (await session.execute(
+        select(func.count()).select_from(MessageOutbox)
+        .where(
+            MessageOutbox.status == "terminal_failed",
+            MessageOutbox.created_at >= since,
+            MessageOutbox.last_error.ilike("%forbidden%"),
+        )
+    )).scalar_one()
+    retrying = (await session.execute(
+        select(func.count()).select_from(MessageOutbox)
+        .where(MessageOutbox.status == "pending", MessageOutbox.attempts > 0)
+    )).scalar_one()
+    return {"sent": sent, "failed": failed, "blocked": blocked, "retrying": retrying}
+
+
+def session_duration_stats() -> dict:
+    """Passthrough к app/db/session.py — count/avg/max секунд на сессию,
+    с момента старта процесса."""
+    return _session_duration_stats()
+
+
+def callback_latency_stats() -> dict:
+    """Passthrough к app/bot/middlewares.py — count/avg/max секунд обработки
+    callback_query, с момента старта процесса."""
+    return _callback_latency_stats()
+
+
+def support_claim_conflict_count() -> int:
+    """Passthrough к app/services/supports.py — сколько раз claim() отклонил
+    тап из-за реальной гонки (не идемпотентный re-tap тем же человеком), с
+    момента старта процесса."""
+    return _claim_conflict_count()
+
+
+def last_tick_stats() -> dict | None:
+    """Passthrough к app/core/metrics.py (см. комментарий там про цикл
+    scheduler.py↔devstats.py) — длительность и slow-статус последнего
+    прогона планировщика. None, если тик ещё ни разу не отработал."""
+    return _last_tick.value

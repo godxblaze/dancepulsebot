@@ -20,12 +20,13 @@ from app.db.models import Answer, Gender, Person, SupportCallStatus, SurveyKind,
 from app.db.session import engine, session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins, groups, persons, schools, supports, surveys
+from tests._outbox_helpers import drain_outbox
 
 
 async def _drain_pool() -> None:
-    """Закрыть пулованные aiosqlite-соединения после теста с реальной
-    конкуренцией (asyncio.gather): их WAL-локи на общей файловой тест-БД иначе
-    роняют следующий тест «database is locked»."""
+    """Закрыть пул соединений после теста с реальной конкуренцией
+    (asyncio.gather) — гигиена между тестами, не обязательное условие
+    (Postgres, в отличие от SQLite, не роняет конкурентные записи локом)."""
     await engine.dispose()
 
 
@@ -74,12 +75,32 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.edited: list[tuple[int, int]] = []  # (chat_id, message_id) — фиксирует edit-вызовы
+        self._mid = 1000
 
-    async def send_message(self, chat_id, text, **kwargs) -> None:
+    async def send_message(self, chat_id, text, **kwargs):
+        self._mid += 1
         self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=self._mid)
 
     async def edit_message_text(self, text, chat_id=None, message_id=None, **kwargs) -> None:
         self.edited.append((chat_id, message_id))
+
+
+async def _recruit(bot, group, lesson_at, now) -> None:
+    """_maybe_recruit now only enqueues (picker/invites/lead heads-up) —
+    drain through the real sender worker so bot.sent reflects delivery."""
+    await sched._maybe_recruit(bot, group, lesson_at, now)
+    await drain_outbox(bot)
+
+
+async def _notify_stale(bot, now) -> None:
+    await sched._notify_stale_support_calls(now)
+    await drain_outbox(bot)
+
+
+async def _pick_send(cb, bot) -> None:
+    await cb_support_pick_send(cb, bot)
+    await drain_outbox(bot)
 
 
 async def _imbalanced_lesson(males_yes: int = 1, females_yes: int = 4):
@@ -221,6 +242,39 @@ async def test_claim_fills_and_closes(db) -> None:
         assert (await s.get(Person, pids[2])).helped_count == 0
 
 
+async def test_claim_no_overbooking_under_concurrent_access_without_call_lock(
+    db, drain_pool_after,
+) -> None:
+    """Phase 12 load-test replay found this: calling supports.claim() directly
+    (bypassing cb_support_join's call_lock, e.g. a future call site or a
+    horizontally-scaled deployment where the in-process asyncio.Lock offers
+    zero cross-process protection) overbooked 17 claims into a needed=5 call.
+    Fixed with `SELECT ... FOR UPDATE` inside claim() itself — this test
+    proves the DB-level lock holds even with NO call_lock involved."""
+    async with session_scope() as s:
+        t = await admins.get_or_create(s, 100, "t", "T")
+        g = await groups.create_group(s, t.id, "G", "0", "19:00", 18)
+        survey, _ = await surveys.get_or_create_survey(
+            s, g.id, SurveyKind.attendance, LESSON
+        )
+        call = await supports.create_call(s, survey.id, Gender.male, 5, SupportCallStatus.open)
+        call_id = call.id
+        pids = []
+        for uid in range(300, 330):  # 30 concurrent claimers, needed=5
+            p, _ = await persons.add_to_group(s, g, uid, "u", f"P{uid}")
+            pids.append(p.id)
+
+    async def _claim_one(pid: int) -> None:
+        async with session_scope() as s:
+            await supports.claim(s, call_id, pid)
+
+    await asyncio.gather(*(_claim_one(pid) for pid in pids))
+
+    async with session_scope() as s:
+        filled = await supports.count_claims(s, call_id)
+    assert filled == 5  # ровно needed, не больше — не по факту gather'а, прямым count
+
+
 async def test_claim_duplicate_not_double_counted(db) -> None:
     cid, pids = await _open_call(needed=3)
     async with session_scope() as s:
@@ -284,7 +338,7 @@ async def test_late_claim_does_not_wipe_picker_keyboard(db) -> None:
 async def test_maybe_recruit_creates_pending_call(db) -> None:
     g, survey_id = await _imbalanced_lesson(males_yes=1, females_yes=4)
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None
@@ -296,7 +350,7 @@ async def test_maybe_recruit_creates_pending_call(db) -> None:
 async def test_maybe_recruit_below_threshold_closes(db) -> None:
     g, survey_id = await _imbalanced_lesson(males_yes=3, females_yes=4)  # deficit 1
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.closed
@@ -308,7 +362,7 @@ async def test_maybe_recruit_before_evening_fix_does_nothing(db) -> None:
     Дефолт 20:00 МСК накануне = за ~23 ч до занятия; за 30 ч ещё рано."""
     g, survey_id = await _imbalanced_lesson()
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=30))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=30))
     async with session_scope() as s:
         assert await supports.get_call_for_survey(s, survey_id) is None
     assert bot.sent == []
@@ -323,7 +377,7 @@ async def test_maybe_recruit_skips_closed_orphaned_survey(db) -> None:
         survey = await surveys.get_survey(s, survey_id)
         survey.status = SurveyStatus.closed
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         assert await supports.get_call_for_survey(s, survey_id) is None
     assert bot.sent == []
@@ -333,8 +387,8 @@ async def test_maybe_recruit_idempotent(db) -> None:
     g, _ = await _imbalanced_lesson()
     bot = FakeBot()
     now = LESSON - timedelta(hours=3)
-    await sched._maybe_recruit(bot, g, LESSON, now)
-    await sched._maybe_recruit(bot, g, LESSON, now)
+    await _recruit(bot, g, LESSON, now)
+    await _recruit(bot, g, LESSON, now)
     assert len(bot.sent) == 1  # asked only once (фаза 2 без новой дыры молчит)
 
 
@@ -344,7 +398,7 @@ async def test_topup_recruits_after_late_cancellation(db) -> None:
     g, survey_id = await _imbalanced_lesson(males_yes=3, females_yes=3)  # balanced
     bot = FakeBot()
     # фаза 1 на вечерней фиксации — баланс ок, call закрыт, needed=0
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=20))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=20))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.closed
@@ -364,7 +418,7 @@ async def test_topup_recruits_after_late_cancellation(db) -> None:
             await persons.set_pool_level(s, owner.id, fp.id, 2)
 
     # фаза 2 на доборе остатка (дефолт 3 ч до занятия)
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=2))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=2))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call.status == SupportCallStatus.pending
@@ -380,9 +434,9 @@ async def test_topup_disabled_when_cutoff_zero(db) -> None:
         owner = await admins.get_by_tg_id(s, 100)
         await admins.set_support_cutoff_hours(s, owner.id, 0)
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=20))  # фаза 1
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=20))  # фаза 1
     sent_after_phase1 = len(bot.sent)
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=1))  # фаза 2 off
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=1))  # фаза 2 off
     assert len(bot.sent) == sent_after_phase1  # ничего нового
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
@@ -428,11 +482,63 @@ async def test_pick_and_send_invites(db) -> None:
     send = FakeCallback(
         f"picksend:{ctx.call_id}", user_id=100, reply_markup=pick.message.reply_markup
     )
-    await cb_support_pick_send(send, bot)
+    await _pick_send(send, bot)
     assert any(chat == 700 for chat, _ in bot.sent)  # support invited
     async with session_scope() as s:
         call = await supports.get_call(s, ctx.call_id)
         assert call is not None and call.status == SupportCallStatus.open
+
+
+async def test_pick_send_invite_survives_crash_before_delivery(db) -> None:
+    """Phase 4 atomicity fix: mark_invited() and the outbox enqueue commit in
+    the SAME transaction inside cb_support_pick_send. Proof: call
+    cb_support_pick_send but DON'T drain the outbox (simulates the process
+    crashing right after commit, before the sender worker gets to it) — the
+    row must already be durable in the DB. Then a *fresh* drain (simulating
+    the sender worker starting up after a restart) still delivers it."""
+    ctx = await _call_with_pool_candidate()
+    async with session_scope() as s:
+        candidates = await persons.support_candidates(
+            s, ctx.admin_id, Gender.male, ctx.group_id
+        )
+    kb = support_pick_keyboard(ctx.call_id, candidates, set())
+    pick = FakeCallback(
+        f"pick:{ctx.call_id}:{ctx.sup_pid}", user_id=100, reply_markup=kb
+    )
+    await cb_support_pick(pick)
+
+    crashed_bot = FakeBot()
+    send = FakeCallback(
+        f"picksend:{ctx.call_id}", user_id=100, reply_markup=pick.message.reply_markup
+    )
+    # cb_support_pick_send itself — no drain call after it, unlike every other
+    # test in this file. Nothing has been "delivered" via any bot yet.
+    await cb_support_pick_send(send, crashed_bot)
+    assert crashed_bot.sent == []  # the "crash": delivery never got a chance to run
+
+    # Durability check: mark_invited()'s status flip and the outbox row exist
+    # together, queryable directly — proving they committed atomically, not
+    # that the (never-called) sender worker just happened to not run yet.
+    from app.db.models import MessageOutbox
+
+    async with session_scope() as s:
+        call = await supports.get_call(s, ctx.call_id)
+        assert call is not None and call.status == SupportCallStatus.open  # mark_invited ran
+        row = (
+            await s.execute(
+                select(MessageOutbox).where(
+                    MessageOutbox.business_key == f"support_invite:{ctx.call_id}:{ctx.sup_pid}"
+                )
+            )
+        ).scalar_one()
+        assert row.status == "pending"
+
+    # "Restart": a brand-new bot instance (matching a fresh process) drains
+    # the outbox — the already-committed invite is delivered without
+    # cb_support_pick_send ever being called again.
+    restarted_bot = FakeBot()
+    await drain_outbox(restarted_bot)
+    assert any(chat == 700 for chat, _ in restarted_bot.sent)
 
 
 async def test_pick_send_nothing_selected(db) -> None:
@@ -444,7 +550,7 @@ async def test_pick_send_nothing_selected(db) -> None:
     kb = support_pick_keyboard(ctx.call_id, candidates, set())  # nobody ticked
     bot = FakeBot()
     send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
-    await cb_support_pick_send(send, bot)
+    await _pick_send(send, bot)
     assert bot.sent == []  # no invites
     assert send.answers and "отметь" in send.answers[0].lower()
 
@@ -459,7 +565,7 @@ async def test_pick_send_rejects_foreign_teacher(db) -> None:
     kb = support_pick_keyboard(ctx.call_id, candidates, {ctx.sup_pid})
     bot = FakeBot()
     send = FakeCallback(f"picksend:{ctx.call_id}", user_id=999, reply_markup=kb)
-    await cb_support_pick_send(send, bot)
+    await _pick_send(send, bot)
     assert bot.sent == []  # foreign teacher cannot invite
     async with session_scope() as s:
         call = await supports.get_call(s, ctx.call_id)
@@ -479,7 +585,7 @@ async def test_pick_send_rejects_after_lesson_started(db) -> None:
     kb = support_pick_keyboard(ctx.call_id, candidates, {ctx.sup_pid})
     bot = FakeBot()
     send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
-    await cb_support_pick_send(send, bot)
+    await _pick_send(send, bot)
     assert bot.sent == []
     assert send.answers and "уже началось" in send.answers[0]
     async with session_scope() as s:
@@ -526,7 +632,7 @@ async def test_dismissed_call_not_resurrected_by_topup(db) -> None:
     вручную call и не шлёт новый picker, даже если дефицит подрос."""
     g, survey_id = await _imbalanced_lesson(males_yes=1, females_yes=4)  # дефицит 3
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=20))  # фаза 1
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=20))  # фаза 1
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.pending
@@ -539,7 +645,7 @@ async def test_dismissed_call_not_resurrected_by_topup(db) -> None:
             await surveys.record_answer(s, survey_id, p.id, Answer.yes)
             uid += 1
     sent_before = len(bot.sent)
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=2))  # фаза 2
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=2))  # фаза 2
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call.status == SupportCallStatus.closed  # не воскрешён
@@ -575,6 +681,7 @@ async def test_picksend_and_picknope_concurrent_consistent(db, drain_pool_after)
         cb_support_pick_send(send, bot),
         cb_support_pick_nope(nope),
     )
+    await drain_outbox(bot)
     async with session_scope() as s:
         call = await supports.get_call(s, ctx.call_id)
     invited = any(chat == 700 for chat, _ in bot.sent)
@@ -860,10 +967,10 @@ async def test_pending_call_nudges_owner_when_lesson_near(db) -> None:
             s, survey.id, Gender.male, 2, SupportCallStatus.pending
         )
     bot = FakeBot()
-    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    await _notify_stale(bot, datetime.now(UTC))
     assert any("не разобран" in txt for _, txt in bot.sent)
     # идемпотентно — повторно не пингуем
-    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    await _notify_stale(bot, datetime.now(UTC))
     assert sum(1 for _, txt in bot.sent if "не разобран" in txt) == 1
 
 
@@ -880,7 +987,7 @@ async def test_pending_call_quiet_when_lesson_far(db) -> None:
             s, survey.id, Gender.male, 2, SupportCallStatus.pending
         )
     bot = FakeBot()
-    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    await _notify_stale(bot, datetime.now(UTC))
     assert bot.sent == []
 
 
@@ -900,7 +1007,7 @@ async def test_stale_open_call_no_nudge_after_lesson_started(db) -> None:
         call.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
         await s.flush()
     bot = FakeBot()
-    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    await _notify_stale(bot, datetime.now(UTC))
     assert bot.sent == []  # занятие уже началось — не советуем "напиши лично"
 
 
@@ -925,14 +1032,23 @@ async def test_stale_open_call_not_marked_notified_on_send_failure(db) -> None:
         async def send_message(self, *args, **kwargs):
             raise RuntimeError("Telegram недоступен")
 
-    await sched._notify_stale_support_calls(_BrokenBot(), datetime.now(UTC))
+    await sched._notify_stale_support_calls(datetime.now(UTC))
+    await drain_outbox(_BrokenBot())
     async with session_scope() as s:
         call = await supports.get_call(s, call_id)
         assert call.no_reply_notified is False  # не потерян — попробуем ещё раз
 
-    # На следующий тик с живым ботом пинг реально доходит.
+    # На следующий тик с живым ботом пинг реально доходит — форсируем due-время
+    # вместо реального sleep на backoff (тот же приём, что в test_scheduler.py).
+    from app.db.models import MessageOutbox
+    from app.services.schedule import utc_now
+    async with session_scope() as s:
+        row = (
+            await s.execute(select(MessageOutbox).where(MessageOutbox.chat_id == 100))
+        ).scalar_one()
+        row.scheduled_at = utc_now()
     bot = FakeBot()
-    await sched._notify_stale_support_calls(bot, datetime.now(UTC))
+    await drain_outbox(bot)
     assert any("не откликнулся" in txt for _, txt in bot.sent)
     async with session_scope() as s:
         call = await supports.get_call(s, call_id)
@@ -1007,7 +1123,7 @@ async def test_recruit_picker_goes_to_lead_only(db) -> None:
         await groups.set_recruit_lead(s, g.id, co.id)
         g = await groups.get_group(s, g.id)  # перечитать со свежим lead
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     chats = {chat for chat, _ in bot.sent}
     assert 555 in chats  # picker ушёл lead'у (co-admin)
     assert 100 not in chats  # owner — нет (не lead)
@@ -1124,7 +1240,7 @@ async def test_recruit_threshold_read_from_lead(db) -> None:
         owner = await admins.get_by_tg_id(s, 100)  # lead по fallback
         await admins.set_support_threshold(s, owner.id, 5)  # 3 < 5
     bot = FakeBot()
-    await sched._maybe_recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
+    await _recruit(bot, g, LESSON, LESSON - timedelta(hours=3))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, survey_id)
         assert call is not None and call.status == SupportCallStatus.closed
@@ -1142,7 +1258,7 @@ async def test_picksend_blocked_when_already_handled(db) -> None:
     kb = support_pick_keyboard(ctx.call_id, cands, {ctx.sup_pid})
     bot = FakeBot()
     send = FakeCallback(f"picksend:{ctx.call_id}", user_id=100, reply_markup=kb)
-    await cb_support_pick_send(send, bot)
+    await _pick_send(send, bot)
     assert bot.sent == []
     assert send.answers and "разобрано" in send.answers[0].lower()
 

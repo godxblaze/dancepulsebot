@@ -94,9 +94,9 @@ def _gen_persons(n_male: int, n_female: int, next_tg_id: int) -> list[dict]:
 async def main() -> None:
     random.seed(42)
     await init_db()
-    dev_id = settings.developer_id
-    if dev_id <= 0:
-        raise SystemExit("DEVELOPER_ID не задан в .env")
+    if not settings.developer_ids:
+        raise SystemExit("DEVELOPER_TG_IDS не задан в .env")
+    dev_id = settings.developer_ids[0]
 
     async with session_scope() as s:
         # 0) Чистим всё кроме admins (тебя сохраним)

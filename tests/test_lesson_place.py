@@ -26,6 +26,7 @@ from app.services import surveys as surveys_svc
 from app.services.schedule import upcoming_lessons
 from tests._e2e_helpers import LESSON, TEACHER_TG, cb, join_via_link, make_group
 from tests._fakes import FakeBot, FakeFSM, FakeMessage, SentMessage, fake_user
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 
@@ -219,6 +220,7 @@ async def test_scheduler_poll_uses_override_place(db, monkeypatch) -> None:
 
     bot = _Bot()
     await sched.tick(bot)
+    await drain_outbox(bot)
     poll = [m for m in bot.sent if m.chat_id == 200]
     assert poll, [m.chat_id for m in bot.sent]
     assert "Тверская 10, зал 2" in poll[0].text

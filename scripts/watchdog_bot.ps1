@@ -25,7 +25,10 @@ function Get-EnvValue {
 function Send-DeveloperAlert {
     param([string]$Text)
     $token = Get-EnvValue -Key "BOT_TOKEN"
-    $devId = Get-EnvValue -Key "DEVELOPER_ID"
+    # Phase 10: DEVELOPER_TG_IDS — CSV, может быть несколько; watchdog шлёт
+    # первому (ops-скрипт, не нужен полный fan-out, как у alert_developer в Python).
+    $devIdsRaw = Get-EnvValue -Key "DEVELOPER_TG_IDS"
+    $devId = if ($devIdsRaw) { ($devIdsRaw -split ",")[0].Trim() } else { $null }
     if (-not $token -or -not $devId) { return }
     # Анти-спам: не чаще 1 алерта в час — иначе застрявший бот заваливает
     # разработчика сообщением каждые 5 минут до ручного вмешательства.

@@ -34,6 +34,7 @@ from tests._fakes import (
     SentMessage,
     fake_user,
 )
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 # Занятие через 14 дней, 19:00 МСК — фиксированная календарная дата рано или
@@ -125,6 +126,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _poll_group(bot, group, LESSON, LESSON - timedelta(hours=10))
+    await drain_outbox(bot)
     async with session_scope() as s:
         survey = await surveys_svc.find_attendance_survey(s, group_id, LESSON)
         assert survey is not None
@@ -166,6 +168,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     async with session_scope() as s:
         group = await groups_svc.get_group(s, group_id)
     await _maybe_recruit(bot, group, LESSON, LESSON - timedelta(hours=2))
+    await drain_outbox(bot)
 
     async with session_scope() as s:
         call = await supports_svc.get_call_for_survey(s, survey_id)
@@ -193,6 +196,7 @@ async def test_full_recruit_scenario(db, monkeypatch) -> None:
     await cb_support_pick_send(
         FakeCallback(f"picksend:{call_id}", teacher, message=picker), bot
     )
+    await drain_outbox(bot)
 
     # invitations went out, call moved to open
     for tg_id in (701, 702):

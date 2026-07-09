@@ -7,8 +7,18 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import Counter
 from app.db.models import Gender, Person, SupportCall, SupportCallStatus, SupportClaim, Survey
 from app.services.schedule import as_utc
+
+# Phase 9 observability — сколько раз claim() отклонил тап не из-за повторного
+# тапа тем же человеком, а потому что слот/call уже закрылся до него (реальная
+# гонка, не идемпотентный re-tap). См. claim() ниже.
+_claim_conflicts = Counter()
+
+
+def claim_conflict_count() -> int:
+    return _claim_conflicts.value
 
 # Однопроцессный бот (polling) обрабатывает апдейты конкурентными задачами: два
 # «Приду помочь» на последний слот могут прочитать одинаковый count и перебрать
@@ -129,7 +139,8 @@ async def unclaim(
     Defense-in-depth: отказывает, если занятие уже прошло (`now` — момент,
     которым сам вызывающий уже гейтит хендлер-гвард в cb_support_skip; сервис
     перепроверяет его же, а не доверяет хендлеру вслепую — claim() зеркально
-    гардит по call.status)."""
+    гардит по call.status). `SELECT ... FOR UPDATE` на SupportCall — тот же
+    принцип, что и в claim() (Phase 12): безопасно даже без call_lock."""
     row = (
         await session.execute(
             select(SupportClaim).where(
@@ -140,7 +151,11 @@ async def unclaim(
     ).scalar_one_or_none()
     if row is None:
         return False
-    call = await session.get(SupportCall, call_id)
+    call = (
+        await session.execute(
+            select(SupportCall).where(SupportCall.id == call_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if call is not None:
         survey = await session.get(Survey, call.survey_id)
         if survey is not None and as_utc(survey.lesson_at) <= now:
@@ -278,13 +293,24 @@ async def claim(
     full, the person claimed before, or the call is closed (filled elsewhere or
     dismissed). Closes the call and bumps the person's helped_count when the
     claim succeeds.
-    """
-    call = await session.get(SupportCall, call_id)
+
+    `SELECT ... FOR UPDATE` on the SupportCall row (not `session.get`) — the
+    in-process `call_lock` (see module docstring) only serializes concurrent
+    taps within ONE bot process; this row lock makes `claim()` itself safe
+    even if called without it (defense in depth — Phase 12 load-test replay
+    found bare `claim()` overbooked 17/5 under 30 concurrent callers with no
+    DB-level lock at all)."""
+    call = (
+        await session.execute(
+            select(SupportCall).where(SupportCall.id == call_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if call is None:
         return False, 0, 0
     if call.status not in (SupportCallStatus.pending, SupportCallStatus.open):
         # Закрыт (заполнен либо dismiss'нут лидом) — новые отклики не принимаем.
         filled = await count_claims(session, call_id)
+        _claim_conflicts.inc()
         return False, filled, call.needed
     dup = await session.execute(
         select(SupportClaim).where(
@@ -294,8 +320,9 @@ async def claim(
     )
     filled = await count_claims(session, call_id)
     if dup.scalar_one_or_none() is not None:
-        return False, filled, call.needed
+        return False, filled, call.needed  # тот же человек повторно — не гонка
     if filled >= call.needed:
+        _claim_conflicts.inc()
         return False, filled, call.needed
     # helped_count НЕ инкрементим здесь — он считается по факту явки
     # (SupportClaim.attended), которую preпод отмечает после занятия.

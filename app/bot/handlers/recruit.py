@@ -229,11 +229,11 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
                 # (зеркало гарда в cb_support_join/cb_support_skip).
                 await call.answer("Занятие уже началось — поздно звать", show_alert=True)
                 return
-            invited: list[tuple[int, str]] = []
+            invited: list[tuple[int, int, str]] = []
             for pid in selected:
                 p = await s.get(Person, pid)
                 if p is not None:
-                    invited.append((p.tg_user_id, p.full_name))
+                    invited.append((p.id, p.tg_user_id, p.full_name))
             if not invited:
                 await call.answer("Никого не нашлось", show_alert=True)
                 return
@@ -249,14 +249,19 @@ async def cb_support_pick_send(call: CallbackQuery, bot: Bot) -> None:
                 await schools_svc.get_timezone(s, group.school_id)
                 if group.school_id else None
             )
+            # Atomicity fix (both backend reviews flagged this gap): enqueue the
+            # invites in the SAME transaction as mark_invited() — a crash right
+            # after commit now leaves durable outbox rows the sender worker
+            # will still deliver on restart, instead of a call marked "open"
+            # with zero invites ever sent and nothing to recover it.
+            await send_support_invites(
+                s, call_id=call_id, invited=invited, title=title, place=place,
+                teachers_note=teachers_note, lesson_time=lesson_time,
+                lesson_at=lesson_at, tz=tz_name,
+            )
 
-    await send_support_invites(
-        bot, call_id=call_id, invited=invited, title=title, place=place,
-        teachers_note=teachers_note, lesson_time=lesson_time,
-        lesson_at=lesson_at, tz=tz_name,
-    )
     if call.message:
-        names = ", ".join(n for _, n in invited)
+        names = ", ".join(n for _, _, n in invited)
         await call.message.edit_text(
             f"✅ Позвал: {names}.\nНапишу, как откликнутся."
         )

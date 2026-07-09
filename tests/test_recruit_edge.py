@@ -11,6 +11,7 @@ from app.db.session import session_scope
 from app.scheduler import scheduler as sched
 from app.services import admins as admins_svc
 from app.services import cancellations, groups, persons, supports, surveys
+from tests._outbox_helpers import drain_outbox
 
 _MSK = ZoneInfo("Europe/Moscow")
 
@@ -52,6 +53,16 @@ def freeze(monkeypatch):
     return _set
 
 
+async def _tick(bot) -> None:
+    await sched.tick(bot)
+    await drain_outbox(bot)
+
+
+async def _recruit(bot, group, lesson_at, now) -> None:
+    await sched._maybe_recruit(bot, group, lesson_at, now)
+    await drain_outbox(bot)
+
+
 async def _imbalance(mode: str, *, with_pool: bool = False):
     """Дефицит 3 парней; lead(100) с режимом mode; опционально 2 парня в пуле."""
     async with session_scope() as s:
@@ -91,7 +102,7 @@ async def test_cancelled_lesson_no_poll_recruit_or_reactivation(db, freeze) -> N
         gid = g.id
     freeze(datetime(2026, 5, 25, 9, 0))  # в окне, ~10ч до занятия
     bot = FakeBot()
-    await sched.tick(bot)
+    await _tick(bot)
     assert bot.sent == []  # ни опроса, ни добора, ни реактивации
     async with session_scope() as s:
         assert await surveys.find_attendance_survey(s, gid, MONDAY_LESSON) is None
@@ -103,7 +114,7 @@ async def test_cancelled_lesson_no_poll_recruit_or_reactivation(db, freeze) -> N
 async def test_curated_empty_pool_graceful(db) -> None:
     ctx = await _imbalance("curated")  # пул пуст
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
+    await _recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.pending
@@ -113,12 +124,12 @@ async def test_curated_empty_pool_graceful(db) -> None:
 async def test_escalate_empty_pool_graceful(db) -> None:
     ctx = await _imbalance("escalate")
     # Фаза 1 — pending picker до окна эскалации
-    await sched._maybe_recruit(
+    await _recruit(
         FakeBot(), ctx.group, LESSON_F, LESSON_F - timedelta(hours=20)
     )
     bot = FakeBot()
     # окно эскалации, пустой пул → call open, lead «нет подходящих», без падения
-    await sched._maybe_recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=4))
+    await _recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=4))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call is not None and call.status == SupportCallStatus.open
@@ -131,12 +142,12 @@ async def test_escalate_empty_pool_graceful(db) -> None:
 async def test_auto_top_idempotent_no_double_invite(db) -> None:
     ctx = await _imbalance("auto_top", with_pool=True)
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
+    await _recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
     first = sum(1 for _, t in bot.sent if "Нужна помощь" in t)
     assert first == len(ctx.pool_tgs) and first > 0
     # повторный tick: call уже open → новых приглашений нет
     bot2 = FakeBot()
-    await sched._maybe_recruit(bot2, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
+    await _recruit(bot2, ctx.group, LESSON_F, LESSON_F - timedelta(hours=3))
     assert not any("Нужна помощь" in t for _, t in bot2.sent)
 
 
@@ -145,7 +156,7 @@ async def test_auto_top_idempotent_no_double_invite(db) -> None:
 
 async def test_topup_does_not_flip_when_deficit_changes_side(db) -> None:
     ctx = await _imbalance("curated")  # 1 парень / 4 девушки → нужно 3 парней
-    await sched._maybe_recruit(
+    await _recruit(
         FakeBot(), ctx.group, LESSON_F, LESSON_F - timedelta(hours=20)
     )
     async with session_scope() as s:
@@ -160,7 +171,7 @@ async def test_topup_does_not_flip_when_deficit_changes_side(db) -> None:
             await surveys.record_answer(s, ctx.survey_id, p.id, Answer.yes)
             uid += 1
     bot = FakeBot()
-    await sched._maybe_recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=2))
+    await _recruit(bot, ctx.group, LESSON_F, LESSON_F - timedelta(hours=2))
     async with session_scope() as s:
         call = await supports.get_call_for_survey(s, ctx.survey_id)
         assert call.gender == Gender.male  # не флипнули на девушек

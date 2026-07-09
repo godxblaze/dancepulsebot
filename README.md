@@ -51,42 +51,55 @@ Telegram-бот для танцевальных школ. Делает две в
 │ Telegram     │ ───────────▶ │  aiogram 3 + aiogram-dialog         │
 │ препод+учен  │ ◀── reply ── │  handlers/* (по фичам)              │
 └──────────────┘              │  dialogs/* (wizard'ы: NewGroup,     │
-                              │  EditGroup, Broadcast, …)           │
-                  ┌───────────┴───────────────────────┼─────────────┘
-                  ▼                                   ▼
-          ┌──────────────┐                  ┌──────────────┐
-          │ APScheduler  │                  │  SQLAlchemy  │
-          │ tick / 15мин │                  │   (SQLite)   │
-          └──────────────┘                  └──────────────┘
+       ▲                      │  EditGroup, Broadcast, DevBroadcast)│
+       │                ┌─────┴───────────────┬─────────────────────┘
+       │                ▼                     ▼
+       │        ┌──────────────┐     ┌──────────────────┐
+       │        │ APScheduler  │     │  SQLAlchemy async │
+       │        │ tick / 15мин │     │  (Postgres)        │
+       │        └──────┬───────┘     └─────────┬─────────┘
+       │               │ enqueue               │
+       │               ▼                       │
+       │        ┌──────────────┐                │
+       └────────┤ outbox sender│◀───────────────┘
+     send_message│ worker (rate │  message_outbox (durable queue)
+                 │ limit 25/с)  │
+                 └──────────────┘
 ```
 
-Бот и scheduler — в одном процессе ([app/main.py](app/main.py)). Бизнес-логика в [app/services/](app/services/) переиспользуется хэндлерами и scheduler'ом. Все wizard'ы и multi-step edit-flow — на [aiogram-dialog](https://github.com/Tishka17/aiogram_dialog), короткие message-handler'ы и колбэки — на чистом aiogram FSM.
+Бот, scheduler и outbox sender worker — в одном процессе ([app/main.py](app/main.py)), три независимых asyncio-задачи. Ни один хэндлер/scheduler-тик не шлёт в Telegram напрямую — всё идёт через `message_outbox` ([app/services/outbox.py](app/services/outbox.py)): падение процесса между записью строки и её отправкой не теряет сообщение, воркер (`app/bot/outbox_worker.py`) досылает при следующем старте. Бизнес-логика в [app/services/](app/services/) переиспользуется хэндлерами и scheduler'ом. Все wizard'ы и multi-step edit-flow — на [aiogram-dialog](https://github.com/Tishka17/aiogram_dialog) (FSM-состояние — в Postgres, `app/bot/fsm_storage.py`, переживает рестарт), короткие message-handler'ы и колбэки — на чистом aiogram FSM.
 
-**Модель данных:** `School` — top-level контейнер (ростер, площадки, группы) с членством через `SchoolMember(role)`. `Admin` — препод; здесь же его **личные** настройки автодобора (порог, время разбора, добор остатка, `recruit_mode`) и `support_code` для ссылки-приглашения саппорта. `Person` — человек в школе (имя, пол, счётчик помощи, `last_reactivation_at` для throttle реактивации). `Membership` — person↔group. `SupportPoolEntry(admin_id, person_id, level)` — **личный пул** каждого препода. `GroupAdmin` — ответственные за группу (маршрутизация уведомлений + «Мои группы»); `Group.recruit_lead_admin_id` — куратор добора (его пул/настройки/время). `Survey`/`Response` — опрос и ответы. `SupportCall`/`SupportClaim` — автодобор (с отметкой явки; `picker_chat_id/message_id` — ссылка на recruit-сообщение для живого баланс-бара). `LessonCancellation` — отмена занятия.
+**Модель данных:** `School` — top-level контейнер (ростер, площадки, группы) с членством через `SchoolMember(role)`. `Admin` — препод; здесь же его **личные** настройки автодобора (порог, время разбора, добор остатка, `recruit_mode`) и `support_code` для ссылки-приглашения саппорта. `Person` — человек в школе (имя, пол, счётчик помощи, `last_reactivation_at` для throttle реактивации). `Membership` — person↔group. `SupportPoolEntry(admin_id, person_id, level)` — **личный пул** каждого препода. `GroupAdmin` — ответственные за группу (маршрутизация уведомлений + «Мои группы»); `Group.recruit_lead_admin_id` — куратор добора (его пул/настройки/время). `Survey`/`Response` — опрос и ответы. `SupportCall`/`SupportClaim` — автодобор (с отметкой явки; `picker_chat_id/message_id` — ссылка на recruit-сообщение для живого баланс-бара). `LessonCancellation` — отмена занятия. `MessageOutbox` — durable send-очередь (`status`: pending/sent/terminal_failed), всё исходящее идёт через неё. `Broadcast` — родительская запись рассылки (group-broadcast и глобальная dev-рассылка используют одну и ту же таблицу, `scope_type`/`scope_payload_json` достаточно общие для обеих). `FSMState` — Postgres-backed FSM (заменил файловый JSON-storage). `DevUiPref` — режим `/start` для разработчика (`developer`/`teacher`).
+
+**Разработчику** (`DEVELOPER_TG_IDS` в `.env`, можно несколько через запятую): `/start` показывает dev-меню — 📊 Статистика (кросс-школьный дашборд: outbox-здоровье, длительность последнего тика, live-нагрузка на DB-сессии/callback'и, поверх обычного per-school разреза `/devstats`) и 📣 Глобальная рассылка (всем/подмножеству школ, ученикам или только преподам — с обязательным confirm-экраном, показывающим реальный live-count получателей перед отправкой). 🧑‍🏫 Режим препода (или команда `/devmode`) переключает `/start` на путь обычного препода/онбординга — один в один, без спецкейсов, чтобы дожфудить настоящий UX.
 
 ## Структура
 
 ```
 dancepulsebot/
+├── alembic/         # схема Postgres — миграции, alembic upgrade head при старте
 ├── app/
-│   ├── core/        # config, logging
-│   ├── db/          # модели SQLAlchemy, session (+ PRAGMA foreign_keys, lightweight migrations)
+│   ├── core/        # config (Settings, developer_ids), logging, alerts (dev-алерты + анти-спам), metrics (live-gauges)
+│   ├── db/          # модели SQLAlchemy async, session.py (пул + alembic upgrade head при старте)
 │   ├── bot/
-│   │   ├── bot.py            # build_bot / build_dispatcher (роутеры + setup_dialogs)
+│   │   ├── bot.py            # build_bot / build_dispatcher (роутеры + setup_dialogs + middlewares)
+│   │   ├── outbox_worker.py  # sender worker: разгребает message_outbox, token-bucket rate limit
 │   │   ├── ui.py             # дизайн-система «Pulse»: эмодзи-словарь, plural, card, bar, balance, back_row
 │   │   ├── keyboards.py      # inline и reply-меню + пагинация (мобильная раскладка)
 │   │   ├── states.py         # FSM (JoinFlow, CancelLesson) — короткие
 │   │   ├── utils.py          # QR, имя бота, format helpers (bar — реэкспорт из ui)
 │   │   ├── commands.py       # set_my_commands per-scope
-│   │   ├── fsm_storage.py    # JSON-storage FSM (переживает рестарт)
+│   │   ├── fsm_storage.py    # Postgres-backed FSM (переживает рестарт, per-key locking)
+│   │   ├── middlewares.py    # ClearStaleCancelState, CallbackLatencyMiddleware
 │   │   ├── dialogs/          # aiogram-dialog wizards и FSM на стероидах
 │   │   │   ├── states.py     # все SG для dialog'ов
 │   │   │   ├── new_group.py  # мастер /newgroup (9 окон, максимум кнопок)
 │   │   │   ├── edit_group.py # редактор группы (menu + 10 sub-окон)
-│   │   │   └── misc_dialogs.py # CreateSchool, RenameSchool, EditName, Broadcast
+│   │   │   ├── misc_dialogs.py # CreateSchool, RenameSchool, EditName, Broadcast (в группу)
+│   │   │   └── dev_broadcast.py # глобальная dev-рассылка: scope→audience→text→confirm→progress
 │   │   └── handlers/         # фича-роутеры
 │   │       ├── _access.py    # shared: accessible_group / owned_group / demote
-│   │       ├── admin.py      # /start /help /grant /today /stats /groups + person card, /status и /devstats разработчику
+│   │       ├── admin.py      # /start (+ dev-меню/дашборд/toggle) /help /grant /today /stats /groups, /status /devstats разработчику
 │   │       ├── student.py    # /start с deep-link join, JoinFlow
 │   │       ├── survey.py     # ответы «приду / не приду» (att:*)
 │   │       ├── recruit.py    # picker + invite саппортов
@@ -96,22 +109,24 @@ dancepulsebot/
 │   │       ├── search.py     # «🔍 Поиск» по имени в длинных списках (walk-in / pool / ростер)
 │   │       ├── lesson_place.py # «📍 Зал на занятие» — override места одного занятия
 │   │       └── lesson_cancel.py # 3-шаговая отмена с опц. причиной
-│   ├── scheduler/   # scheduler.py — tick: опросы, авто-сводки, auto-reminders (4h/1h), рекрутинг, stale support pings
-│   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports, schedule
-│   └── main.py
-├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db, restore_db, purge_fakes,
+│   ├── scheduler/   # scheduler.py — tick: опросы, авто-сводки, auto-reminders, рекрутинг, stale-пинги,
+│   │                # tick_metrics/tick_slow лог, outbox-health алерт, FSM TTL cleanup
+│   ├── services/    # admins, schools, groups, persons, venues, surveys, supports, cancellations, exports,
+│   │                # schedule, outbox, broadcasts, dev_broadcast, dev_ui, devstats
+│   └── main.py      # polling + scheduler + outbox sender worker, три asyncio-задачи в одном процессе
+├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db/restore_db (Postgres, PGPASSWORD),
+│                    # purge_fakes, migrate_sqlite_to_postgres (одноразовый), seed_load_test (нагрузочные данные),
 │                    # dev_stats (текстовый срез, в боте то же — /devstats), stats_dashboard (HTML-дашборд:
 │                    # `python -m scripts.stats_dashboard`, `--demo` — сэмпл-данные; тренд отклика,
 │                    # баланс пар, матрица посещаемости; read-only)
-└── tests/           # 386 тестов, pytest + ruff гонятся через scripts/check.ps1
+└── tests/           # 452 теста, pytest + ruff гонятся через scripts/check.ps1
 ```
 
 ## Требования
 
 - Python 3.12+
 - Telegram-бот-токен от [@BotFather](https://t.me/BotFather)
-
-База данных — SQLite, отдельный сервер не нужен; файл создаётся автоматически.
+- Postgres (локально — `docker compose up -d`, см. [docker-compose.yml](docker-compose.yml), или portable-инстанс без прав администратора, см. [DEVELOPMENT.md](DEVELOPMENT.md))
 
 ## Запуск
 
@@ -123,13 +138,13 @@ pip install -e ".[dev]"
 
 # 2. Настроить .env
 copy .env.example .env
-# вписать BOT_TOKEN от @BotFather и свой DEVELOPER_ID (Telegram user_id)
+# вписать BOT_TOKEN от @BotFather, DATABASE_URL (Postgres DSN) и свой DEVELOPER_TG_IDS (Telegram user_id)
 
 # 3. Запустить
 python -m app.main
 ```
 
-SQLite-файл (`dance.sqlite3`) создаётся при первом старте. Логи пишутся в [logs/dance.log](logs/) (rotating, 5 MB × 5 backups).
+Схема применяется автоматически при старте (`alembic upgrade head`). Логи пишутся в [logs/dance.log](logs/) (rotating, 5 MB × 5 backups).
 
 Проверка с двух Telegram-аккаунтов:
 1. Препод: `/start` → `/newgroup` → пройти мастер. Группа создана — есть ссылка и QR-код.
@@ -144,7 +159,7 @@ pytest tests/          # серийно, ~28с
 pytest tests/ -n 8     # параллельно (pytest-xdist), ~12с — так гоняет и scripts/check.ps1
 ```
 
-386 тестов (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — временная, см. [conftest.py](tests/conftest.py)). Схема БД строится один раз на процесс, между тестами данные сносятся одним `executescript`; тесты, мутирующие DDL, помечены `@pytest.mark.schema_mutating`. Не ставь `-n auto` — на многоядерной машине старт десятков воркеров съедает выигрыш. Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
+452 теста (юнит-логика + сквозные сценарии поверх `FakeBot`, БД — Postgres, schema-per-worker, см. [conftest.py](tests/conftest.py)). Схема строится один раз на воркер-процесс, между тестами данные сносятся `TRUNCATE`; тесты, мутирующие DDL, помечены `@pytest.mark.schema_mutating`. Не ставь `-n auto` — на многоядерной машине старт десятков воркеров съедает выигрыш. Прокликивание настоящего бота через живой Telegram — каталог [e2e/](e2e/) (Telethon и Playwright), подробности в [e2e/README.md](e2e/README.md).
 
 ## Roadmap
 
@@ -155,8 +170,9 @@ pytest tests/ -n 8     # параллельно (pytest-xdist), ~12с — так
 
 ## Решения дизайна
 
-- **SQLite, не Postgres.** Утилите не нужна инфраструктура — один файл.
-- **Управление в боте, без веб-панели.** Преподаватель в телефоне.
+- **Postgres, self-hosted.** Изначально был SQLite (один файл, ноль инфраструктуры) — мигрировали, когда рост школ/групп упёрся в её ограничения на конкурентную запись и индексацию. Деплой всё ещё без внешних managed-сервисов (docker-compose на своём VPS).
+- **Outbox, не прямой `bot.send_message`.** Любая отправка — сначала строка в `message_outbox` (в той же транзакции, что бизнес-эффект), затем отдельный sender worker её разгребает с рейт-лимитом. Падение процесса между «решили отправить» и «реально отправили» не теряет сообщение.
+- **Управление в боте, без веб-панели.** Преподаватель в телефоне. Разработчику — тоже в боте (dev-меню/дашборд/рассылка на `/start`), не отдельная админка.
 - **Polling, не webhook.** Не нужен публичный URL.
 - **Бот в личке, не в групповом чате.** Автосбор саппортов невозможен на нативных опросах Telegram — нужен поимённый ростер с ролями и личные сообщения подмножеству людей. Это и есть то, что отличает бота от ручной переклички.
 - **Один `Person`, а не отдельные «ученики» и «саппорты».** Человек может быть и тем и другим одновременно — это флаги, а не разные сущности.

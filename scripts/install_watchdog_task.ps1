@@ -17,10 +17,13 @@ $watchdogScript = Join-Path $proj "scripts\watchdog_bot.ps1"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdogScript`" -TaskName `"$BotTaskName`"" `
     -WorkingDirectory $proj
-# Once + RepetitionInterval/Duration=MaxValue — стандартный идиом для
-# «повторять каждые N минут бесконечно» в Task Scheduler.
+# Once + RepetitionInterval/Duration — идиом «повторять каждые N минут
+# бесконечно» в Task Scheduler. [TimeSpan]::MaxValue тут не работает —
+# сериализуется в XML-Duration вне допустимого диапазона схемы планировщика
+# (Register-ScheduledTask падает «value is incorrectly formatted or out of
+# range»), поэтому берём конечные, но заведомо избыточные 10 лет.
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
 # SYSTEM — та же причина, что и в install_bot_task.ps1: рестарт задачи бота

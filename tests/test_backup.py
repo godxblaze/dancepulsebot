@@ -12,10 +12,31 @@ concurrent xdist workers deadlocked against other workers' schema DDL.
 import os
 import subprocess
 import time
+from urllib.parse import urlsplit
 
 from scripts import backup_db, restore_db
 
-_PG_ADMIN = ["-h", "127.0.0.1", "-U", "postgres"]
+# Host/port/user (+ password via env, never via argv) for creating scratch
+# DBs — reads whatever server TEST_DATABASE_URL points at (docker-compose.test.yml,
+# or the portable-Postgres trust-auth default), never the shared dancepulse_test
+# database itself.
+_admin_parts = urlsplit(
+    backup_db.plain_url(
+        os.environ.get(
+            "TEST_DATABASE_URL", "postgresql+asyncpg://postgres@127.0.0.1:5432/dancepulse_test"
+        )
+    )
+)
+_PG_HOST = _admin_parts.hostname or "127.0.0.1"
+_PG_PORT = _admin_parts.port or 5432
+_PG_USER = _admin_parts.username or "postgres"
+_PG_ENV = {"PGPASSWORD": _admin_parts.password} if _admin_parts.password else {}
+_PG_ADMIN = ["-h", _PG_HOST, "-p", str(_PG_PORT), "-U", _PG_USER]
+# Password embedded in the URL itself (not just passed via env) — code
+# downstream of _make_scratch_db's return value (backup_db.make_backup(),
+# restore_db.main()) re-derives its own PGPASSWORD via dsn_and_pg_env(url),
+# which only finds a password if the DSN carries one.
+_PG_AUTH = f"{_PG_USER}:{_admin_parts.password}@" if _admin_parts.password else f"{_PG_USER}@"
 
 
 def test_dsn_and_pg_env_redacts_password() -> None:
@@ -40,20 +61,23 @@ def _touch(path, days_old: float) -> None:
 
 
 def _make_scratch_db(name: str) -> str:
-    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True)
-    subprocess.run(["createdb", *_PG_ADMIN, name], check=True)
-    url = f"postgresql://postgres@127.0.0.1:5432/{name}"
+    env = {**os.environ, **_PG_ENV}
+    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True, env=env)
+    subprocess.run(["createdb", *_PG_ADMIN, name], check=True, env=env)
+    url = f"postgresql://{_PG_AUTH}{_PG_HOST}:{_PG_PORT}/{name}"
     subprocess.run(
         ["psql", "-c",
          "CREATE TABLE probe (id serial primary key, note text); "
          "INSERT INTO probe (note) VALUES ('seed')", url],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=env,
     )
     return url
 
 
 def _drop_scratch_db(name: str) -> None:
-    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True)
+    subprocess.run(
+        ["dropdb", "--if-exists", *_PG_ADMIN, name], check=True, env={**os.environ, **_PG_ENV}
+    )
 
 
 def test_prune_keeps_min_recent_regardless_of_age(tmp_path, monkeypatch) -> None:
@@ -139,12 +163,13 @@ def test_restore_round_trip_into_scratch_database(tmp_path, monkeypatch) -> None
     target_db = f"dancepulse_restore_scratch_{os.getpid()}"
     try:
         dst = backup_db.make_backup()
-        subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, target_db], check=True)
-        subprocess.run(["createdb", *_PG_ADMIN, target_db], check=True)
-        target_url = f"postgresql://postgres@127.0.0.1:5432/{target_db}"
+        env = {**os.environ, **_PG_ENV}
+        subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, target_db], check=True, env=env)
+        subprocess.run(["createdb", *_PG_ADMIN, target_db], check=True, env=env)
+        target_url = f"postgresql://{_PG_AUTH}{_PG_HOST}:{_PG_PORT}/{target_db}"
 
         restore_db.main(str(dst), target_url=target_url, sanity_table="probe")
-        count = restore_db._row_count(target_url, "probe")
+        count = restore_db._row_count(target_url, "probe", _PG_ENV)
         assert count == 1
     finally:
         _drop_scratch_db(source_db)

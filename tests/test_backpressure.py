@@ -17,26 +17,47 @@ import asyncio
 import os
 import random
 import subprocess
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models import Membership
 from app.main import UPDATE_CONCURRENCY_LIMIT
+from scripts import backup_db
 from scripts.seed_load_test import Scale, seed
 
-_PG_ADMIN = ["-h", "127.0.0.1", "-U", "postgres"]
+# Host/port/user (+ password via env/DSN, never via argv) for creating scratch
+# DBs — reads whatever server TEST_DATABASE_URL points at (docker-compose.test.yml,
+# or the portable-Postgres trust-auth default), never the shared dancepulse_test
+# database itself. Same reasoning as tests/test_backup.py.
+_admin_parts = urlsplit(
+    backup_db.plain_url(
+        os.environ.get(
+            "TEST_DATABASE_URL", "postgresql+asyncpg://postgres@127.0.0.1:5432/dancepulse_test"
+        )
+    )
+)
+_PG_HOST = _admin_parts.hostname or "127.0.0.1"
+_PG_PORT = _admin_parts.port or 5432
+_PG_USER = _admin_parts.username or "postgres"
+_PG_ENV = {"PGPASSWORD": _admin_parts.password} if _admin_parts.password else {}
+_PG_ADMIN = ["-h", _PG_HOST, "-p", str(_PG_PORT), "-U", _PG_USER]
+_PG_AUTH = f"{_PG_USER}:{_admin_parts.password}@" if _admin_parts.password else f"{_PG_USER}@"
 BURST_SIZE = 200
 
 
 def _make_scratch_db(name: str) -> str:
-    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True)
-    subprocess.run(["createdb", *_PG_ADMIN, name], check=True)
-    return f"postgresql+asyncpg://postgres@127.0.0.1:5432/{name}"
+    env = {**os.environ, **_PG_ENV}
+    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True, env=env)
+    subprocess.run(["createdb", *_PG_ADMIN, name], check=True, env=env)
+    return f"postgresql+asyncpg://{_PG_AUTH}{_PG_HOST}:{_PG_PORT}/{name}"
 
 
 def _drop_scratch_db(name: str) -> None:
-    subprocess.run(["dropdb", "--if-exists", *_PG_ADMIN, name], check=True)
+    subprocess.run(
+        ["dropdb", "--if-exists", *_PG_ADMIN, name], check=True, env={**os.environ, **_PG_ENV}
+    )
 
 
 async def _simulate_update(sessionmaker, semaphore, group_ids: list[int]) -> None:

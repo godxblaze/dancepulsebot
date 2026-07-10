@@ -3,15 +3,14 @@
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-# Postgres-миграция (2026-07-09): backup/restore/backpressure-тесты шеллятся
-# в pg_dump/pg_restore/psql/createdb/dropdb напрямую. Этот скрипт запускается
-# Stop-hook'ом в СВОЁМ процессе — не наследует PATH, который агент экспортил
-# в своей bash-сессии, поэтому без этого блока они падали с обманчивым
-# WinError 2 (см. память postgres-local-dev-no-admin). Portable-инстанс —
-# единственный доступный без прав администратора на этой машине.
-$pgBin = Join-Path (Split-Path -Parent $PSScriptRoot) ".pgportable\pgsql\bin"
-if (Test-Path $pgBin) {
-    $env:PATH = "$pgBin;$env:PATH"
+# Postgres-миграция (2026-07-10): portable-инстанс снесён, Postgres теперь
+# в Docker (docker-compose.yml на 5432, docker-compose.test.yml на 5433, см.
+# память postgres-local-dev-no-admin). Этот скрипт запускается Stop-hook'ом
+# в СВОЁМ процессе — не наследует TEST_DATABASE_URL, который агент мог
+# экспортить в своей bash-сессии, иначе conftest.py падает на дефолтном
+# postgres@127.0.0.1:5432 без пароля (InvalidPasswordError).
+if (-not $env:TEST_DATABASE_URL) {
+    $env:TEST_DATABASE_URL = "postgresql+asyncpg://dancepulse_test:dancepulse_test@127.0.0.1:5433/dancepulse_test"
 }
 
 $ruffOut = & python -m ruff check app scripts tests 2>&1
@@ -34,12 +33,16 @@ $mypyOut = & python -m mypy app/bot/dialogs app/bot/handlers --ignore-missing-im
 $mypyCode = $LASTEXITCODE
 
 if ($ruffCode -ne 0 -or $pytestCode -ne 0) {
+    # Урезаем вывод: полный ruff+pytest на провале раздувал контекст Claude
+    # на сотни тысяч токенов за один Stop (падал каждый раз из-за не
+    # выставленного TEST_DATABASE_URL, см. правку выше) — держим сводку
+    # компактной, детали смотреть вручную через `python -m pytest`.
     $err = [Console]::Error
     $err.WriteLine("Dance Pulse: проверка не прошла (ruff=$ruffCode, pytest=$pytestCode) — почини перед завершением.")
-    $err.WriteLine("--- ruff ---")
-    $err.WriteLine(($ruffOut | Out-String))
-    $err.WriteLine("--- pytest ---")
-    $err.WriteLine(($pytestOut | Out-String))
+    $err.WriteLine("--- ruff (последние 60 строк) ---")
+    $err.WriteLine((($ruffOut | Select-Object -Last 60) | Out-String))
+    $err.WriteLine("--- pytest (последние 60 строк) ---")
+    $err.WriteLine((($pytestOut | Select-Object -Last 60) | Out-String))
     exit 2
 }
 if ($mypyCode -ne 0) {

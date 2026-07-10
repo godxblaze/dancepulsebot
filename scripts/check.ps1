@@ -13,6 +13,16 @@ if (-not $env:TEST_DATABASE_URL) {
     $env:TEST_DATABASE_URL = "postgresql+asyncpg://dancepulse_test:dancepulse_test@127.0.0.1:5433/dancepulse_test"
 }
 
+# Docker не публикует client-бинарники (pg_dump/pg_restore/psql/createdb/
+# dropdb) на хост — test_backup.py и test_backpressure.py шеллятся в них
+# напрямую. Поставлен отдельный client-only PostgreSQL 16 (winget
+# PostgreSQL.PostgreSQL.16, версия сверена с postgres:16-alpine из
+# docker-compose*.yml), нужен в PATH так же, как раньше был portable-инстанс.
+$pgBin = "C:\Program Files\PostgreSQL\16\bin"
+if ((Test-Path $pgBin) -and ($env:PATH -notlike "*$pgBin*")) {
+    $env:PATH = "$pgBin;$env:PATH"
+}
+
 $ruffOut = & python -m ruff check app scripts tests 2>&1
 $ruffCode = $LASTEXITCODE
 # Полный суит — параллельно через pytest-xdist (в dev-deps). Фиксированные 8

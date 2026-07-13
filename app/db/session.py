@@ -53,6 +53,14 @@ def _alembic_upgrade_head() -> None:
     cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_PROJECT_ROOT / "alembic"))
     command.upgrade(cfg, "head")
+    # alembic/env.py вызывает fileConfig(alembic.ini) — тот пересобирает root-логгер
+    # по секции [logger_root] (level=WARNING, handlers=console), стирая
+    # RotatingFileHandler + INFO-уровень, выставленные setup_logging() при
+    # старте. Без этого восстановления все .info() после первого init_db()
+    # молча исчезают, dance.log обрывается на строчках alembic-миграции.
+    from app.core.logging import setup_logging
+
+    setup_logging()
 
 
 async def init_db() -> None:

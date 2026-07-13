@@ -115,7 +115,7 @@ dancepulsebot/
 │   │                # schedule, outbox, broadcasts, dev_broadcast, dev_ui, devstats
 │   └── main.py      # polling + scheduler + outbox sender worker, три asyncio-задачи в одном процессе
 ├── scripts/         # demo_seed, demo_reset, seed_test_db, trigger_poll, backup_db/restore_db (Postgres, PGPASSWORD),
-│                    # purge_fakes, migrate_sqlite_to_postgres (одноразовый), seed_load_test (нагрузочные данные),
+│                    # purge_fakes, seed_load_test (нагрузочные данные),
 │                    # dev_stats (текстовый срез, в боте то же — /devstats), stats_dashboard (HTML-дашборд:
 │                    # `python -m scripts.stats_dashboard`, `--demo` — сэмпл-данные; тренд отклика,
 │                    # баланс пар, матрица посещаемости; read-only)

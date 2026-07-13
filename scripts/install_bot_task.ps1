@@ -10,7 +10,14 @@ $ErrorActionPreference = "Stop"
 
 $proj = (Resolve-Path "$PSScriptRoot\..").Path
 $py = Join-Path $proj ".venv\Scripts\python.exe"
-if (-not (Test-Path $py)) { $py = "python" }
+if (-not (Test-Path $py)) {
+    # Без venv резолвим абсолютный путь сейчас (в интерактивной сессии
+    # админа, где python есть в PATH) — задача бежит под SYSTEM, чей
+    # системный PATH может не включать пользовательский python (был баг:
+    # голое "python" резолвилось только для интерактивного пользователя).
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    $py = if ($cmd) { $cmd.Source } else { "python" }
+}
 
 $action  = New-ScheduledTaskAction -Execute $py -Argument "-m app.main" -WorkingDirectory $proj
 $trigger = New-ScheduledTaskTrigger -AtStartup

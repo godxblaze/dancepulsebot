@@ -95,14 +95,14 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     admin tg_ids для уведомления — вызывающий шлёт его через свой bot
     (см. group_admin_tg_ids).
 
-    Осознанно НЕ взято под supports_svc.call_lock: эта функция мутирует call в
-    УЖЕ открытой сессии вызывающего (владеет ей не она), а call_lock обязан
-    покрывать сессию целиком вплоть до commit — открыть здесь свою залоченную
-    session_scope нельзя: SQLite (один writer) тогда упирается в lock вызывающей
-    незакоммиченной транзакции и падает по busy_timeout. Остаточная гонка (админ
-    правит расписание в то же мгновение, что саппорт тапает join/dismiss по
-    этому call) не сериализована этим путём — узкое окно, редкий триггер
-    (осознанно принято, по аналогии с pilot_risks в docs/PILOT_AUDIT_2026-07-02.md)."""
+    Закрытие самого call'а вынесено в отдельную залоченную транзакцию
+    (`_close_call_locked`) вместо мутации в уже открытой сессии вызывающего:
+    call_lock должен покрывать сессию целиком вплоть до commit, а открыть
+    здесь свою session_scope поверх незакоммиченной транзакции вызывающего на
+    SQLite было нельзя (single-writer упирался в busy_timeout). На Postgres
+    (MVCC, отдельное соединение) это ограничение снято — тап join/dismiss по
+    этому call теперь сериализован с его закрытием тем же call_lock, что и
+    сами tap-хендлеры (см. app/bot/handlers/recruit.py)."""
     from app.db.models import SupportCallStatus
     from app.services import cancellations as cancellations_svc
     from app.services import place_overrides as overrides_svc
@@ -111,18 +111,37 @@ async def close_orphaned_survey(session: AsyncSession, group: Group) -> list[int
     from app.services.schedule import utc_now
 
     closed = await surveys_svc.close_open_surveys_for_group(session, group.id)
+    call_ids_to_close = []
     for survey_id in closed:
         call = await supports_svc.get_call_for_survey(session, survey_id)
         if call is not None and call.status in (
             SupportCallStatus.pending, SupportCallStatus.open,
         ):
-            call.status = SupportCallStatus.closed
-    await session.flush()
+            call_ids_to_close.append(call.id)
     await cancellations_svc.delete_future(session, group.id, utc_now())
     await overrides_svc.delete_future(session, group.id, utc_now())
+    for call_id in call_ids_to_close:
+        await _close_call_locked(call_id)
     if not closed or group.school_id is None:
         return []
     return await group_admin_tg_ids(session, group.id, group.school_id)
+
+
+async def _close_call_locked(call_id: int) -> None:
+    """Закрыть SupportCall под тем же call_lock, что tap-хендлеры добора —
+    отдельной транзакцией, свежий re-fetch внутри лока вместо устаревшего
+    значения из чужой сессии (см. close_orphaned_survey)."""
+    from app.db.models import SupportCall, SupportCallStatus
+    from app.db.session import session_scope
+    from app.services import supports as supports_svc
+
+    async with supports_svc.call_lock(call_id):
+        async with session_scope() as s:
+            call = await s.get(SupportCall, call_id)
+            if call is not None and call.status in (
+                SupportCallStatus.pending, SupportCallStatus.open,
+            ):
+                call.status = SupportCallStatus.closed
 
 
 async def update_group(

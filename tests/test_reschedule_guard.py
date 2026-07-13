@@ -3,8 +3,10 @@
 (пересчитываемый UTC-инстант) меняется, старый опрос закрывается и
 ответственные уведомляются; будущие LessonCancellation по старому расписанию
 подчищаются, чтобы не «воскреснуть» под новым."""
+import asyncio
 from datetime import UTC, datetime, timedelta
 
+from app.bot.handlers.recruit import cb_support_join
 from app.bot.handlers.school import cb_school_tz_set
 from app.db.models import Answer, Gender, SupportCallStatus, SurveyKind, SurveyStatus
 from app.db.session import session_scope
@@ -106,6 +108,42 @@ async def test_lesson_time_change_closes_live_support_call(db) -> None:
     async with session_scope() as s:
         call = await supports.get_call(s, call_id)
         assert call.status == SupportCallStatus.closed
+
+
+async def test_reschedule_closing_call_races_join_tap_consistently(db) -> None:
+    """Гонка #9 аудита: reschedule закрывает call через _close_call_locked под
+    тем же call_lock, что и tap-хендлеры — конкурентный join на этот call больше
+    не гонится вслепую с закрытием (было НЕ взято под call_lock, узкое окно).
+    Независимо от того, кто выигрывает гонку, итог согласован: либо join успел
+    записать саппорта до закрытия (claim остаётся, call закрыт следом), либо
+    close выиграл первым и join увидел уже закрытый call и отклонил тап — но
+    никогда не остаётся полуприменённого состояния и гонка не роняет тест
+    ошибкой блокировки БД (то, что раньше было architecturally невозможно
+    сериализовать на SQLite)."""
+    gid, _sid, survey_id = await _group_with_open_survey()
+    async with session_scope() as s:
+        call = await supports.create_call(
+            s, survey_id, Gender.male, 2, SupportCallStatus.open
+        )
+        call_id = call.id
+        group = await groups.get_group(s, gid)
+        sup, _ = await persons.add_to_group(s, group, 701, "u", "Support")
+        await persons.set_gender(s, sup.id, Gender.male)
+    bot = FakeBot()
+    join_msg = SentMessage(bot, 701, "")
+    async with session_scope() as s:
+        group = await groups.get_group(s, gid)
+        await asyncio.gather(
+            groups.update_group(s, group, lesson_time="20:00"),
+            cb_support_join(cb(f"sup:join:{call_id}", 701, message=join_msg), bot),
+        )
+    async with session_scope() as s:
+        call = await supports.get_call(s, call_id)
+        claimed = await supports.count_claims(s, call_id)
+    assert call.status == SupportCallStatus.closed  # reschedule всегда закрывает
+    assert claimed in (0, 1)  # либо join не успел (0), либо успел ровно раз (1)
+    if claimed == 1:
+        assert "запис" in join_msg.text.lower()  # успевший join получил подтверждение
 
 
 async def test_unrelated_field_change_does_not_trigger_guard(db) -> None:

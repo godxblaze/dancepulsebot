@@ -170,6 +170,7 @@ async def _render_start(target: Message, tg, dialog_manager: DialogManager) -> N
         if ui_mode == "developer":
             await target.answer(
                 f"{ui.title(ui.BRAND, 'Dev-режим')}\n\nВыбери, что показать.",
+                parse_mode=ParseMode.HTML,
                 reply_markup=developer_menu_keyboard(),
             )
             return
@@ -273,6 +274,7 @@ async def cb_dev_menu(call: CallbackQuery) -> None:
         return
     await call.message.edit_text(
         f"{ui.title(ui.BRAND, 'Dev-режим')}\n\nВыбери, что показать.",
+        parse_mode=ParseMode.HTML,
         reply_markup=developer_menu_keyboard(),
     )
     await call.answer()

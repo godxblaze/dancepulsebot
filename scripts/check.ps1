@@ -25,12 +25,16 @@ if ((Test-Path $pgBin) -and ($env:PATH -notlike "*$pgBin*")) {
 
 $ruffOut = & python -m ruff check app scripts tests 2>&1
 $ruffCode = $LASTEXITCODE
-# Полный суит — параллельно через pytest-xdist (в dev-deps). Фиксированные 8
-# воркеров, не "auto": на многоядерной машине auto поднимает десятки воркеров
-# и их старт съедает весь выигрыш. Без плагина — обычный серийный прогон.
+# Полный суит — параллельно через pytest-xdist (в dev-deps). Фиксированные 4
+# воркера, не "auto": на многоядерной машине auto поднимает десятки воркеров
+# и их старт съедает весь выигрыш. Было 8 — снижено после того, как поймали
+# execnet-флейки на Windows (node down / cannot send, already closed —
+# хронический нерешённый баг execnet/xdist на Windows, не версии проекта:
+# pytest-dev/pytest#3216, #2223, pytest-dev/execnet#55, pytest-xdist#872/#1094).
+# Меньше воркеров — реже проявляется. Без плагина — обычный серийный прогон.
 & python -c "import xdist" 2>$null
 if ($LASTEXITCODE -eq 0) {
-    $pytestOut = & python -m pytest -q -n 8 2>&1
+    $pytestOut = & python -m pytest -q -n 4 2>&1
 } else {
     $pytestOut = & python -m pytest -q 2>&1
 }
